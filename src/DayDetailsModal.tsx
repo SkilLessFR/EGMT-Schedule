@@ -12,15 +12,15 @@ import {
   shiftHours,
   shiftLabel,
   solidColorFor,
+  GLASS_SHEET,
 } from './scheduleUtils';
 
-// Tuning constants for the gesture system.
-const AXIS_LOCK_THRESHOLD = 8; // px of movement before we decide horizontal vs vertical
-const SWIPE_COMMIT_THRESHOLD = 70; // px of horizontal drag needed to change day
-const DISMISS_COMMIT_THRESHOLD = 90; // px of vertical drag needed to close
-const SWIPE_EXIT_DURATION = 200; // ms for the animated day-change slide
-const WHEEL_DELTA_THRESHOLD = 24; // trackpad horizontal-scroll sensitivity
-const WHEEL_COOLDOWN = 500; // ms between trackpad-triggered day changes
+// Tuning constants for the gesture system (unchanged from the day-swipe fix).
+const AXIS_LOCK_THRESHOLD = 8;
+const SWIPE_COMMIT_THRESHOLD = 70;
+const DISMISS_COMMIT_THRESHOLD = 90;
+const SWIPE_EXIT_DURATION = 200;
+const WHEEL_DELTA_THRESHOLD = 24;
 
 type DragState = { x: number; y: number; axis: 'x' | 'y' | null };
 
@@ -30,7 +30,7 @@ type DragState = { x: number; y: number; axis: 'x' | 'y' | null };
 
 const EmployeeList = memo(function EmployeeList({ employees }: { employees: { name: string; suffix?: string }[] }) {
   return <div className="space-y-1.5">
-    {employees.map(({ name, suffix }) => <div key={`${name}-${suffix ?? ''}`} className="flex items-center gap-3 rounded-2xl bg-zinc-100/70 p-2.5 dark:bg-zinc-800/60">
+    {employees.map(({ name, suffix }) => <div key={`${name}-${suffix ?? ''}`} className="flex items-center gap-3 rounded-[18px] bg-zinc-100/70 p-2.5 dark:bg-zinc-800/60">
       <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-white text-[11px] font-bold text-zinc-600 shadow-sm dark:bg-zinc-700 dark:text-zinc-100">{initials(name)}</span>
       <span className="text-[15px] font-medium">{name}{suffix ? <span className="text-zinc-400 dark:text-zinc-500"> · {suffix}</span> : ''}</span>
     </div>)}
@@ -38,7 +38,7 @@ const EmployeeList = memo(function EmployeeList({ employees }: { employees: { na
 });
 
 const WorkingSection = memo(function WorkingSection({ group }: { group: ReturnType<typeof groupForShift> }) {
-  return <section className="rounded-2xl bg-zinc-50/80 p-4 dark:bg-white/[0.04]">
+  return <section className="rounded-[20px] bg-zinc-50/80 p-4 ring-1 ring-black/[0.03] dark:bg-white/[0.04] dark:ring-white/[0.05]">
     <h3 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Employees on This Shift</h3>
     {group && group.employees.length > 0 ? <div className="mt-3">
       <EmployeeList employees={group.employees}/>
@@ -47,7 +47,7 @@ const WorkingSection = memo(function WorkingSection({ group }: { group: ReturnTy
 });
 
 const AllShiftsSection = memo(function AllShiftsSection({ groups, expanded, onToggle }: { groups: AllShiftsGroup[]; expanded: boolean; onToggle: () => void }) {
-  return <section className="rounded-2xl bg-zinc-50/80 dark:bg-white/[0.04]">
+  return <section className="rounded-[20px] bg-zinc-50/80 ring-1 ring-black/[0.03] dark:bg-white/[0.04] dark:ring-white/[0.05]">
     <button
       onClick={onToggle}
       className="flex min-h-11 w-full items-center justify-between px-4 py-3 text-left transition active:bg-zinc-950/[0.03] dark:active:bg-white/[0.05]"
@@ -56,7 +56,6 @@ const AllShiftsSection = memo(function AllShiftsSection({ groups, expanded, onTo
       <span className="text-[15px] font-semibold">{expanded ? 'Hide all shifts' : 'Show all shifts'}</span>
       <ChevronDown className={`size-4 shrink-0 text-zinc-400 transition-transform duration-300 ${expanded ? 'rotate-180' : ''}`}/>
     </button>
-    {/* CSS-grid trick: animates smoothly to the content's natural height without JS measuring. */}
     <div className={`grid transition-[grid-template-rows] duration-300 ease-out ${expanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
       <div className="overflow-hidden">
         <div className="space-y-4 px-4 pb-4">
@@ -103,8 +102,6 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
     [event],
   );
 
-  // "Show all shifts" collapses again each time the sheet is freshly opened,
-  // but stays as-is while swiping/navigating between days within one session.
   const [expanded, setExpanded] = useState(false);
   const wasOpen = useRef(false);
   useEffect(() => {
@@ -112,17 +109,14 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
     wasOpen.current = open;
   }, [open]);
 
-  // ---- Gesture system: one pointer session, axis-locked to either the
-  // vertical dismiss-drag or the horizontal day-swipe. ----
-  // ---- Gesture system: one pointer session, axis-locked to either the
-  // vertical dismiss-drag or the horizontal day-swipe. ----
+  // ---- Gesture system (unchanged): one pointer session, axis-locked to
+  // either the vertical dismiss-drag or the horizontal day-swipe. ----
   const [drag, setDrag] = useState<DragState>({ x: 0, y: 0, axis: null });
   const [isDragging, setIsDragging] = useState(false);
-  const [isAnimating, setIsAnimating] = useState(false); // programmatic day-change slide in progress
-  const [noTransition, setNoTransition] = useState(false); // suppress transition for the instant reset frame
+  const [noTransition, setNoTransition] = useState(false);
   const dragStart = useRef<{ x: number; y: number; scrollTop: number } | null>(null);
-  const dragRef = useRef<DragState>({ x: 0, y: 0, axis: null }); // mirrors `drag` for reads outside React's render cycle
-  const animatingRef = useRef(false); // hard guard: prevents commitSwipe from ever double-firing
+  const dragRef = useRef<DragState>({ x: 0, y: 0, axis: null });
+  const animatingRef = useRef(false);
   const contentRef = useRef<HTMLDivElement>(null);
 
   const setDragBoth = useCallback((next: DragState) => {
@@ -131,16 +125,14 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
   }, []);
 
   const commitSwipe = useCallback((direction: 'next' | 'prev') => {
-    if (animatingRef.current) return; // guard against any double-invocation, from any source
+    if (animatingRef.current) return;
     animatingRef.current = true;
-    setIsAnimating(true);
     setDragBoth({ x: direction === 'next' ? -window.innerWidth : window.innerWidth, y: 0, axis: 'x' });
     window.setTimeout(() => {
       if (direction === 'next') onNext(); else onPrev();
       setNoTransition(true);
       setDragBoth({ x: 0, y: 0, axis: null });
       requestAnimationFrame(() => requestAnimationFrame(() => setNoTransition(false)));
-      setIsAnimating(false);
       animatingRef.current = false;
     }, SWIPE_EXIT_DURATION);
   }, [onNext, onPrev, setDragBoth]);
@@ -185,7 +177,7 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
 
     const handleUp = () => {
       setIsDragging(false);
-      const final = dragRef.current; // read once, decide once — no side effects inside setState
+      const final = dragRef.current;
 
       if (final.axis === 'x') {
         if (final.x <= -SWIPE_COMMIT_THRESHOLD && canGoNext) {
@@ -213,12 +205,10 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
     };
   }, [isDragging, canGoPrev, canGoNext, onClose, commitSwipe, setDragBoth]);
 
-  // Reset drag state whenever the sheet closes.
   useEffect(() => {
     if (!open) { setDragBoth({ x: 0, y: 0, axis: null }); setIsDragging(false); }
   }, [open, setDragBoth]);
 
-  // Keyboard support (desktop): arrows to navigate, escape to close.
   useEffect(() => {
     if (!open) return;
     const handleKey = (e: KeyboardEvent) => {
@@ -230,28 +220,22 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
     return () => window.removeEventListener('keydown', handleKey);
   }, [open, canGoPrev, canGoNext, onPrev, onNext, onClose]);
 
-  // Trackpad support: two-finger horizontal swipe maps to wheel deltaX.
-  const wheelLockRef = useRef(false);
   const handleWheel = useCallback((e: React.WheelEvent) => {
-    if (wheelLockRef.current || isAnimating) return;
+    if (animatingRef.current) return;
     if (Math.abs(e.deltaX) < WHEEL_DELTA_THRESHOLD || Math.abs(e.deltaX) < Math.abs(e.deltaY)) return;
-    if (e.deltaX > 0 && canGoNext) { wheelLockRef.current = true; commitSwipe('next'); }
-    else if (e.deltaX < 0 && canGoPrev) { wheelLockRef.current = true; commitSwipe('prev'); }
-    else return;
-    window.setTimeout(() => { wheelLockRef.current = false; }, SWIPE_EXIT_DURATION + WHEEL_COOLDOWN);
-  }, [canGoNext, canGoPrev, isAnimating, commitSwipe]);
+    if (e.deltaX > 0 && canGoNext) commitSwipe('next');
+    else if (e.deltaX < 0 && canGoPrev) commitSwipe('prev');
+  }, [canGoNext, canGoPrev, commitSwipe]);
 
   const toggleExpanded = useCallback(() => setExpanded((v) => !v), []);
   const noTransitionOrDragging = isDragging || noTransition;
 
   return <>
-    {/* Backdrop */}
     <div
       onClick={onClose}
       className={`fixed inset-0 z-10 bg-black/30 backdrop-blur-sm transition-opacity duration-300 ${open ? 'opacity-100' : 'pointer-events-none opacity-0'}`}
     />
 
-    {/* Sheet */}
     <div
       role="dialog"
       aria-modal="true"
@@ -260,14 +244,13 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
         transform: open ? `translateY(${drag.axis === 'y' ? drag.y : 0}px)` : 'translateY(100%)',
         transition: noTransitionOrDragging ? 'none' : 'transform 300ms cubic-bezier(0.22,1,0.36,1)',
       }}
-      className={`fixed inset-x-0 bottom-0 z-20 mx-auto flex max-h-[85vh] w-full max-w-[430px] flex-col overflow-hidden rounded-t-[28px] bg-white/95 shadow-[0_-8px_40px_rgba(0,0,0,0.25)] backdrop-blur-xl dark:bg-zinc-900/95 ${open ? '' : 'pointer-events-none'} ${isDragging ? 'select-none' : ''}`}
+      className={`fixed inset-x-0 bottom-0 z-20 mx-auto flex max-h-[92vh] w-full max-w-[430px] flex-col overflow-hidden ${GLASS_SHEET} ${open ? '' : 'pointer-events-none'} ${isDragging ? 'select-none' : ''}`}
     >
       <div className="flex shrink-0 flex-col items-center pb-2 pt-2.5">
         <div className="h-1.5 w-10 rounded-full bg-zinc-300 dark:bg-zinc-600"/>
       </div>
 
       {event && <>
-        {/* Fixed prev/next toolbar — does not slide with the day content */}
         <div className="flex shrink-0 items-center justify-between px-2 pb-1">
           <button
             onClick={onPrev}
@@ -288,7 +271,6 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
           </button>
         </div>
 
-        {/* Swipeable content */}
         <div
           ref={contentRef}
           onWheel={handleWheel}
@@ -301,7 +283,7 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
           className="overflow-y-auto px-5 pt-1"
         >
           <p className="text-[13px] font-medium text-zinc-400 dark:text-zinc-500">{fullDateLabel}</p>
-          <div className={`my-4 rounded-[24px] p-6 text-center ${solidColorFor(event.shift)}`}>
+          <div className={`my-4 rounded-[28px] p-6 text-center shadow-[0_10px_26px_-12px_rgba(0,0,0,0.35)] ${solidColorFor(event.shift)}`}>
             <div className="text-[34px] font-bold leading-none tracking-tight">{shiftLabel(event.shift)}</div>
             <div className="mt-2 text-[15px] font-semibold opacity-90">{shiftHours(event.shift)}</div>
           </div>
