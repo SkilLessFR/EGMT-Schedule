@@ -138,3 +138,18 @@ export function eventForIso(roster: RosterData, employee: string, isoDate: strin
   const shift = roster.rows[employee]?.[isoDate] ?? 'OFF';
   return { id: `${employee}-${isoDate}`, isoDate, shift, date: new Date(isoDate) };
 }
+
+// ---------------------------------------------------------------------------
+// "Liquid Glass" surface tokens — shared material used by App.tsx (nav bar,
+// cards) and DayDetailsModal.tsx (sheet) so the frosted-glass look stays
+// consistent instead of drifting between hand-written Tailwind strings.
+// ---------------------------------------------------------------------------
+
+export const GLASS_CARD =
+  'rounded-[28px] bg-white/70 shadow-[0_1px_0_0_rgba(255,255,255,0.6)_inset,0_10px_30px_-12px_rgba(0,0,0,0.14)] ring-1 ring-black/[0.04] backdrop-blur-xl dark:bg-white/[0.05] dark:shadow-[0_1px_0_0_rgba(255,255,255,0.06)_inset,0_10px_30px_-12px_rgba(0,0,0,0.55)] dark:ring-white/[0.08]';
+
+export const GLASS_NAV =
+  'rounded-[28px] bg-white/50 shadow-[0_1px_0_0_rgba(255,255,255,0.6)_inset,0_14px_38px_-10px_rgba(0,0,0,0.2)] ring-1 ring-black/[0.05] backdrop-blur-2xl dark:bg-white/[0.06] dark:shadow-[0_1px_0_0_rgba(255,255,255,0.07)_inset,0_14px_38px_-10px_rgba(0,0,0,0.6)] dark:ring-white/[0.1]';
+
+export const GLASS_SHEET =
+  'rounded-t-[32px] bg-white/90 shadow-[0_1px_0_0_rgba(255,255,255,0.7)_inset,0_-24px_60px_-18px_rgba(0,0,0,0.32)] ring-1 ring-black/[0.05] backdrop-blur-2xl dark:bg-zinc-900/90 dark:shadow-[0_1px_0_0_rgba(255,255,255,0.05)_inset,0_-24px_60px_-18px_rgba(0,0,0,0.65)] dark:ring-white/[0.08]';
