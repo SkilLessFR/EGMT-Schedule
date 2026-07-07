@@ -1,50 +1,21 @@
-import type React from 'react';
-import { memo, useEffect, useMemo, useRef, useState, useCallback } from 'react';
+// App.tsx
+import { useEffect, useMemo, useState, useCallback } from 'react';
 import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, Moon, Search, Settings2, Sun } from 'lucide-react';
-import type { RosterData, ShiftColor, ShiftEvent } from './types';
+import type { RosterData, ShiftEvent } from './types';
+import { colorFor, shiftKey, shiftLabel, shiftHourValues, buildRosterIndex, eventForIso } from './scheduleUtils';
+import DayDetailsModal from './DayDetailsModal';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-// Soft, translucent iOS-style pill colors for calendar cells.
-const shiftColors: Record<string, ShiftColor> = {
-  MID: { bg: 'bg-blue-500/15 dark:bg-blue-400/20', text: 'text-blue-600 dark:text-blue-300', border: 'border-transparent' },
-  A: { bg: 'bg-orange-500/15 dark:bg-orange-400/20', text: 'text-orange-600 dark:text-orange-300', border: 'border-transparent' },
-  M: { bg: 'bg-green-500/15 dark:bg-green-400/20', text: 'text-green-600 dark:text-green-300', border: 'border-transparent' },
-  N: { bg: 'bg-purple-500/15 dark:bg-purple-400/20', text: 'text-purple-600 dark:text-purple-300', border: 'border-transparent' },
-  OFF: { bg: 'bg-transparent', text: 'text-zinc-400 dark:text-zinc-500', border: 'border-transparent' },
-  H8: { bg: 'bg-pink-500/15 dark:bg-pink-400/20', text: 'text-pink-600 dark:text-pink-300', border: 'border-transparent' },
-};
-const fallbackColor: ShiftColor = { bg: 'bg-zinc-500/15 dark:bg-zinc-400/20', text: 'text-zinc-600 dark:text-zinc-300', border: 'border-transparent' };
-
-// Solid, saturated variants used only for the bottom-sheet hero pill.
-const shiftSolid: Record<string, string> = {
-  MID: 'bg-blue-500 text-white',
-  A: 'bg-orange-500 text-white',
-  M: 'bg-green-500 text-white',
-  N: 'bg-purple-500 text-white',
-  OFF: 'bg-zinc-400 text-white',
-  H8: 'bg-pink-500 text-white',
-};
-const fallbackSolid = 'bg-zinc-500 text-white';
-
 const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-
-// Hardcoded working hours, per shift code.
-const hours: Record<string, string> = { MID: '09:00–17:00', M: '06:00–14:00', A: '14:00–22:00', N: '22:00–06:00', H8: 'Holiday', OFF: 'AD' };
-// Readable shift labels.
-const shiftLabels: Record<string, string> = { M: 'Morning', A: 'Afternoon', N: 'Night', MID: 'Mid', OFF: 'Off', H8: 'H8' };
-// Estimated hours per shift, used only by the Reports tab.
-const shiftHourValues: Record<string, number> = { M: 8, A: 8, N: 8, MID: 8, OFF: 0, H8: 0 };
 const EMPLOYEE_STORAGE_KEY = 'work-schedule-employee';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-type DailyRoster = { morning: string[]; afternoon: string[]; night: string[]; mid: string[]; off: string[] };
-type WorkingGroup = { title: string; employees: { name: string; suffix?: string }[] };
 type LoadStatus = 'loading' | 'error' | 'loaded';
 
 /** Shape of the JSON file produced offline by `npm run import`. */
@@ -68,14 +39,6 @@ function monthDays(month: number, year: number) {
   return Array.from({ length: 42 }, (_, index) => new Date(start.getFullYear(), start.getMonth(), start.getDate() + index));
 }
 function iso(date: Date) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; }
-function colorFor(shift: string) { return shiftColors[shift.toUpperCase()] ?? fallbackColor; }
-function solidColorFor(shift: string) { return shiftSolid[shift.toUpperCase()] ?? fallbackSolid; }
-function shiftKey(shift: string) { return shift.trim().toUpperCase(); }
-function shiftHours(shift: string) { return hours[shiftKey(shift)] ?? 'Not provided'; }
-function shiftLabel(shift: string) { return shiftLabels[shiftKey(shift)] ?? shift; }
-function emptyDailyRoster(): DailyRoster { return { morning: [], afternoon: [], night: [], mid: [], off: [] }; }
-function initials(name: string) { return name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join(''); }
-function byName(a: { name: string }, b: { name: string }) { return a.name.localeCompare(b.name); }
 
 /** Turns whatever `fileName` the import script wrote (full path, bare name, or missing) into a clean display string. */
 function displayFileName(fileName: string | undefined | null) {
@@ -92,119 +55,22 @@ function hydrateRoster(json: ScheduleJson): RosterData {
     year: json.year,
     employees: json.employees,
     dateColumns: json.dateColumns.map(({ isoDate }, index) => ({
-  index,
-  isoDate,
-  date: new Date(isoDate),
-})),
+      index,
+      isoDate,
+      date: new Date(isoDate),
+    })),
     rows: json.rows,
   };
 }
 
 /** Builds the per-employee shift events, reviving each isoDate string into a real Date object. */
-function eventsForEmployee(
-  roster: RosterData,
-  employee: string
-): ShiftEvent[] {
+function eventsForEmployee(roster: RosterData, employee: string): ShiftEvent[] {
   return roster.dateColumns.reduce<ShiftEvent[]>((events, { isoDate }) => {
     const shift = roster.rows[employee]?.[isoDate];
-
-    if (shift) {
-      events.push({
-        id: `${employee}-${isoDate}`,
-        isoDate,
-        shift,
-        date: new Date(isoDate),
-      });
-    }
-
+    if (shift) events.push({ id: `${employee}-${isoDate}`, isoDate, shift, date: new Date(isoDate) });
     return events;
   }, []);
 }
-
-function buildRosterIndex(roster: RosterData | null) {
-  if (!roster) return {} as Record<string, DailyRoster>;
-
-  return roster.dateColumns.reduce<Record<string, DailyRoster>>((index, { isoDate }) => {
-    const daily = emptyDailyRoster();
-
-    roster.employees.forEach((employee) => {
-      const code = shiftKey(roster.rows[employee]?.[isoDate] ?? '');
-      if (code === 'M') daily.morning.push(employee);
-      if (code === 'A') daily.afternoon.push(employee);
-      if (code === 'N') daily.night.push(employee);
-      if (code === 'MID') daily.mid.push(employee);
-      if (code === 'OFF') daily.off.push(employee);
-    });
-
-    index[isoDate] = daily;
-    return index;
-  }, {});
-}
-
-function removeEmployee(names: string[], selectedEmployee: string) {
-  return names.filter((name) => name !== selectedEmployee);
-}
-
-/**
- * Builds the "also working" group for the bottom sheet.
- * - Morning: everyone on M, plus every MID employee (tagged "Mid").
- * - Afternoon: everyone on A, plus every MID employee (tagged "Mid").
- * - Night: only N employees.
- * - Mid: Morning employees (tagged "Morning"), Afternoon employees (tagged "Afternoon"),
- *        and any other MID employees (tagged "Mid").
- * The selected employee is always excluded, and the final list is sorted alphabetically.
- */
-function groupForShift(shift: string, daily: DailyRoster | undefined, selectedEmployee: string): WorkingGroup | null {
-  if (!daily) return null;
-  const code = shiftKey(shift);
-  if (code === 'OFF') return null;
-
-  let employees: { name: string; suffix?: string }[] = [];
-
-  if (code === 'M') {
-    employees = [
-      ...removeEmployee(daily.morning, selectedEmployee).map((name) => ({ name })),
-      ...removeEmployee(daily.mid, selectedEmployee).map((name) => ({ name, suffix: 'Mid' })),
-    ];
-  } else if (code === 'A') {
-    employees = [
-      ...removeEmployee(daily.afternoon, selectedEmployee).map((name) => ({ name })),
-      ...removeEmployee(daily.mid, selectedEmployee).map((name) => ({ name, suffix: 'Mid' })),
-    ];
-  } else if (code === 'N') {
-    employees = removeEmployee(daily.night, selectedEmployee).map((name) => ({ name }));
-  } else if (code === 'MID') {
-    employees = [
-      ...removeEmployee(daily.morning, selectedEmployee).map((name) => ({ name, suffix: 'Morning' })),
-      ...removeEmployee(daily.afternoon, selectedEmployee).map((name) => ({ name, suffix: 'Afternoon' })),
-      ...removeEmployee(daily.mid, selectedEmployee).map((name) => ({ name, suffix: 'Mid' })),
-    ];
-  }
-
-  return { title: shiftLabel(shift), employees: employees.sort(byName) };
-}
-
-// ---------------------------------------------------------------------------
-// Presentational subcomponents
-// ---------------------------------------------------------------------------
-
-const EmployeeList = memo(function EmployeeList({ employees }: { employees: { name: string; suffix?: string }[] }) {
-  return <div className="space-y-1.5">
-    {employees.map(({ name, suffix }) => <div key={`${name}-${suffix ?? ''}`} className="flex items-center gap-3 rounded-2xl bg-zinc-100/70 p-2.5 dark:bg-zinc-800/60">
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-white text-[11px] font-bold text-zinc-600 shadow-sm dark:bg-zinc-700 dark:text-zinc-100">{initials(name)}</span>
-      <span className="text-[15px] font-medium">{name}{suffix ? <span className="text-zinc-400 dark:text-zinc-500"> · {suffix}</span> : ''}</span>
-    </div>)}
-  </div>;
-});
-
-const WorkingSection = memo(function WorkingSection({ group }: { group: WorkingGroup | null }) {
-  return <section className="rounded-2xl bg-zinc-50/80 p-4 dark:bg-white/[0.04]">
-    <h3 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Employees on This Shift</h3>
-    {group && group.employees.length > 0 ? <div className="mt-3">
-      <EmployeeList employees={group.employees}/>
-    </div> : <p className="mt-2 text-[15px] text-zinc-400 dark:text-zinc-500">No other employees are working this shift.</p>}
-  </section>;
-});
 
 // ---------------------------------------------------------------------------
 // App
@@ -252,19 +118,8 @@ export default function App() {
     return () => { mounted = false; };
   }, []);
 
-  // Lock body scroll while the bottom sheet is open, restore on close/unmount.
-  // Purely a presentational effect — no business logic is touched.
-  useEffect(() => {
-    if (selectedEvent) {
-      const previousOverflow = document.body.style.overflow;
-      document.body.style.overflow = 'hidden';
-      return () => { document.body.style.overflow = previousOverflow; };
-    }
-  }, [selectedEvent]);
-
   // Force the real <html>/<body> to black and disable rubber-band scrolling so
   // iOS Safari never reveals a white flash behind the app during overscroll.
-  // Presentational only — no app state involved.
   useEffect(() => {
     const html = document.documentElement;
     const body = document.body;
@@ -292,61 +147,6 @@ export default function App() {
     };
   }, []);
 
-  // Swipe-to-dismiss for the bottom sheet: works from anywhere in the sheet.
-  // We only "take over" the gesture once the inner content is scrolled to the
-  // top and the finger is moving downward — otherwise normal scrolling wins.
-  const [isSheetDragging, setIsSheetDragging] = useState(false);
-  const [sheetDragActive, setSheetDragActive] = useState(false);
-  const [sheetDragY, setSheetDragY] = useState(0);
-  const sheetDragStartY = useRef<number | null>(null);
-  const sheetDragStartScrollTop = useRef(0);
-  const sheetContentRef = useRef<HTMLDivElement>(null);
-
-  const handleSheetPointerDown = useCallback((e: React.PointerEvent) => {
-    sheetDragStartY.current = e.clientY;
-    sheetDragStartScrollTop.current = sheetContentRef.current?.scrollTop ?? 0;
-    setIsSheetDragging(true);
-  }, []);
-
-  useEffect(() => {
-    if (!isSheetDragging) return;
-
-    const handleMove = (e: PointerEvent) => {
-      if (sheetDragStartY.current == null) return;
-      const delta = e.clientY - sheetDragStartY.current;
-      const startedAtTop = sheetDragStartScrollTop.current <= 0;
-
-      if (delta > 0 && startedAtTop) {
-        setSheetDragActive(true);
-        setSheetDragY(delta);
-        e.preventDefault();
-      }
-    };
-    const handleUp = () => {
-      setIsSheetDragging(false);
-      setSheetDragActive(false);
-      setSheetDragY((current) => {
-        if (current > 90) setSelectedEvent(null);
-        return 0;
-      });
-      sheetDragStartY.current = null;
-    };
-
-    window.addEventListener('pointermove', handleMove, { passive: false });
-    window.addEventListener('pointerup', handleUp);
-    return () => {
-      window.removeEventListener('pointermove', handleMove);
-      window.removeEventListener('pointerup', handleUp);
-    };
-  }, [isSheetDragging]);
-
-  useEffect(() => {
-    if (!selectedEvent) {
-      setSheetDragY(0);
-      setSheetDragActive(false);
-    }
-  }, [selectedEvent]);
-
   // Three-tab navigation. Switching tabs never touches roster/employee/month
   // state, so returning to Calendar always shows what you left it showing.
   const [activeTab, setActiveTab] = useState<'calendar' | 'reports' | 'settings'>('calendar');
@@ -358,12 +158,37 @@ export default function App() {
   const events = useMemo(() => (roster && selectedEmployee ? eventsForEmployee(roster, selectedEmployee) : []), [roster, selectedEmployee]);
   const eventMap = useMemo(() => Object.fromEntries(events.map((event) => [event.isoDate, event])), [events]);
   const rosterIndex = useMemo(() => buildRosterIndex(roster), [roster]);
-  const selectedDailyRoster = selectedEvent ? rosterIndex[selectedEvent.isoDate] : undefined;
-  const selectedWorkingGroup = useMemo(() => selectedEvent ? groupForShift(selectedEvent.shift, selectedDailyRoster, selectedEmployee) : null, [selectedDailyRoster, selectedEmployee, selectedEvent]);
   const filteredEmployees = useMemo(() => roster?.employees.filter((name) => name.toLowerCase().includes(query.toLowerCase())) ?? [], [query, roster]);
   const calendarDays = useMemo(() => monthDays(currentMonth, currentYear), [currentMonth, currentYear]);
   const title = useMemo(() => new Intl.DateTimeFormat('en', { month: 'long', year: 'numeric' }).format(new Date(currentYear, currentMonth)), [currentMonth, currentYear]);
   const todayIso = useMemo(() => iso(new Date()), []);
+
+  // Day-details navigation: bounds and handlers, based on the roster's own
+  // date columns (not the padded calendar grid, which spills into other months).
+  const selectedDayIndex = useMemo(() => {
+    if (!roster || !selectedEvent) return -1;
+    return roster.dateColumns.findIndex((d) => d.isoDate === selectedEvent.isoDate);
+  }, [roster, selectedEvent]);
+  const canGoPrevDay = selectedDayIndex > 0;
+  const canGoNextDay = roster ? selectedDayIndex !== -1 && selectedDayIndex < roster.dateColumns.length - 1 : false;
+
+  const goToPrevDay = useCallback(() => {
+    setSelectedEvent((current) => {
+      if (!current || !roster) return current;
+      const idx = roster.dateColumns.findIndex((d) => d.isoDate === current.isoDate);
+      if (idx <= 0) return current;
+      return eventForIso(roster, selectedEmployee, roster.dateColumns[idx - 1].isoDate);
+    });
+  }, [roster, selectedEmployee]);
+
+  const goToNextDay = useCallback(() => {
+    setSelectedEvent((current) => {
+      if (!current || !roster) return current;
+      const idx = roster.dateColumns.findIndex((d) => d.isoDate === current.isoDate);
+      if (idx === -1 || idx >= roster.dateColumns.length - 1) return current;
+      return eventForIso(roster, selectedEmployee, roster.dateColumns[idx + 1].isoDate);
+    });
+  }, [roster, selectedEmployee]);
 
   // Reports tab: everything derived from the roster already loaded above —
   // no hardcoded values, scoped to the selected employee + displayed month.
@@ -433,23 +258,19 @@ export default function App() {
 
   return <main className={dark ? 'dark' : ''}>
     <div className="flex h-screen justify-center overscroll-none bg-zinc-200 dark:bg-black">
-      {/* Phone-width column — fills the viewport on mobile, centers as a card on desktop. */}
       <div className="relative flex h-screen w-full max-w-[430px] flex-col overflow-hidden bg-zinc-100 text-zinc-950 dark:bg-black dark:text-white">
 
-        {/* Everything below is inert while the sheet is open: no clicks, no scroll, no focus. */}
         <div
           className={`flex min-h-0 flex-1 flex-col transition-[filter] duration-200 ${sheetOpen ? 'pointer-events-none select-none blur-[1px]' : ''}`}
           aria-hidden={sheetOpen}
         >
           {activeTab === 'calendar' && <div className="flex min-h-0 flex-1 flex-col">
-            {/* Header */}
             <header className="shrink-0 px-5 pb-3 pt-6">
               <div className="flex items-start justify-between">
                 <div className="min-w-0">
                   <h1 className="truncate text-[34px] font-bold leading-none tracking-tight">{title}</h1>
                   <p className="mt-1 truncate text-[15px] font-medium text-zinc-400 dark:text-zinc-500">{selectedEmployee || 'No employee selected'}</p>
                 </div>
-
                 <div className="flex shrink-0 items-center gap-1.5">
                   <button
                     onClick={() => setDark(!dark)}
@@ -461,7 +282,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Month navigation, iOS-style small round chevrons */}
               <div className="mt-3 flex items-center justify-center gap-1">
                 <button
                   onClick={goToPreviousMonth}
@@ -481,7 +301,6 @@ export default function App() {
               </div>
             </header>
 
-            {/* Calendar — the hero element, fills all remaining height */}
             <div className="flex min-h-0 flex-1 flex-col px-3 pb-24">
               <div className="grid shrink-0 grid-cols-7 text-center text-[11px] font-semibold text-zinc-400 dark:text-zinc-500">
                 {weekdays.map((day, i) => <div className="py-1.5" key={`${day}-${i}`}>{day}</div>)}
@@ -490,7 +309,7 @@ export default function App() {
                 {calendarDays.map((day) => {
                   const dayIso = iso(day);
                   const event = eventMap[dayIso];
-                  const colors = event ? colorFor(event.shift) : fallbackColor;
+                  const colors = event ? colorFor(event.shift) : { bg: '', text: '' };
                   const isOff = event && shiftKey(event.shift) === 'OFF';
                   const isToday = dayIso === todayIso;
                   return <button
@@ -621,44 +440,17 @@ export default function App() {
           </div>}
         </div>
 
-        {/* Backdrop */}
-        <div
-          onClick={() => setSelectedEvent(null)}
-          className={`fixed inset-0 z-10 bg-black/30 backdrop-blur-sm transition-opacity duration-300 ${sheetOpen ? 'opacity-100' : 'pointer-events-none opacity-0'}`}
+        <DayDetailsModal
+          event={selectedEvent}
+          dailyRoster={selectedEvent ? rosterIndex[selectedEvent.isoDate] : undefined}
+          selectedEmployee={selectedEmployee}
+          canGoPrev={canGoPrevDay}
+          canGoNext={canGoNextDay}
+          onPrev={goToPrevDay}
+          onNext={goToNextDay}
+          onClose={() => setSelectedEvent(null)}
         />
 
-        {/* Bottom sheet */}
-        <div
-          style={{ transform: sheetOpen ? `translateY(${sheetDragY}px)` : 'translateY(100%)' }}
-          onPointerDown={handleSheetPointerDown}
-          className={`fixed inset-x-0 bottom-0 z-20 mx-auto flex max-h-[85vh] w-full max-w-[430px] flex-col overflow-hidden rounded-t-[28px] bg-white/95 shadow-[0_-8px_40px_rgba(0,0,0,0.25)] backdrop-blur-xl dark:bg-zinc-900/95 ${isSheetDragging ? '' : 'transition-transform duration-300 ease-out'} ${sheetOpen ? '' : 'pointer-events-none'}`}
-        >
-          <div className="flex shrink-0 cursor-grab flex-col items-center pb-2 pt-2.5 active:cursor-grabbing">
-            <div className="h-1.5 w-10 rounded-full bg-zinc-300 dark:bg-zinc-600"/>
-          </div>
-          {selectedEvent && <div
-            ref={sheetContentRef}
-            style={{ touchAction: sheetDragActive ? 'none' : 'pan-y' }}
-            className="overflow-y-auto px-5 pb-6 pt-1"
-          >
-            <p className="text-[13px] font-medium text-zinc-400 dark:text-zinc-500">{selectedEvent.date.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}</p>
-            <div className={`my-4 rounded-[24px] p-6 text-center ${solidColorFor(selectedEvent.shift)}`}>
-              <div className="text-[34px] font-bold leading-none tracking-tight">{shiftLabel(selectedEvent.shift)}</div>
-              <div className="mt-2 text-[15px] font-semibold opacity-90">{shiftHours(selectedEvent.shift)}</div>
-            </div>
-            <div className="space-y-3">
-              <WorkingSection group={selectedWorkingGroup}/>
-            </div>
-            <button
-              onClick={() => setSelectedEvent(null)}
-              className="mt-5 w-full rounded-2xl bg-zinc-950/5 py-3.5 text-[17px] font-semibold text-zinc-950 transition active:scale-[0.97] dark:bg-white/10 dark:text-white"
-            >
-              Close
-            </button>
-          </div>}
-        </div>
-
-        {/* Floating iOS-style bottom tab bar */}
         <nav
           aria-hidden={sheetOpen}
           className={`fixed inset-x-0 bottom-0 z-10 flex justify-center px-5 pb-3 transition-[filter] duration-200 ${sheetOpen ? 'pointer-events-none blur-[1px]' : ''}`}
