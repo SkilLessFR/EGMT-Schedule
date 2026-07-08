@@ -138,10 +138,18 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
   }, [onNext, onPrev, setDragBoth]);
 
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    e.stopPropagation();
+
     if (animatingRef.current) return;
-    dragStart.current = { x: e.clientX, y: e.clientY, scrollTop: contentRef.current?.scrollTop ?? 0 };
+
+    dragStart.current = {
+        x: e.clientX,
+        y: e.clientY,
+        scrollTop: contentRef.current?.scrollTop ?? 0,
+    };
+
     setIsDragging(true);
-  }, []);
+}, []);
 
   useEffect(() => {
     if (!isDragging) return;
