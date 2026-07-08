@@ -110,11 +110,10 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
   }, [open]);
 
   // ---- Gesture system: one pointer session, axis-locked to either the
-  // vertical dismiss-drag or the horizontal day-swipe. Pointer capture is
-  // claimed lazily — only once the axis has locked to a real drag, never on
-  // a plain pointerdown — so tapping Previous/Next/Close/Show-all-shifts (or
-  // a day cell underneath, when this modal is closed) still fires a normal
-  // click instead of being swallowed by capture. ----
+  // vertical dismiss-drag or the horizontal day-swipe. Pointer capture pins
+  // every event from this touch/mouse to the sheet element itself, so the
+  // gesture can never be picked up by the calendar (or anything else)
+  // rendered underneath. ----
   const [drag, setDrag] = useState<DragState>({ x: 0, y: 0, axis: null });
   const [isDragging, setIsDragging] = useState(false);
   const [noTransition, setNoTransition] = useState(false);
@@ -123,7 +122,6 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
   const animatingRef = useRef(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const sheetRef = useRef<HTMLDivElement>(null);
-  const dragPointerId = useRef<number | null>(null);
   const capturedPointerId = useRef<number | null>(null);
 
   const setDragBoth = useCallback((next: DragState) => {
@@ -144,12 +142,12 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
     }, SWIPE_EXIT_DURATION);
   }, [onNext, onPrev, setDragBoth]);
 
-  // NOTE: no setPointerCapture here — see comment above the gesture system.
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
     if (animatingRef.current) return;
     dragStart.current = { x: e.clientX, y: e.clientY, scrollTop: contentRef.current?.scrollTop ?? 0 };
-    dragPointerId.current = e.pointerId;
     setIsDragging(true);
+    e.currentTarget.setPointerCapture(e.pointerId);
+    capturedPointerId.current = e.pointerId;
   }, []);
 
   useEffect(() => {
@@ -166,16 +164,6 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
       if (!axis) {
         if (Math.abs(dx) < AXIS_LOCK_THRESHOLD && Math.abs(dy) < AXIS_LOCK_THRESHOLD) return;
         axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
-        // Confirmed drag (moved past the threshold) — now safe to claim the
-        // pointer so it can't be picked up by the calendar underneath.
-        if (dragPointerId.current != null && sheetRef.current) {
-          try {
-            sheetRef.current.setPointerCapture(dragPointerId.current);
-            capturedPointerId.current = dragPointerId.current;
-          } catch {
-            // Capture is a defensive enhancement, not required for correctness.
-          }
-        }
       }
 
       if (axis === 'x') {
@@ -200,7 +188,6 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
         sheetRef.current.releasePointerCapture(capturedPointerId.current);
       }
       capturedPointerId.current = null;
-      dragPointerId.current = null;
       const final = dragRef.current; // read once, decide once — never inside setState
 
       if (final.axis === 'x') {
