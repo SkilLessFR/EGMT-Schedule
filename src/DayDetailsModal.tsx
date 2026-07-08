@@ -15,7 +15,7 @@ import {
   GLASS_SHEET,
 } from './scheduleUtils';
 
-// Tuning constants for the gesture system.
+// Tuning constants for the gesture system (unchanged from the day-swipe fix).
 const AXIS_LOCK_THRESHOLD = 8;
 const SWIPE_COMMIT_THRESHOLD = 70;
 const DISMISS_COMMIT_THRESHOLD = 90;
@@ -109,11 +109,8 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
     wasOpen.current = open;
   }, [open]);
 
-  // ---- Gesture system: one pointer session, axis-locked to either the
-  // vertical dismiss-drag or the horizontal day-swipe. Pointer capture pins
-  // every event from this touch/mouse to the sheet element itself, so the
-  // gesture can never be picked up by the calendar (or anything else)
-  // rendered underneath. ----
+  // ---- Gesture system (unchanged): one pointer session, axis-locked to
+  // either the vertical dismiss-drag or the horizontal day-swipe. ----
   const [drag, setDrag] = useState<DragState>({ x: 0, y: 0, axis: null });
   const [isDragging, setIsDragging] = useState(false);
   const [noTransition, setNoTransition] = useState(false);
@@ -121,8 +118,6 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
   const dragRef = useRef<DragState>({ x: 0, y: 0, axis: null });
   const animatingRef = useRef(false);
   const contentRef = useRef<HTMLDivElement>(null);
-  const sheetRef = useRef<HTMLDivElement>(null);
-  const capturedPointerId = useRef<number | null>(null);
 
   const setDragBoth = useCallback((next: DragState) => {
     dragRef.current = next;
@@ -146,8 +141,6 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
     if (animatingRef.current) return;
     dragStart.current = { x: e.clientX, y: e.clientY, scrollTop: contentRef.current?.scrollTop ?? 0 };
     setIsDragging(true);
-    e.currentTarget.setPointerCapture(e.pointerId);
-    capturedPointerId.current = e.pointerId;
   }, []);
 
   useEffect(() => {
@@ -184,11 +177,7 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
 
     const handleUp = () => {
       setIsDragging(false);
-      if (capturedPointerId.current != null && sheetRef.current?.hasPointerCapture(capturedPointerId.current)) {
-        sheetRef.current.releasePointerCapture(capturedPointerId.current);
-      }
-      capturedPointerId.current = null;
-      const final = dragRef.current; // read once, decide once — never inside setState
+      const final = dragRef.current;
 
       if (final.axis === 'x') {
         if (final.x <= -SWIPE_COMMIT_THRESHOLD && canGoNext) {
@@ -210,11 +199,9 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
 
     window.addEventListener('pointermove', handleMove, { passive: false });
     window.addEventListener('pointerup', handleUp);
-    window.addEventListener('pointercancel', handleUp);
     return () => {
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
-      window.removeEventListener('pointercancel', handleUp);
     };
   }, [isDragging, canGoPrev, canGoNext, onClose, commitSwipe, setDragBoth]);
 
@@ -250,7 +237,6 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
     />
 
     <div
-      ref={sheetRef}
       role="dialog"
       aria-modal="true"
       onPointerDown={handlePointerDown}
@@ -260,12 +246,12 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
       }}
       className={`fixed inset-x-0 bottom-0 z-20 mx-auto flex max-h-[92vh] w-full max-w-[430px] flex-col overflow-hidden ${GLASS_SHEET} ${open ? '' : 'pointer-events-none'} ${isDragging ? 'select-none' : ''}`}
     >
-      <div className="flex shrink-0 flex-col items-center pb-2 pt-2.5" style={{ touchAction: 'none' }}>
+      <div className="flex shrink-0 flex-col items-center pb-2 pt-2.5">
         <div className="h-1.5 w-10 rounded-full bg-zinc-300 dark:bg-zinc-600"/>
       </div>
 
       {event && <>
-        <div className="flex shrink-0 items-center justify-between px-2 pb-1" style={{ touchAction: 'none' }}>
+        <div className="flex shrink-0 items-center justify-between px-2 pb-1">
           <button
             onClick={onPrev}
             disabled={!canGoPrev}
