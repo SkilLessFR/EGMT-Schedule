@@ -13,19 +13,19 @@ import DayDetailsModal from './DayDetailsModal';
 const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 const EMPLOYEE_STORAGE_KEY = 'work-schedule-employee';
 
-// Near-black app background (Task 5) — warmer/lighter than pure black so
-// shadows and the glass blur stay visible instead of crushing to a void.
+// Near-black app background — warmer/lighter than pure black so shadows and
+// the glass blur stay visible instead of crushing to a void.
 const APP_DARK_BG = '#050505';
 
-// Month-swipe gesture tuning (Task 3/4) — same axis-lock + slide-and-snap
-// technique as DayDetailsModal's day swipe, applied to the calendar grid.
+// Month-swipe gesture tuning — same axis-lock + slide-and-snap technique as
+// DayDetailsModal's day swipe, applied to the calendar grid.
 const MONTH_AXIS_LOCK_THRESHOLD = 8;
 const MONTH_SWIPE_COMMIT_THRESHOLD = 70;
 const MONTH_SWIPE_DURATION = 260;
 
-// Sliding indicator offsets for the 3 bottom-nav tabs (Task 1). These assume
-// exactly 3 equal-width tabs with p-1.5 container padding and gap-1.5 between
-// them — adjust if the tab count or spacing ever changes.
+// Sliding indicator offsets for the 3 bottom-nav tabs. These assume exactly 3
+// equal-width tabs with p-1.5 container padding and gap-1.5 between them —
+// adjust if the tab count or spacing ever changes.
 const NAV_INDICATOR_OFFSETS = ['translate-x-0', 'translate-x-[calc(100%+0.375rem)]', 'translate-x-[calc(200%+0.75rem)]'];
 
 // ---------------------------------------------------------------------------
@@ -137,7 +137,7 @@ export default function App() {
 
   // Force the real <html>/<body> to near-black and disable rubber-band
   // scrolling so iOS Safari never reveals a flash of the wrong color behind
-  // the app during overscroll (Task 5: near-black, not pure black).
+  // the app during overscroll.
   useEffect(() => {
     const html = document.documentElement;
     const body = document.body;
@@ -176,6 +176,9 @@ export default function App() {
   const events = useMemo(() => (roster && selectedEmployee ? eventsForEmployee(roster, selectedEmployee) : []), [roster, selectedEmployee]);
   const eventMap = useMemo(() => Object.fromEntries(events.map((event) => [event.isoDate, event])), [events]);
   const rosterIndex = useMemo(() => buildRosterIndex(roster), [roster]);
+  // Which iso dates the loaded roster actually covers — used to decide which
+  // calendar cells are clickable (adjacent-month padding days are excluded).
+  const rosterDateSet = useMemo(() => new Set(roster?.dateColumns.map((d) => d.isoDate) ?? []), [roster]);
   const filteredEmployees = useMemo(() => roster?.employees.filter((name) => name.toLowerCase().includes(query.toLowerCase())) ?? [], [query, roster]);
   const calendarDays = useMemo(() => monthDays(currentMonth, currentYear), [currentMonth, currentYear]);
   const title = useMemo(() => new Intl.DateTimeFormat('en', { month: 'long', year: 'numeric' }).format(new Date(currentYear, currentMonth)), [currentMonth, currentYear]);
@@ -242,11 +245,11 @@ export default function App() {
     });
   }, [currentYear]);
 
-  // ---- Month-swipe gesture (Task 3/4): axis-locked horizontal drag on the
-  // calendar grid, reusing the same read-once-on-release / ref-guard pattern
-  // as DayDetailsModal (the one that fixed the "swipes 2 at once" bug). No
-  // month boundaries exist today, so these are always true — wire real
-  // limits here if the roster ever restricts navigable months. ----
+  // ---- Month-swipe gesture: axis-locked horizontal drag on the calendar
+  // grid, reusing the same read-once-on-release / ref-guard pattern as
+  // DayDetailsModal. Pointer capture is claimed lazily — only once the axis
+  // has actually locked to a real drag — so a plain tap on a day button
+  // never gets hijacked and still fires its click normally. ----
   const canGoPrevMonth = true;
   const canGoNextMonth = true;
 
@@ -257,6 +260,8 @@ export default function App() {
   const monthDragRef = useRef<MonthDragState>({ x: 0, axis: null });
   const monthAnimatingRef = useRef(false);
   const monthGridRef = useRef<HTMLDivElement>(null);
+  const monthDragPointerId = useRef<number | null>(null);
+  const capturedMonthPointerId = useRef<number | null>(null);
 
   const setMonthDragBoth = useCallback((next: MonthDragState) => {
     monthDragRef.current = next;
@@ -277,9 +282,13 @@ export default function App() {
     }, MONTH_SWIPE_DURATION);
   }, [goToNextMonth, goToPreviousMonth, setMonthDragBoth]);
 
+  // NOTE: no setPointerCapture here — a plain tap on a day button must still
+  // produce a normal click. Capture is claimed later, only once we've
+  // confirmed this is a genuine drag (see handleMove below).
   const handleMonthPointerDown = useCallback((e: React.PointerEvent) => {
     if (monthAnimatingRef.current) return;
     monthDragStart.current = { x: e.clientX, y: e.clientY };
+    monthDragPointerId.current = e.pointerId;
     setIsMonthDragging(true);
   }, []);
 
@@ -297,6 +306,16 @@ export default function App() {
       if (!axis) {
         if (Math.abs(dx) < MONTH_AXIS_LOCK_THRESHOLD && Math.abs(dy) < MONTH_AXIS_LOCK_THRESHOLD) return;
         axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+        // This is now a confirmed drag (moved past the threshold) — safe to
+        // claim the pointer without breaking a simple tap's click event.
+        if (axis === 'x' && monthDragPointerId.current != null && monthGridRef.current) {
+          try {
+            monthGridRef.current.setPointerCapture(monthDragPointerId.current);
+            capturedMonthPointerId.current = monthDragPointerId.current;
+          } catch {
+            // Capture is a defensive enhancement, not required for correctness.
+          }
+        }
       }
 
       if (axis === 'x') {
@@ -310,6 +329,11 @@ export default function App() {
 
     const handleUp = () => {
       setIsMonthDragging(false);
+      if (capturedMonthPointerId.current != null && monthGridRef.current?.hasPointerCapture(capturedMonthPointerId.current)) {
+        monthGridRef.current.releasePointerCapture(capturedMonthPointerId.current);
+      }
+      capturedMonthPointerId.current = null;
+      monthDragPointerId.current = null;
       const final = monthDragRef.current; // read once, decide once — never inside setState
 
       if (final.axis === 'x') {
@@ -324,9 +348,11 @@ export default function App() {
 
     window.addEventListener('pointermove', handleMove, { passive: false });
     window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
     return () => {
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
     };
   }, [isMonthDragging, canGoPrevMonth, canGoNextMonth, commitMonthSwipe, setMonthDragBoth]);
 
@@ -414,7 +440,7 @@ export default function App() {
               </div>
 
               {/* Outer frame stays fixed (glass surface, rounded, clipped);
-                  only the inner grid slides during a month swipe (Task 3/4). */}
+                  only the inner grid slides during a month swipe. */}
               <div className={`relative min-h-0 flex-1 overflow-hidden ${GLASS_CARD}`}>
                 <div
                   ref={monthGridRef}
@@ -428,14 +454,19 @@ export default function App() {
                 >
                   {calendarDays.map((day) => {
                     const dayIso = iso(day);
-                    const event = eventMap[dayIso];
+                    const inRoster = rosterDateSet.has(dayIso);
+                    // Fall back to an OFF-shift event for days with no explicit code,
+                    // so every day in the loaded roster is clickable — same fallback
+                    // day-swipe navigation uses.
+                    const event = eventMap[dayIso] ?? (inRoster ? eventForIso(roster, selectedEmployee, dayIso) : undefined);
                     const colors = event ? colorFor(event.shift) : { bg: '', text: '' };
                     const isOff = event && shiftKey(event.shift) === 'OFF';
                     const isToday = dayIso === todayIso;
                     return <button
                       key={dayIso}
-                      onClick={() => event && setSelectedEvent(event)}
-                      className={`flex flex-col items-center justify-start gap-1 border-b border-r border-zinc-950/[0.04] pt-1.5 transition active:scale-[0.97] active:bg-zinc-950/[0.03] dark:border-white/[0.06] dark:active:bg-white/[0.05] ${day.getMonth() !== currentMonth ? 'opacity-30' : ''}`}
+                      onClick={() => inRoster && event && setSelectedEvent(event)}
+                      disabled={!inRoster}
+                      className={`flex flex-col items-center justify-start gap-1 border-b border-r border-zinc-950/[0.04] pt-1.5 transition dark:border-white/[0.06] ${inRoster ? 'active:scale-[0.97] active:bg-zinc-950/[0.03] dark:active:bg-white/[0.05]' : 'cursor-default'} ${day.getMonth() !== currentMonth ? 'opacity-30' : ''}`}
                     >
                       <span className={`flex size-8 shrink-0 items-center justify-center rounded-full text-[18px] font-medium transition sm:size-9 sm:text-[19px] ${isToday ? 'bg-red-500 font-semibold text-white' : ''}`}>{day.getDate()}</span>
                       {event ? (
@@ -572,7 +603,7 @@ export default function App() {
           onClose={() => setSelectedEvent(null)}
         />
 
-        {/* Floating "Liquid Glass" bottom tab bar (Task 1/2) */}
+        {/* Floating "Liquid Glass" bottom tab bar */}
         <nav
           aria-hidden={sheetOpen}
           className={`fixed inset-x-0 bottom-0 z-10 flex justify-center px-5 pb-3 transition-[filter] duration-200 ${sheetOpen ? 'pointer-events-none blur-[1px]' : ''}`}
