@@ -278,13 +278,14 @@ export default function App() {
   }, [goToNextMonth, goToPreviousMonth, setMonthDragBoth]);
 
   const handleMonthPointerDown = useCallback((e: React.PointerEvent) => {
-    if (monthAnimatingRef.current) return;
+    if (monthAnimatingRef.current || selectedEvent) return;
     monthDragStart.current = { x: e.clientX, y: e.clientY };
     setIsMonthDragging(true);
   }, []);
 
   useEffect(() => {
     if (!isMonthDragging) return;
+    if (selectedEvent) return;
 
     const handleMove = (e: PointerEvent) => {
       const start = monthDragStart.current;
