@@ -1,7 +1,7 @@
 // DayDetailsModal.tsx
 import type React from 'react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, Activity, Users, ShieldAlert, Layers } from 'lucide-react';
 import type { ShiftEvent } from './types';
 import {
   type AllShiftsGroup,
@@ -12,10 +12,8 @@ import {
   shiftHours,
   shiftLabel,
   solidColorFor,
-  GLASS_SHEET,
 } from './scheduleUtils';
 
-// Tuning constants for the gesture system.
 const AXIS_LOCK_THRESHOLD = 8;
 const SWIPE_COMMIT_THRESHOLD = 70;
 const DISMISS_COMMIT_THRESHOLD = 90;
@@ -25,54 +23,128 @@ const WHEEL_DELTA_THRESHOLD = 24;
 type DragState = { x: number; y: number; axis: 'x' | 'y' | null };
 
 // ---------------------------------------------------------------------------
+// Advanced Liquid Plasma & Cyberglass CSS Engine
+// ---------------------------------------------------------------------------
+const CyberLiquidStyles = () => (
+  <style dangerouslySetInnerHTML={{ __html: `
+    @keyframes liquid-drift-1 {
+      0% { transform: translate(0px, 0px) scale(1) rotate(0deg); }
+      33% { transform: translate(40px, -60px) scale(1.4) rotate(120deg); }
+      66% { transform: translate(-30px, 50px) scale(0.8) rotate(240deg); }
+      100% { transform: translate(0px, 0px) scale(1) rotate(360deg); }
+    }
+    @keyframes liquid-drift-2 {
+      0% { transform: translate(0px, 0px) scale(1.2) rotate(180deg); }
+      50% { transform: translate(-50px, 40px) scale(0.7) rotate(0deg); }
+      100% { transform: translate(0px, 0px) scale(1.2) rotate(180deg); }
+    }
+    .liquid-blob-1 {
+      animation: liquid-drift-1 16s ease-in-out infinite;
+      filter: blur(40px);
+    }
+    .liquid-blob-2 {
+      animation: liquid-drift-2 12s ease-in-out infinite alternate;
+      filter: blur(50px);
+    }
+    .cyber-panel-border {
+      box-shadow: 
+        inset 0 1px 1px rgba(255, 255, 255, 0.3),
+        0 1px 2px rgba(0, 0, 0, 0.4),
+        0 20px 40px -15px rgba(0, 0, 0, 0.7);
+    }
+    .text-glow {
+      text-shadow: 0 0 12px rgba(255, 255, 255, 0.4);
+    }
+  `}} />
+);
+
+// ---------------------------------------------------------------------------
 // Presentational subcomponents
 // ---------------------------------------------------------------------------
 
 const EmployeeList = memo(function EmployeeList({ employees }: { employees: { name: string; suffix?: string }[] }) {
-  return <div className="space-y-1.5">
-    {employees.map(({ name, suffix }) => <div key={`${name}-${suffix ?? ''}`} className="flex items-center gap-3 rounded-[18px] bg-zinc-100/70 p-2.5 dark:bg-zinc-800/60">
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-white text-[11px] font-bold text-zinc-600 shadow-sm dark:bg-zinc-700 dark:text-zinc-100">{initials(name)}</span>
-      <span className="text-[15px] font-medium">{name}{suffix ? <span className="text-zinc-400 dark:text-zinc-500"> · {suffix}</span> : ''}</span>
-    </div>)}
-  </div>;
+  return (
+    <div className="space-y-2">
+      {employees.map(({ name, suffix }) => (
+        <div 
+          key={`${name}-${suffix ?? ''}`} 
+          className="flex items-center justify-between rounded-xl border border-white/10 bg-zinc-950/40 p-3 backdrop-blur-md transition-all hover:bg-zinc-900/60"
+        >
+          <div className="flex items-center gap-3">
+            <span className="flex size-7 shrink-0 items-center justify-center rounded bg-gradient-to-tr from-cyan-400 to-indigo-500 font-mono text-[10px] font-black text-black shadow-[0_0_10px_rgba(34,211,238,0.4)]">
+              {initials(name)}
+            </span>
+            <span className="text-[14px] font-semibold tracking-wide text-zinc-100">{name}</span>
+          </div>
+          {suffix && (
+            <span className="rounded bg-white/5 border border-white/5 px-2 py-0.5 font-mono text-[10px] uppercase text-cyan-400 tracking-wider">
+              {suffix}
+            </span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
 });
 
 const WorkingSection = memo(function WorkingSection({ group }: { group: ReturnType<typeof groupForShift> }) {
-  return <section className="rounded-[20px] bg-zinc-50/80 p-4 ring-1 ring-black/[0.03] dark:bg-white/[0.04] dark:ring-white/[0.05]">
-    <h3 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Employees on This Shift</h3>
-    {group && group.employees.length > 0 ? <div className="mt-3">
-      <EmployeeList employees={group.employees}/>
-    </div> : <p className="mt-2 text-[15px] text-zinc-400 dark:text-zinc-500">No other employees are working this shift.</p>}
-  </section>;
+  return (
+    <section className="cyber-panel-border rounded-2xl border border-white/10 bg-zinc-900/40 p-4 backdrop-blur-md">
+      <div className="mb-3 flex items-center gap-2 border-b border-white/5 pb-2">
+        <Users className="size-3.5 text-cyan-400" />
+        <h3 className="font-mono text-[11px] font-black uppercase tracking-widest text-cyan-400">
+          Assigned Personnel
+        </h3>
+      </div>
+      {group && group.employees.length > 0 ? (
+        <EmployeeList employees={group.employees}/>
+      ) : (
+        <p className="font-mono text-xs text-zinc-400 italic py-1">Standby status: No alternative assignments detected.</p>
+      )}
+    </section>
+  );
 });
 
 const AllShiftsSection = memo(function AllShiftsSection({ groups, expanded, onToggle }: { groups: AllShiftsGroup[]; expanded: boolean; onToggle: () => void }) {
-  return <section className="rounded-[20px] bg-zinc-50/80 ring-1 ring-black/[0.03] dark:bg-white/[0.04] dark:ring-white/[0.05]">
-    <button
-      onClick={onToggle}
-      className="flex min-h-11 w-full items-center justify-between px-4 py-3 text-left transition active:bg-zinc-950/[0.03] dark:active:bg-white/[0.05]"
-      aria-expanded={expanded}
-    >
-      <span className="text-[15px] font-semibold">{expanded ? 'Hide all shifts' : 'Show all shifts'}</span>
-      <ChevronDown className={`size-4 shrink-0 text-zinc-400 transition-transform duration-300 ${expanded ? 'rotate-180' : ''}`}/>
-    </button>
-    <div className={`grid transition-[grid-template-rows] duration-300 ease-out ${expanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
-      <div className="overflow-hidden">
-        <div className="space-y-4 px-4 pb-4">
-          {groups.length === 0 && <p className="text-[14px] text-zinc-400 dark:text-zinc-500">No shifts recorded for this day.</p>}
-          {groups.map((group) => <div key={group.code}>
-            <div className="mb-1.5 flex items-center gap-1.5">
-              <span className={`inline-block size-2.5 shrink-0 rounded-full ${solidColorFor(group.code)}`}/>
-              <h4 className="text-[13px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{group.label}</h4>
-            </div>
-            <div className="space-y-1">
-              {group.employees.map((name) => <div key={name} className="rounded-xl bg-white px-3 py-2 text-[14px] font-medium dark:bg-zinc-800/60">{name}</div>)}
-            </div>
-          </div>)}
+  return (
+    <section className="cyber-panel-border rounded-2xl border border-white/10 bg-zinc-900/40 backdrop-blur-md">
+      <button
+        onClick={onToggle}
+        className="flex min-h-12 w-full items-center justify-between px-4 py-3 text-left transition hover:bg-white/5"
+        aria-expanded={expanded}
+      >
+        <div className="flex items-center gap-2">
+          <Layers className="size-3.5 text-fuchsia-400" />
+          <span className="font-mono text-[11px] font-black uppercase tracking-widest text-zinc-200">
+            Timeline Overview
+          </span>
+        </div>
+        <ChevronDown className={`size-4 shrink-0 text-fuchsia-400 transition-transform duration-500 cubic-bezier(0.16, 1, 0.3, 1) ${expanded ? 'rotate-180' : ''}`}/>
+      </button>
+      <div className={`grid transition-[grid-template-rows] duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] ${expanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
+        <div className="overflow-hidden">
+          <div className="space-y-4 px-4 pb-4 pt-2 border-t border-white/5">
+            {groups.length === 0 && <p className="font-mono text-xs text-zinc-500">System idle.</p>}
+            {groups.map((group) => (
+              <div key={group.code} className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className={`inline-block size-1.5 shrink-0 rounded-full shadow-[0_0_8px_currentColor] ${solidColorFor(group.code)}`}/>
+                  <h4 className="font-mono text-[11px] font-bold uppercase tracking-wider text-zinc-400">{group.label}</h4>
+                </div>
+                <div className="grid grid-cols-1 gap-1">
+                  {group.employees.map((name) => (
+                    <div key={name} className="rounded-lg bg-zinc-950/50 border border-white/5 px-3 py-2 font-sans text-[13px] text-zinc-300">
+                      {name}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
-    </div>
-  </section>;
+    </section>
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -109,12 +181,6 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
     wasOpen.current = open;
   }, [open]);
 
-  // ---- Gesture system: one pointer session, axis-locked to either the
-  // vertical dismiss-drag or the horizontal day-swipe. Pointer capture is
-  // claimed lazily — only once the axis has locked to a real drag, never on
-  // a plain pointerdown — so tapping Previous/Next/Close/Show-all-shifts (or
-  // a day cell underneath, when this modal is closed) still fires a normal
-  // click instead of being swallowed by capture. ----
   const [drag, setDrag] = useState<DragState>({ x: 0, y: 0, axis: null });
   const [isDragging, setIsDragging] = useState(false);
   const [noTransition, setNoTransition] = useState(false);
@@ -125,12 +191,6 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
   const sheetRef = useRef<HTMLDivElement>(null);
   const dragPointerId = useRef<number | null>(null);
   const capturedPointerId = useRef<number | null>(null);
-  // Set right before a swipe-down dismiss calls onClose(). The sheet becomes
-  // pointer-events-none the instant React re-renders — synchronously, before
-  // the browser's own post-pointerup "click" event fires — so that click
-  // falls through and hit-tests whatever's now visually underneath (e.g. a
-  // calendar day cell). This flag lets a capture-phase window listener eat
-  // that one ghost click before it ever reaches the layer below.
   const suppressNextClickRef = useRef(false);
 
   useEffect(() => {
@@ -140,8 +200,6 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
       e.preventDefault();
       e.stopPropagation();
     };
-    // capture: true — must run before the event reaches (and bubbles from)
-    // whatever element ends up under the pointer.
     window.addEventListener('click', swallowGhostClick, true);
     return () => window.removeEventListener('click', swallowGhostClick, true);
   }, []);
@@ -164,7 +222,6 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
     }, SWIPE_EXIT_DURATION);
   }, [onNext, onPrev, setDragBoth]);
 
-  // NOTE: no setPointerCapture here — see comment above the gesture system.
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
     if (animatingRef.current) return;
     dragStart.current = { x: e.clientX, y: e.clientY, scrollTop: contentRef.current?.scrollTop ?? 0 };
@@ -186,14 +243,12 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
       if (!axis) {
         if (Math.abs(dx) < AXIS_LOCK_THRESHOLD && Math.abs(dy) < AXIS_LOCK_THRESHOLD) return;
         axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
-        // Confirmed drag (moved past the threshold) — now safe to claim the
-        // pointer so it can't be picked up by the calendar underneath.
         if (dragPointerId.current != null && sheetRef.current) {
           try {
             sheetRef.current.setPointerCapture(dragPointerId.current);
             capturedPointerId.current = dragPointerId.current;
           } catch {
-            // Capture is a defensive enhancement, not required for correctness.
+            // Safe fallback
           }
         }
       }
@@ -221,7 +276,7 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
       }
       capturedPointerId.current = null;
       dragPointerId.current = null;
-      const final = dragRef.current; // read once, decide once — never inside setState
+      const final = dragRef.current;
 
       if (final.axis === 'x') {
         if (final.x <= -SWIPE_COMMIT_THRESHOLD && canGoNext) {
@@ -277,76 +332,121 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
   const toggleExpanded = useCallback(() => setExpanded((v) => !v), []);
   const noTransitionOrDragging = isDragging || noTransition;
 
-  return <>
-    <div
-      onClick={onClose}
-      className={`fixed inset-0 z-10 bg-black/30 backdrop-blur-sm transition-opacity duration-300 ${open ? 'opacity-100' : 'pointer-events-none opacity-0'}`}
-    />
+  return (
+    <>
+      <CyberLiquidStyles />
+      
+      {/* Absolute Dark Deep Backdrop Overlay */}
+      <div
+        onClick={onClose}
+        className={`fixed inset-0 z-40 bg-zinc-950/70 backdrop-blur-md transition-opacity duration-500 ${
+          open ? 'opacity-100' : 'pointer-events-none opacity-0'
+        }`}
+      />
 
-    <div
-      ref={sheetRef}
-      role="dialog"
-      aria-modal="true"
-      onPointerDown={handlePointerDown}
-      style={{
-        transform: open ? `translateY(${drag.axis === 'y' ? drag.y : 0}px)` : 'translateY(100%)',
-        transition: noTransitionOrDragging ? 'none' : 'transform 300ms cubic-bezier(0.22,1,0.36,1)',
-      }}
-      className={`fixed inset-x-0 bottom-0 z-20 mx-auto flex max-h-[92vh] w-full max-w-[430px] flex-col overflow-hidden ${GLASS_SHEET} ${open ? '' : 'pointer-events-none'} ${isDragging ? 'select-none' : ''}`}
-    >
-      <div className="flex shrink-0 flex-col items-center pb-2 pt-2.5" style={{ touchAction: 'none' }}>
-        <div className="h-1.5 w-10 rounded-full bg-zinc-300 dark:bg-zinc-600"/>
+      {/* Main Liquid Cyber Glass Sheet Structure */}
+      <div
+        ref={sheetRef}
+        role="dialog"
+        aria-modal="true"
+        onPointerDown={handlePointerDown}
+        style={{
+          transform: open ? `translateY(${drag.axis === 'y' ? drag.y : 0}px)` : 'translateY(100%)',
+          transition: noTransitionOrDragging ? 'none' : 'transform 400ms cubic-bezier(0.16, 1, 0.3, 1)',
+        }}
+        className={`fixed inset-x-0 bottom-0 z-50 mx-auto flex max-h-[92vh] w-full max-w-[430px] flex-col overflow-hidden rounded-t-[36px] border-t border-x border-white/20 bg-zinc-950/80 text-white shadow-[0_-20px_60px_rgba(0,0,0,0.8)] backdrop-blur-3xl ${
+          open ? '' : 'pointer-events-none'
+        } ${isDragging ? 'select-none' : ''}`}
+      >
+        
+        {/* PHYSICAL LIQUID ENGINE: Moving organic elements trapped beneath the sheet */}
+        <div className="absolute inset-0 -z-10 overflow-hidden opacity-50 mix-blend-screen pointer-events-none">
+          <div className="liquid-blob-1 absolute -top-12 -left-12 size-52 rounded-full bg-cyan-500/30" />
+          <div className="liquid-blob-2 absolute top-1/3 -right-20 size-64 rounded-full bg-fuchsia-500/25" />
+          <div className="liquid-blob-1 absolute -bottom-16 left-1/4 size-48 rounded-full bg-indigo-500/30" />
+        </div>
+
+        {/* Top Control Notch Bar */}
+        <div className="flex shrink-0 flex-col items-center pb-1 pt-3" style={{ touchAction: 'none' }}>
+          <div className="h-1 w-14 rounded-full bg-white/20" />
+        </div>
+
+        {event && (
+          <>
+            {/* Header Telemetry Navigation Block */}
+            <div className="flex shrink-0 items-center justify-between px-3 pb-2 border-b border-white/10" style={{ touchAction: 'none' }}>
+              <button
+                onClick={onPrev}
+                disabled={!canGoPrev}
+                className="flex h-9 items-center gap-1 rounded-xl px-2.5 font-mono text-[11px] font-black tracking-wider text-cyan-400 transition-all hover:bg-white/5 active:scale-95 disabled:pointer-events-none disabled:opacity-10"
+              >
+                <ChevronLeft className="size-4" />
+                PREV
+              </button>
+              
+              <div className="flex items-center gap-2 rounded-lg bg-zinc-900/60 border border-white/10 px-3 py-1">
+                <Activity className="size-3.5 text-fuchsia-400 animate-pulse" />
+                <p className="font-mono text-[11px] font-black tracking-widest text-zinc-100 uppercase">{dayLabel}</p>
+              </div>
+
+              <button
+                onClick={onNext}
+                disabled={!canGoNext}
+                className="flex h-9 items-center gap-1 rounded-xl px-2.5 font-mono text-[11px] font-black tracking-wider text-cyan-400 transition-all hover:bg-white/5 active:scale-95 disabled:pointer-events-none disabled:opacity-10"
+              >
+                NEXT
+                <ChevronRight className="size-4" />
+              </button>
+            </div>
+
+            {/* Scrollable Container Body */}
+            <div
+              ref={contentRef}
+              onWheel={handleWheel}
+              style={{
+                transform: `translateX(${drag.axis === 'x' ? drag.x : 0}px)`,
+                transition: noTransitionOrDragging ? 'none' : 'transform 260ms cubic-bezier(0.16, 1, 0.3, 1)',
+                touchAction: drag.axis ? 'none' : 'pan-y',
+                paddingBottom: 'max(2rem, env(safe-area-inset-bottom))',
+              }}
+              className="overflow-y-auto px-5 pt-3"
+            >
+              <p className="font-mono text-[10px] uppercase tracking-widest text-zinc-400 text-center mb-3">
+                Index // <span className="text-zinc-200">{fullDateLabel}</span>
+              </p>
+
+              {/* Liquid-Frosted Glass Hero Shift Badge */}
+              <div className="cyber-panel-border relative my-4 overflow-hidden rounded-2xl bg-zinc-950/40 p-6 text-center border border-white/20 shadow-2xl">
+                {/* Dynamic colored ambient backing syncs with actual code styles color */}
+                <div className={`absolute -inset-10 -z-10 opacity-30 blur-2xl ${solidColorFor(event.shift)}`} />
+                <div className="absolute inset-0 bg-gradient-to-b from-white/10 to-transparent mix-blend-overlay" />
+                
+                <div className="text-glow text-[38px] font-black tracking-tight uppercase leading-none text-white">
+                  {shiftLabel(event.shift)}
+                </div>
+                <div className="mt-2 font-mono text-xs font-black tracking-widest text-zinc-300 uppercase">
+                  {shiftHours(event.shift)}
+                </div>
+              </div>
+
+              {/* Main Structural Information Groups */}
+              <div className="space-y-4">
+                <WorkingSection group={workingGroup}/>
+                <AllShiftsSection groups={allShiftsGroups} expanded={expanded} onToggle={toggleExpanded}/>
+              </div>
+
+              {/* Modern Flush Close System Button */}
+              <button
+                onClick={onClose}
+                className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl border border-red-500/30 bg-red-950/20 py-3.5 font-mono text-xs font-black uppercase tracking-widest text-red-400 transition-all hover:bg-red-500/20 active:scale-98"
+              >
+                <ShieldAlert className="size-4" />
+                Close Operational Log
+              </button>
+            </div>
+          </>
+        )}
       </div>
-
-      {event && <>
-        <div className="flex shrink-0 items-center justify-between px-2 pb-1" style={{ touchAction: 'none' }}>
-          <button
-            onClick={onPrev}
-            disabled={!canGoPrev}
-            className="flex min-h-11 items-center gap-1 rounded-full px-3 text-[15px] font-medium text-blue-500 transition active:scale-[0.97] disabled:pointer-events-none disabled:opacity-30"
-          >
-            <ChevronLeft className="size-4"/>
-            Previous
-          </button>
-          <p className="text-[13px] font-semibold text-zinc-400 dark:text-zinc-500">{dayLabel}</p>
-          <button
-            onClick={onNext}
-            disabled={!canGoNext}
-            className="flex min-h-11 items-center gap-1 rounded-full px-3 text-[15px] font-medium text-blue-500 transition active:scale-[0.97] disabled:pointer-events-none disabled:opacity-30"
-          >
-            Next
-            <ChevronRight className="size-4"/>
-          </button>
-        </div>
-
-        <div
-          ref={contentRef}
-          onWheel={handleWheel}
-          style={{
-            transform: `translateX(${drag.axis === 'x' ? drag.x : 0}px)`,
-            transition: noTransitionOrDragging ? 'none' : 'transform 220ms cubic-bezier(0.22,1,0.36,1)',
-            touchAction: drag.axis ? 'none' : 'pan-y',
-            paddingBottom: 'max(1.5rem, env(safe-area-inset-bottom))',
-          }}
-          className="overflow-y-auto px-5 pt-1"
-        >
-          <p className="text-[13px] font-medium text-zinc-400 dark:text-zinc-500">{fullDateLabel}</p>
-          <div className={`my-4 rounded-[28px] p-6 text-center shadow-[0_10px_26px_-12px_rgba(0,0,0,0.35)] ${solidColorFor(event.shift)}`}>
-            <div className="text-[34px] font-bold leading-none tracking-tight">{shiftLabel(event.shift)}</div>
-            <div className="mt-2 text-[15px] font-semibold opacity-90">{shiftHours(event.shift)}</div>
-          </div>
-          <div className="space-y-3">
-            <WorkingSection group={workingGroup}/>
-            <AllShiftsSection groups={allShiftsGroups} expanded={expanded} onToggle={toggleExpanded}/>
-          </div>
-          <button
-            onClick={onClose}
-            className="mt-5 w-full rounded-2xl bg-zinc-950/5 py-3.5 text-[17px] font-semibold text-zinc-950 transition active:scale-[0.97] dark:bg-white/10 dark:text-white"
-          >
-            Close
-          </button>
-        </div>
-      </>}
-    </div>
-  </>;
+    </>
+  );
 }
