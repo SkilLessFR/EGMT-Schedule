@@ -1,7 +1,7 @@
 // DayDetailsModal.tsx
 import type React from 'react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronLeft, ChevronRight, Activity, Users, ShieldAlert, Layers, User, ArrowLeft } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, Activity, Users, Layers } from 'lucide-react';
 import type { ShiftEvent } from './types';
 import {
   type AllShiftsGroup,
