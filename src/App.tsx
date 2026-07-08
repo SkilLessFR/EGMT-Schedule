@@ -180,6 +180,7 @@ export default function App() {
   const calendarDays = useMemo(() => monthDays(currentMonth, currentYear), [currentMonth, currentYear]);
   const title = useMemo(() => new Intl.DateTimeFormat('en', { month: 'long', year: 'numeric' }).format(new Date(currentYear, currentMonth)), [currentMonth, currentYear]);
   const todayIso = useMemo(() => iso(new Date()), []);
+  const rosterDateSet = useMemo(() => new Set(roster.dateColumns.map((d) => d.isoDate)), [roster]);
 
   // Day-details navigation: bounds and handlers, based on the roster's own
   // date columns (not the padded calendar grid, which spills into other months).
@@ -278,14 +279,13 @@ export default function App() {
   }, [goToNextMonth, goToPreviousMonth, setMonthDragBoth]);
 
   const handleMonthPointerDown = useCallback((e: React.PointerEvent) => {
-    if (monthAnimatingRef.current || selectedEvent) return;
+    if (monthAnimatingRef.current) return;
     monthDragStart.current = { x: e.clientX, y: e.clientY };
     setIsMonthDragging(true);
   }, []);
 
   useEffect(() => {
     if (!isMonthDragging) return;
-    if (selectedEvent) return;
 
     const handleMove = (e: PointerEvent) => {
       const start = monthDragStart.current;
@@ -428,34 +428,33 @@ export default function App() {
                   className={`grid h-full grid-cols-7 grid-rows-6 ${isMonthDragging ? 'select-none' : ''}`}
                 >
                   {calendarDays.map((day) => {
-                    const dayIso = iso(day);
-                    const event = eventMap[dayIso];
-                    const colors = event ? colorFor(event.shift) : { bg: '', text: '' };
-                    const isOff = event && shiftKey(event.shift) === 'OFF';
-                    const isToday = dayIso === todayIso;
-                    return <button
-                      key={dayIso}
-                      onClick={() => {
-  if (!roster || !selectedEmployee) return;
-  setSelectedEvent(
-    event ?? eventForIso(roster, selectedEmployee, dayIso)
-  );
-}}
-                      className={`flex flex-col items-center justify-start gap-1 border-b border-r border-zinc-950/[0.04] pt-1.5 transition active:scale-[0.97] active:bg-zinc-950/[0.03] dark:border-white/[0.06] dark:active:bg-white/[0.05] ${day.getMonth() !== currentMonth ? 'opacity-30' : ''}`}
-                    >
-                      <span className={`flex size-8 shrink-0 items-center justify-center rounded-full text-[18px] font-medium transition sm:size-9 sm:text-[19px] ${isToday ? 'bg-red-500 font-semibold text-white' : ''}`}>{day.getDate()}</span>
-                      {event ? (
-                        isOff ? (
-                          <span className="mt-0.5 flex size-1.5 items-center justify-center rounded-full bg-zinc-300 dark:bg-zinc-600"/>
-                        ) : (
-                          <span className={`mx-1 block max-w-[calc(100%-6px)] truncate rounded-full px-1.5 py-[1px] text-center text-[9px] font-bold leading-tight sm:text-[10px] ${colors.bg} ${colors.text}`}>
-                            <span className="hidden sm:inline">{shiftLabel(event.shift)}</span>
-                            <span className="sm:hidden">{event.shift}</span>
-                          </span>
-                        )
-                      ) : null}
-                    </button>;
-                  })}
+  const dayIso = iso(day);
+  const inRoster = rosterDateSet.has(dayIso);
+  // Fall back to an OFF-shift event for days with no explicit code, so every
+  // day in the loaded roster is clickable — same fallback day-swipe nav uses.
+  const event = eventMap[dayIso] ?? (inRoster ? eventForIso(roster, selectedEmployee, dayIso) : undefined);
+  const colors = event ? colorFor(event.shift) : { bg: '', text: '' };
+  const isOff = event && shiftKey(event.shift) === 'OFF';
+  const isToday = dayIso === todayIso;
+  return <button
+    key={dayIso}
+    onClick={() => inRoster && event && setSelectedEvent(event)}
+    disabled={!inRoster}
+    className={`flex flex-col items-center justify-start gap-1 border-b border-r border-zinc-950/[0.04] pt-1.5 transition dark:border-white/[0.06] ${inRoster ? 'active:scale-[0.97] active:bg-zinc-950/[0.03] dark:active:bg-white/[0.05]' : 'cursor-default'} ${day.getMonth() !== currentMonth ? 'opacity-30' : ''}`}
+  >
+    <span className={`flex size-8 shrink-0 items-center justify-center rounded-full text-[18px] font-medium transition sm:size-9 sm:text-[19px] ${isToday ? 'bg-red-500 font-semibold text-white' : ''}`}>{day.getDate()}</span>
+    {event ? (
+      isOff ? (
+        <span className="mt-0.5 flex size-1.5 items-center justify-center rounded-full bg-zinc-300 dark:bg-zinc-600"/>
+      ) : (
+        <span className={`mx-1 block max-w-[calc(100%-6px)] truncate rounded-full px-1.5 py-[1px] text-center text-[9px] font-bold leading-tight sm:text-[10px] ${colors.bg} ${colors.text}`}>
+          <span className="hidden sm:inline">{shiftLabel(event.shift)}</span>
+          <span className="sm:hidden">{event.shift}</span>
+        </span>
+      )
+    ) : null}
+  </button>;
+})}
                 </div>
               </div>
             </div>
