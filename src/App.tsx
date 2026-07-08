@@ -434,7 +434,12 @@ export default function App() {
                     const isToday = dayIso === todayIso;
                     return <button
                       key={dayIso}
-                      onClick={() => event && setSelectedEvent(event)}
+                      onClick={() => {
+  if (!roster || !selectedEmployee) return;
+  setSelectedEvent(
+    event ?? eventForIso(roster, selectedEmployee, dayIso)
+  );
+}}
                       className={`flex flex-col items-center justify-start gap-1 border-b border-r border-zinc-950/[0.04] pt-1.5 transition active:scale-[0.97] active:bg-zinc-950/[0.03] dark:border-white/[0.06] dark:active:bg-white/[0.05] ${day.getMonth() !== currentMonth ? 'opacity-30' : ''}`}
                     >
                       <span className={`flex size-8 shrink-0 items-center justify-center rounded-full text-[18px] font-medium transition sm:size-9 sm:text-[19px] ${isToday ? 'bg-red-500 font-semibold text-white' : ''}`}>{day.getDate()}</span>
