@@ -3,7 +3,7 @@ import type React from 'react';
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, Moon, Search, Settings2, Sun, Users } from 'lucide-react';
 import type { RosterData, ShiftEvent } from './types';
-import { colorFor, shiftKey, shiftLabel, shiftHourValues, buildRosterIndex, eventForIso, GLASS_CARD, GLASS_NAV } from './scheduleUtils';
+import { colorFor, shiftKey, shiftHourValues, buildRosterIndex, eventForIso, GLASS_CARD, GLASS_NAV } from './scheduleUtils';
 import DayDetailsModal from './DayDetailsModal';
 
 const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
