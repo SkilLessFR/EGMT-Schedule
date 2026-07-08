@@ -267,17 +267,11 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
       role="dialog"
       aria-modal="true"
       onPointerDown={handlePointerDown}
-      onPointerMove={(e) => {
-        if (open) e.stopPropagation();
-      }}
-      onTouchMove={(e) => {
-        if (open) e.stopPropagation();
-      }}
       style={{
         transform: open ? `translateY(${drag.axis === 'y' ? drag.y : 0}px)` : 'translateY(100%)',
         transition: noTransitionOrDragging ? 'none' : 'transform 300ms cubic-bezier(0.22,1,0.36,1)',
       }}
-      className={`fixed inset-x-0 bottom-0 z-50 mx-auto flex max-h-[92vh] w-full max-w-[430px] flex-col overflow-hidden ${GLASS_SHEET} ${open ? '' : 'pointer-events-none'} ${isDragging ? 'select-none' : ''}`}
+      className={`fixed inset-x-0 bottom-0 z-20 mx-auto flex max-h-[92vh] w-full max-w-[430px] flex-col overflow-hidden ${GLASS_SHEET} ${open ? '' : 'pointer-events-none'} ${isDragging ? 'select-none' : ''}`}
     >
       <div className="flex shrink-0 flex-col items-center pb-2 pt-2.5" style={{ touchAction: 'none' }}>
         <div className="h-1.5 w-10 rounded-full bg-zinc-300 dark:bg-zinc-600"/>
