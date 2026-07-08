@@ -125,6 +125,26 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
   const sheetRef = useRef<HTMLDivElement>(null);
   const dragPointerId = useRef<number | null>(null);
   const capturedPointerId = useRef<number | null>(null);
+  // Set right before a swipe-down dismiss calls onClose(). The sheet becomes
+  // pointer-events-none the instant React re-renders — synchronously, before
+  // the browser's own post-pointerup "click" event fires — so that click
+  // falls through and hit-tests whatever's now visually underneath (e.g. a
+  // calendar day cell). This flag lets a capture-phase window listener eat
+  // that one ghost click before it ever reaches the layer below.
+  const suppressNextClickRef = useRef(false);
+
+  useEffect(() => {
+    const swallowGhostClick = (e: MouseEvent) => {
+      if (!suppressNextClickRef.current) return;
+      suppressNextClickRef.current = false;
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    // capture: true — must run before the event reaches (and bubbles from)
+    // whatever element ends up under the pointer.
+    window.addEventListener('click', swallowGhostClick, true);
+    return () => window.removeEventListener('click', swallowGhostClick, true);
+  }, []);
 
   const setDragBoth = useCallback((next: DragState) => {
     dragRef.current = next;
@@ -212,6 +232,7 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
           setDragBoth({ x: 0, y: 0, axis: null });
         }
       } else if (final.axis === 'y' && final.y > DISMISS_COMMIT_THRESHOLD) {
+        suppressNextClickRef.current = true;
         setDragBoth({ x: 0, y: 0, axis: null });
         onClose();
       } else {
