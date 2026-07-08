@@ -138,17 +138,13 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
   }, [onNext, onPrev, setDragBoth]);
 
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
-    e.stopPropagation();
-
-    if (animatingRef.current) return;
-
-    dragStart.current = {
-        x: e.clientX,
-        y: e.clientY,
-        scrollTop: contentRef.current?.scrollTop ?? 0,
-    };
-
-    setIsDragging(true);
+  if (animatingRef.current) return;
+  dragStart.current = { x: e.clientX, y: e.clientY, scrollTop: contentRef.current?.scrollTop ?? 0 };
+  setIsDragging(true);
+  // Pin every subsequent event for this finger to the sheet itself, so the
+  // gesture can never be picked up by whatever's rendered underneath.
+  e.currentTarget.setPointerCapture(e.pointerId);
+  capturedPointerId.current = e.pointerId;
 }, []);
 
   useEffect(() => {
@@ -184,8 +180,12 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
     };
 
     const handleUp = () => {
-      setIsDragging(false);
-      const final = dragRef.current;
+  setIsDragging(false);
+  if (capturedPointerId.current != null && sheetRef.current?.hasPointerCapture(capturedPointerId.current)) {
+    sheetRef.current.releasePointerCapture(capturedPointerId.current);
+  }
+  capturedPointerId.current = null;
+  const final = dragRef.current;
 
       if (final.axis === 'x') {
         if (final.x <= -SWIPE_COMMIT_THRESHOLD && canGoNext) {
@@ -206,11 +206,13 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
     };
 
     window.addEventListener('pointermove', handleMove, { passive: false });
-    window.addEventListener('pointerup', handleUp);
-    return () => {
-      window.removeEventListener('pointermove', handleMove);
-      window.removeEventListener('pointerup', handleUp);
-    };
+window.addEventListener('pointerup', handleUp);
+window.addEventListener('pointercancel', handleUp);
+return () => {
+  window.removeEventListener('pointermove', handleMove);
+  window.removeEventListener('pointerup', handleUp);
+  window.removeEventListener('pointercancel', handleUp);
+};
   }, [isDragging, canGoPrev, canGoNext, onClose, commitSwipe, setDragBoth]);
 
   useEffect(() => {
@@ -280,17 +282,16 @@ export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, 
         </div>
 
         <div
-  ref={contentRef}
-  onWheel={handleWheel}
-  onPointerMove={(e) => e.stopPropagation()}
-  style={{
-    transform: `translateX(${drag.axis === 'x' ? drag.x : 0}px)`,
-    transition: noTransitionOrDragging ? 'none' : 'transform 220ms cubic-bezier(0.22,1,0.36,1)',
-    touchAction: drag.axis ? 'none' : 'pan-y',
-    paddingBottom: 'max(1.5rem, env(safe-area-inset-bottom))',
-  }}
-  className="overflow-y-auto px-5 pt-1"
->
+          ref={contentRef}
+          onWheel={handleWheel}
+          style={{
+            transform: `translateX(${drag.axis === 'x' ? drag.x : 0}px)`,
+            transition: noTransitionOrDragging ? 'none' : 'transform 220ms cubic-bezier(0.22,1,0.36,1)',
+            touchAction: drag.axis ? 'none' : 'pan-y',
+            paddingBottom: 'max(1.5rem, env(safe-area-inset-bottom))',
+          }}
+          className="overflow-y-auto px-5 pt-1"
+        >
           <p className="text-[13px] font-medium text-zinc-400 dark:text-zinc-500">{fullDateLabel}</p>
           <div className={`my-4 rounded-[28px] p-6 text-center shadow-[0_10px_26px_-12px_rgba(0,0,0,0.35)] ${solidColorFor(event.shift)}`}>
             <div className="text-[34px] font-bold leading-none tracking-tight">{shiftLabel(event.shift)}</div>
