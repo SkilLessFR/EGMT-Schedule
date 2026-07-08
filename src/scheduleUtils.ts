@@ -53,7 +53,10 @@ export function buildRosterIndex(roster: RosterData | null) {
     const daily = emptyDailyRoster();
 
     roster.employees.forEach((employee) => {
-      const code = shiftKey(roster.rows[employee]?.[isoDate] ?? '');
+      let code = shiftKey(roster.rows[employee]?.[isoDate] ?? '');
+      // Treat blank or empty cells as an OFF shift
+      if (!code) code = 'OFF';
+
       if (code === 'M') daily.morning.push(employee);
       if (code === 'A') daily.afternoon.push(employee);
       if (code === 'N') daily.night.push(employee);
