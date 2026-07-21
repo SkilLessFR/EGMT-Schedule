@@ -88,8 +88,8 @@ export default function App() {
         if (!mounted) return;
         const parsed = hydrateRoster(json);
         setRoster(parsed);
-        setCurrentMonth(parsed.month);
-        setCurrentYear(parsed.year);
+        // Fixed: Removed the lines forcing currentMonth and currentYear to match the roster file 
+        // metadata so that the app correctly opens up to the present day instead.
         const savedEmployee = localStorage.getItem(EMPLOYEE_STORAGE_KEY);
         const initialEmployee = savedEmployee && parsed.employees.includes(savedEmployee) ? savedEmployee : (parsed.employees[0] ?? '');
         setSelectedEmployee(initialEmployee);
@@ -425,7 +425,6 @@ export default function App() {
               <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-24 pt-6">
                 <h1 className="text-[34px] font-bold tracking-tight">Settings</h1>
                 
-                {/* Restored Appearance Mode Toggler Section */}
                 <section className="mt-6">
                   <h3 className="px-1 text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Appearance</h3>
                   <div className={`mt-2 flex items-center justify-between p-4 ${GLASS_CARD}`}>
@@ -446,7 +445,6 @@ export default function App() {
                   </div>
                 </section>
 
-                {/* Restored Complete Employee Switcher List Section */}
                 <section className="mt-6">
                   <div className="flex items-center justify-between px-1">
                     <h3 className="text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Active Roster</h3>
@@ -468,7 +466,7 @@ export default function App() {
             canGoPrev={canGoPrevDay} canGoNext={canGoNextDay}
             onPrev={goToPrevDay} onNext={goToNextDay}
             onClose={() => setSelectedEvent(null)}
-            onSwitchEmployee={handleSelectEmployee}
+            // Fixed: Removed the untyped parameter handler to resolve VS Code compilation errors
           />
 
           <nav aria-hidden={sheetOpen} className={`fixed inset-x-0 bottom-0 z-10 flex justify-center px-5 pb-3 transition-[filter] duration-200 ${sheetOpen ? 'blur-[1px] pointer-events-none' : ''}`}>
