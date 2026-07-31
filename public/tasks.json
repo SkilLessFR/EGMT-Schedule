@@ -1,0 +1,30 @@
+[
+  {
+    "id": "59522edd-39f3-4d39-87cc-5c0e972e1a02",
+    "title": "S43 Change Dice",
+    "times": [
+      "05:40",
+      "10:40",
+      "16:40",
+      "22:40"
+    ],
+    "scheduleType": "daily"
+  },
+  {
+    "id": "1af0132c-ead7-4505-934b-4407caeb1650",
+    "title": "A10 Change Dice",
+    "times": [
+      "00:40",
+      "12:40"
+    ],
+    "scheduleType": "daily"
+  },
+  {
+    "id": "95b41a63-9d70-47d7-93c4-ab490bd09c07",
+    "title": "VBB Bile change",
+    "times": [
+      "07:40"
+    ],
+    "scheduleType": "daily"
+  }
+]
