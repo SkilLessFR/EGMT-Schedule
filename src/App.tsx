@@ -887,7 +887,7 @@ export default function App() {
                         type="text"
                         value={newTaskTitle}
                         onChange={(e) => setNewTaskTitle(e.target.value)}
-                        placeholder="e.g. Verify API endpoint updates"
+                        placeholder="Bile Bile Bile Bile Bile multe Bile"
                         className="w-full rounded-xl border border-zinc-950/10 bg-transparent px-3 py-2 text-[15px] outline-none focus:border-blue-500 dark:border-white/10"
                       />
                     </div>
