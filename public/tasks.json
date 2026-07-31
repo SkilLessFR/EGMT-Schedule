@@ -3,10 +3,10 @@
     "id": "59522edd-39f3-4d39-87cc-5c0e972e1a02",
     "title": "S43 Change Dice",
     "times": [
-      "05:40",
-      "10:40",
-      "16:40",
-      "22:40"
+      "05:45",
+      "10:45",
+      "16:45",
+      "22:45"
     ],
     "scheduleType": "daily"
   },
@@ -14,8 +14,8 @@
     "id": "1af0132c-ead7-4505-934b-4407caeb1650",
     "title": "A10 Change Dice",
     "times": [
-      "00:40",
-      "12:40"
+      "00:45",
+      "12:45"
     ],
     "scheduleType": "daily"
   },
@@ -23,8 +23,39 @@
     "id": "95b41a63-9d70-47d7-93c4-ab490bd09c07",
     "title": "VBB Bile change",
     "times": [
-      "07:40"
+      "07:45"
     ],
     "scheduleType": "daily"
+  },
+  {
+    "id": "3265b03b-4374-4801-b9fe-8d718df98c54",
+    "title": "S43 Change Dice in 1 hour",
+    "times": [
+      "05:00",
+      "10:00",
+      "16:00",
+      "22:00"
+    ],
+    "scheduleType": "daily",
+    "dateCreated": "2026-07-31"
+  },
+  {
+    "id": "a7035514-b725-464c-9ec3-f34907fde8af",
+    "title": "A10 Change Dice in 1 hour",
+    "times": [
+      "00:00",
+      "12:00"
+    ],
+    "scheduleType": "daily",
+    "dateCreated": "2026-07-31"
+  },
+  {
+    "id": "c7763170-4a50-499d-834e-f56afca7c487",
+    "title": "VBB Bile Change in 1 hour",
+    "times": [
+      "07:00"
+    ],
+    "scheduleType": "daily",
+    "dateCreated": "2026-07-31"
   }
 ]
