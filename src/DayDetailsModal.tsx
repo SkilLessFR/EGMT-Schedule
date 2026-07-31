@@ -1,467 +1,705 @@
-// DayDetailsModal.tsx
+// App.tsx
 import type React from 'react';
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronLeft, ChevronRight, Activity, Users, ShieldAlert, Layers } from 'lucide-react';
-import type { ShiftEvent } from './types';
-import {
-  type AllShiftsGroup,
-  type DailyRoster,
-  buildAllShiftsGroups,
-  groupForShift,
-  initials,
-  shiftHours,
-  shiftLabel,
-  solidColorFor,
-} from './scheduleUtils';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, Moon, Search, Settings2, Sun, Users, Wallet } from 'lucide-react';
+import type { RosterData, ShiftEvent } from './types';
+import { colorFor, shiftKey, shiftHourValues, buildRosterIndex, eventForIso, GLASS_CARD, GLASS_NAV } from './scheduleUtils';
+import DayDetailsModal from './DayDetailsModal';
 
-const AXIS_LOCK_THRESHOLD = 8;
-const SWIPE_COMMIT_THRESHOLD = 70;
-const DISMISS_COMMIT_THRESHOLD = 90;
-const SWIPE_EXIT_DURATION = 200;
-const WHEEL_DELTA_THRESHOLD = 24;
+const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+const EMPLOYEE_STORAGE_KEY = 'work-schedule-employee';
+const DARK_MODE_STORAGE_KEY = 'work-schedule-dark-mode';
+const SALARY_STORAGE_KEY = 'work-schedule-salaries';
 
-type DragState = { x: number; y: number; axis: 'x' | 'y' | null };
+// Romanian legal public holidays for 2026 (source: zileliberelegale.ro). Update this list for other years.
+const ROMANIAN_HOLIDAYS_2026 = new Set<string>([
+  '2026-01-01', // Anul Nou
+  '2026-01-02', // Anul Nou
+  '2026-01-06', // Boboteaza
+  '2026-01-07', // Sfântul Ioan Botezătorul
+  '2026-01-24', // Ziua Unirii Principatelor Române
+  '2026-04-10', // Vinerea Mare
+  '2026-04-12', // Paștele
+  '2026-04-13', // Paștele
+  '2026-05-01', // Ziua Muncii
+  '2026-05-31', // Rusalii
+  '2026-06-01', // Ziua Copilului / Rusalii
+  '2026-08-15', // Adormirea Maicii Domnului
+  '2026-11-30', // Sfântul Andrei
+  '2026-12-01', // Ziua Națională a României
+  '2026-12-25', // Crăciunul
+  '2026-12-26', // Crăciunul
+]);
 
-// ---------------------------------------------------------------------------
-// Advanced Liquid Plasma & Cyberglass CSS Engine
-// ---------------------------------------------------------------------------
-const CyberLiquidStyles = () => (
-  <style dangerouslySetInnerHTML={{ __html: `
-    @keyframes liquid-drift-1 {
-      0% { transform: translate(0px, 0px) scale(1) rotate(0deg); }
-      33% { transform: translate(40px, -60px) scale(1.4) rotate(120deg); }
-      66% { transform: translate(-30px, 50px) scale(0.8) rotate(240deg); }
-      100% { transform: translate(0px, 0px) scale(1) rotate(360deg); }
-    }
-    @keyframes liquid-drift-2 {
-      0% { transform: translate(0px, 0px) scale(1.2) rotate(180deg); }
-      50% { transform: translate(-50px, 40px) scale(0.7) rotate(0deg); }
-      100% { transform: translate(0px, 0px) scale(1.2) rotate(180deg); }
-    }
-    .liquid-blob-1 {
-      animation: liquid-drift-1 16s ease-in-out infinite;
-      filter: blur(40px);
-    }
-    .liquid-blob-2 {
-      animation: liquid-drift-2 12s ease-in-out infinite alternate;
-      filter: blur(50px);
-    }
-    .cyber-panel-border {
-      box-shadow: 
-        inset 0 1px 1px rgba(255, 255, 255, 0.3),
-        0 1px 2px rgba(0, 0, 0, 0.4),
-        0 20px 40px -15px rgba(0, 0, 0, 0.7);
-    }
-    .text-glow {
-      text-shadow: 0 0 12px rgba(255, 255, 255, 0.4);
-    }
-  `}} />
-);
+function isNationalHoliday(isoDate: string) {
+  return ROMANIAN_HOLIDAYS_2026.has(isoDate);
+}
 
-// ---------------------------------------------------------------------------
-// Presentational subcomponents
-// ---------------------------------------------------------------------------
+// "Working days" for salary purposes = weekdays (Mon-Fri) that aren't a national holiday.
+function countWorkingDaysInMonth(month: number, year: number) {
+  let count = 0;
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  for (let day = 1; day <= daysInMonth; day++) {
+    const date = new Date(year, month, day);
+    const dayOfWeek = date.getDay();
+    if (dayOfWeek === 0 || dayOfWeek === 6) continue;
+    if (isNationalHoliday(iso(date))) continue;
+    count += 1;
+  }
+  return count;
+}
 
-const EmployeeList = memo(function EmployeeList({ employees }: { employees: { name: string; suffix?: string }[] }) {
-  return (
-    <div className="space-y-2">
-      {employees.map(({ name, suffix }) => (
-        <div 
-          key={`${name}-${suffix ?? ''}`} 
-          className="flex items-center justify-between rounded-xl border border-white/10 bg-zinc-950/40 p-3 backdrop-blur-md transition-all hover:bg-zinc-900/60"
-        >
-          <div className="flex items-center gap-3">
-            <span className="flex size-7 shrink-0 items-center justify-center rounded bg-gradient-to-tr from-cyan-400 to-indigo-500 font-mono text-[10px] font-black text-black shadow-[0_0_10px_rgba(34,211,238,0.4)]">
-              {initials(name)}
-            </span>
-            <span className="text-[14px] font-semibold tracking-wide text-zinc-100">{name}</span>
-          </div>
-          {suffix && (
-            <span className="rounded bg-white/5 border border-white/5 px-2 py-0.5 font-mono text-[10px] uppercase text-cyan-400 tracking-wider">
-              {suffix}
-            </span>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-});
+// Normalizes a name for comparison: lowercase, hyphens/extra spaces collapsed, words sorted
+// so "Palade Alexandru-Ionut" and "Alexandru Ionut Palade" are treated as the same person.
+function normalizeName(name: string) {
+  return name
+    .toLowerCase()
+    .replace(/-/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .sort()
+    .join(' ');
+}
 
-const WorkingSection = memo(function WorkingSection({ group }: { group: ReturnType<typeof groupForShift> }) {
-  return (
-    <section className="cyber-panel-border rounded-2xl border border-white/10 bg-zinc-900/40 p-4 backdrop-blur-md">
-      <div className="mb-3 flex items-center gap-2 border-b border-white/5 pb-2">
-        <Users className="size-3.5 text-cyan-400" />
-        <h3 className="font-mono text-[11px] font-black uppercase tracking-widest text-cyan-400">
-          Assigned Personnel
-        </h3>
-      </div>
-      {group && group.employees.length > 0 ? (
-        <EmployeeList employees={group.employees}/>
-      ) : (
-        <p className="font-mono text-xs text-zinc-400 italic py-1">Standby status: No alternative assignments detected.</p>
-      )}
-    </section>
-  );
-});
+// These colleagues work mid shifts and shouldn't be counted in the "most seen colleague" stat.
+const MOST_SEEN_EXCLUDED = [normalizeName('Palade Alexandru-Ionut'), normalizeName('Tir George Cristian')];
 
-const AllShiftsSection = memo(function AllShiftsSection({ groups, expanded, onToggle }: { groups: AllShiftsGroup[]; expanded: boolean; onToggle: () => void }) {
-  return (
-    <section className="cyber-panel-border rounded-2xl border border-white/10 bg-zinc-900/40 backdrop-blur-md">
-      <button
-        onClick={onToggle}
-        className="flex min-h-12 w-full items-center justify-between px-4 py-3 text-left transition hover:bg-white/5"
-        aria-expanded={expanded}
-      >
-        <div className="flex items-center gap-2">
-          <Layers className="size-3.5 text-fuchsia-400" />
-          <span className="font-mono text-[11px] font-black uppercase tracking-widest text-zinc-200">
-            Timeline Overview
-          </span>
-        </div>
-        <ChevronDown className={`size-4 shrink-0 text-fuchsia-400 transition-transform duration-500 cubic-bezier(0.16, 1, 0.3, 1) ${expanded ? 'rotate-180' : ''}`}/>
-      </button>
-      <div className={`grid transition-[grid-template-rows] duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] ${expanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
-        <div className="overflow-hidden">
-          <div className="space-y-4 px-4 pb-4 pt-2 border-t border-white/5">
-            {groups.length === 0 && <p className="font-mono text-xs text-zinc-500">System idle.</p>}
-            {groups.map((group) => (
-              <div key={group.code} className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className={`inline-block size-1.5 shrink-0 rounded-full shadow-[0_0_8px_currentColor] ${solidColorFor(group.code)}`}/>
-                  <h4 className="font-mono text-[11px] font-bold uppercase tracking-wider text-zinc-400">{group.label}</h4>
-                </div>
-                <div className="grid grid-cols-1 gap-1">
-                  {group.employees.map((name) => (
-                    <div key={name} className="rounded-lg bg-zinc-950/50 border border-white/5 px-3 py-2 font-sans text-[13px] text-zinc-300">
-                      {name}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-});
+const APP_DARK_BG = '#050505';
+const APP_LIGHT_BG = '#f4f4f5';
 
-// ---------------------------------------------------------------------------
-// Main modal
-// ---------------------------------------------------------------------------
+const MONTH_AXIS_LOCK_THRESHOLD = 8;
+const MONTH_SWIPE_COMMIT_THRESHOLD = 70;
+const MONTH_SWIPE_DURATION = 260;
+const NAV_INDICATOR_OFFSETS = ['translate-x-0', 'translate-x-[calc(100%+0.375rem)]', 'translate-x-[calc(200%+0.75rem)]'];
 
-type DayDetailsModalProps = {
-  event: ShiftEvent | null;
-  dailyRoster: DailyRoster | undefined;
-  selectedEmployee: string;
-  canGoPrev: boolean;
-  canGoNext: boolean;
-  onPrev: () => void;
-  onNext: () => void;
-  onClose: () => void;
+const IOS_SWITCH_ON = '#34c759';
+const IOS_SWITCH_OFF = '#e5e5ea';
+
+function monthDays(month: number, year: number) {
+  const first = new Date(year, month, 1);
+  const startOffset = (first.getDay() + 6) % 7;
+  const start = new Date(year, month, 1 - startOffset);
+  return Array.from({ length: 42 }, (_, index) => new Date(start.getFullYear(), start.getMonth(), start.getDate() + index));
+}
+function iso(date: Date) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; }
+
+function displayFileName(fileName: string | undefined | null) {
+  if (!fileName || !fileName.trim()) return 'Untitled roster';
+  const base = fileName.trim().split(/[\\/]/).pop() ?? fileName;
+  return base.replace(/\.(xlsx|xls|xlsm|csv|json)$/i, '');
+}
+
+function formatRon(amount: number) {
+  return `${amount.toLocaleString('ro-RO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} RON`;
+}
+
+type ScheduleJson = {
+  fileName: string;
+  month: number;
+  year: number;
+  employees: string[];
+  dateColumns: { isoDate: string }[];
+  rows: Record<string, Record<string, string>>;
 };
 
-export default function DayDetailsModal({ event, dailyRoster, selectedEmployee, canGoPrev, canGoNext, onPrev, onNext, onClose }: DayDetailsModalProps) {
-  const open = event != null;
+function hydrateRoster(json: ScheduleJson): RosterData {
+  return {
+    fileName: json.fileName,
+    month: json.month,
+    year: json.year,
+    employees: json.employees,
+    dateColumns: json.dateColumns.map(({ isoDate }, index) => ({ index, isoDate, date: new Date(isoDate) })),
+    rows: json.rows,
+  };
+}
 
-  const workingGroup = useMemo(() => event ? groupForShift(event.shift, dailyRoster, selectedEmployee) : null, [event, dailyRoster, selectedEmployee]);
-  const allShiftsGroups = useMemo(() => buildAllShiftsGroups(dailyRoster), [dailyRoster]);
+function eventsForEmployee(roster: RosterData, employee: string): ShiftEvent[] {
+  return roster.dateColumns.reduce<ShiftEvent[]>((events, { isoDate }) => {
+    const shift = roster.rows[employee]?.[isoDate] || 'OFF';
+    events.push({ id: `${employee}-${isoDate}`, isoDate, shift, date: new Date(isoDate) });
+    return events;
+  }, []);
+}
 
-  const dayLabel = useMemo(() => event ? new Intl.DateTimeFormat('en', { month: 'long', day: 'numeric' }).format(event.date) : '', [event]);
-  const fullDateLabel = useMemo(
-    () => event ? event.date.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }) : '',
-    [event],
+export default function App() {
+  const [dark, setDark] = useState(() => {
+    const saved = localStorage.getItem(DARK_MODE_STORAGE_KEY);
+    return saved !== null ? saved === 'true' : true;
+  });
+  const [status, setStatus] = useState<'loading' | 'error' | 'loaded'>('loading');
+  const [roster, setRoster] = useState<RosterData | null>(null);
+  const [errorMessage, setErrorMessage] = useState('');
+  const [selectedEmployee, setSelectedEmployee] = useState('');
+  const [query, setQuery] = useState('');
+  const [currentMonth, setCurrentMonth] = useState(new Date().getMonth());
+  const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
+  const [selectedEvent, setSelectedEvent] = useState<ShiftEvent | null>(null);
+  const [salaries, setSalaries] = useState<Record<string, number>>(() => {
+    try {
+      const saved = localStorage.getItem(SALARY_STORAGE_KEY);
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const handleSalaryChange = useCallback((employee: string, value: string) => {
+    const parsed = value === '' ? 0 : Number(value);
+    setSalaries((prev) => {
+      const next = { ...prev, [employee]: Number.isFinite(parsed) ? parsed : 0 };
+      localStorage.setItem(SALARY_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    fetch(`${import.meta.env.BASE_URL}schedule.json`)
+      .then((res) => {
+        if (!res.ok) throw new Error('Schedule file not found. Run npm run import.');
+        return res.json() as Promise<ScheduleJson>;
+      })
+      .then((json) => {
+        if (!mounted) return;
+        const parsed = hydrateRoster(json);
+        setRoster(parsed);
+        const savedEmployee = localStorage.getItem(EMPLOYEE_STORAGE_KEY);
+        const initialEmployee = savedEmployee && parsed.employees.includes(savedEmployee) ? savedEmployee : (parsed.employees[0] ?? '');
+        setSelectedEmployee(initialEmployee);
+        setStatus('loaded');
+      })
+      .catch((err) => {
+        if (!mounted) return;
+        setErrorMessage(err instanceof Error ? err.message : 'Unable to load schedule.');
+        setStatus('error');
+      });
+    return () => { mounted = false; };
+  }, []);
+
+  useEffect(() => {
+    const html = document.documentElement;
+    const body = document.body;
+    const bg = dark ? APP_DARK_BG : APP_LIGHT_BG;
+    
+    const prev = {
+      htmlBg: html.style.backgroundColor, bodyBg: body.style.backgroundColor,
+      htmlOverscroll: html.style.overscrollBehaviorY, bodyOverscroll: body.style.overscrollBehaviorY,
+      htmlHeight: html.style.height, bodyHeight: body.style.height,
+    };
+    
+    html.style.backgroundColor = bg; body.style.backgroundColor = bg;
+    html.style.overscrollBehaviorY = 'none'; body.style.overscrollBehaviorY = 'none';
+    html.style.height = '100%'; body.style.height = '100%';
+    
+    return () => {
+      html.style.backgroundColor = prev.htmlBg; body.style.backgroundColor = prev.bodyBg;
+      html.style.overscrollBehaviorY = prev.htmlOverscroll; body.style.overscrollBehaviorY = prev.bodyOverscroll;
+      html.style.height = prev.htmlHeight; body.style.height = prev.bodyHeight;
+    };
+  }, [dark]);
+
+  const [activeTab, setActiveTab] = useState<'calendar' | 'reports' | 'settings'>('calendar');
+  const handleTabChange = useCallback((tab: 'calendar' | 'reports' | 'settings') => {
+    setActiveTab(tab);
+    setSelectedEvent(null);
+  }, []);
+
+  const toggleAppearance = useCallback(() => {
+    setDark((prev) => {
+      const next = !prev;
+      localStorage.setItem(DARK_MODE_STORAGE_KEY, String(next));
+      return next;
+    });
+  }, []);
+
+  const events = useMemo(() => (roster && selectedEmployee ? eventsForEmployee(roster, selectedEmployee) : []), [roster, selectedEmployee]);
+  const eventMap = useMemo(() => Object.fromEntries(events.map((e) => [e.isoDate, e])), [events]);
+  const rosterIndex = useMemo(() => buildRosterIndex(roster), [roster]);
+  const rosterDateSet = useMemo(() => new Set(roster?.dateColumns.map((d) => d.isoDate) ?? []), [roster]);
+  const filteredEmployees = useMemo(() => roster?.employees.filter((name) => name.toLowerCase().includes(query.toLowerCase())) ?? [], [query, roster]);
+  const calendarDays = useMemo(() => monthDays(currentMonth, currentYear), [currentMonth, currentYear]);
+  const title = useMemo(() => new Intl.DateTimeFormat('en', { month: 'long', year: 'numeric' }).format(new Date(currentYear, currentMonth)), [currentMonth, currentYear]);
+  const todayIso = useMemo(() => iso(new Date()), []);
+
+  const selectedDayIndex = useMemo(() => {
+    if (!roster || !selectedEvent) return -1;
+    return roster.dateColumns.findIndex((d) => d.isoDate === selectedEvent.isoDate);
+  }, [roster, selectedEvent]);
+  const canGoPrevDay = selectedDayIndex > 0;
+  const canGoNextDay = roster ? selectedDayIndex !== -1 && selectedDayIndex < roster.dateColumns.length - 1 : false;
+
+  const goToPrevDay = useCallback(() => {
+    setSelectedEvent((current) => {
+      if (!current || !roster) return current;
+      const idx = roster.dateColumns.findIndex((d) => d.isoDate === current.isoDate);
+      if (idx <= 0) return current;
+      return eventForIso(roster, selectedEmployee, roster.dateColumns[idx - 1].isoDate);
+    });
+  }, [roster, selectedEmployee]);
+
+  const goToNextDay = useCallback(() => {
+    setSelectedEvent((current) => {
+      if (!current || !roster) return current;
+      const idx = roster.dateColumns.findIndex((d) => d.isoDate === current.isoDate);
+      if (idx === -1 || idx >= roster.dateColumns.length - 1) return current;
+      return eventForIso(roster, selectedEmployee, roster.dateColumns[idx + 1].isoDate);
+    });
+  }, [roster, selectedEmployee]);
+
+  const currentMonthEvents = useMemo(
+    () => events.filter((event) => event.date.getMonth() === currentMonth && event.date.getFullYear() === currentYear),
+    [events, currentMonth, currentYear],
   );
 
-  const [expanded, setExpanded] = useState(false);
-  const wasOpen = useRef(false);
-  useEffect(() => {
-    if (open && !wasOpen.current) setExpanded(false);
-    wasOpen.current = open;
-  }, [open]);
+  const monthlyStats = useMemo(() => {
+    const counts: Record<string, number> = { M: 0, A: 0, N: 0, MID: 0, OFF: 0, H8: 0 };
+    const monthDatesInRoster = roster ? roster.dateColumns.filter(
+      (d) => d.date.getMonth() === currentMonth && d.date.getFullYear() === currentYear
+    ) : [];
 
-  // Desktop gets a centered dialog instead of a mobile bottom sheet, and skips the swipe-to-dismiss gesture.
-  const [isDesktop, setIsDesktop] = useState(() => typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches);
-  useEffect(() => {
-    const mq = window.matchMedia('(min-width: 1024px)');
-    const handleChange = () => setIsDesktop(mq.matches);
-    handleChange();
-    mq.addEventListener('change', handleChange);
-    return () => mq.removeEventListener('change', handleChange);
-  }, []);
+    let weekendDays = 0;
+    monthDatesInRoster.forEach(({ isoDate, date }) => {
+      const rawShift = roster?.rows[selectedEmployee]?.[isoDate];
+      const code = shiftKey(rawShift ?? 'OFF');
+      if (code in counts) {
+        counts[code] += 1;
+      } else {
+        counts['OFF'] += 1;
+      }
+      const isWeekendDate = date.getDay() === 0 || date.getDay() === 6;
+      const isWorking = code !== 'OFF' && code !== 'H8';
+      if (isWeekendDate && isWorking) weekendDays += 1;
+    });
 
-  const [drag, setDrag] = useState<DragState>({ x: 0, y: 0, axis: null });
-  const [isDragging, setIsDragging] = useState(false);
-  const [noTransition, setNoTransition] = useState(false);
-  const dragStart = useRef<{ x: number; y: number; scrollTop: number } | null>(null);
-  const dragRef = useRef<DragState>({ x: 0, y: 0, axis: null });
-  const animatingRef = useRef(false);
-  const contentRef = useRef<HTMLDivElement>(null);
-  const sheetRef = useRef<HTMLDivElement>(null);
-  const dragPointerId = useRef<number | null>(null);
-  const capturedPointerId = useRef<number | null>(null);
-  const suppressNextClickRef = useRef(false);
+    const workingShifts = counts.M + counts.A + counts.N + counts.MID;
+    const totalHours = Object.entries(counts).reduce((sum, [code, count]) => sum + count * (shiftHourValues[code] ?? 0), 0);
+    const daysOff = counts.OFF + counts.H8;
+    return { counts, workingShifts, totalHours, daysOff, weekendDays };
+  }, [roster, selectedEmployee, currentMonth, currentYear]);
 
-  useEffect(() => {
-    const swallowGhostClick = (e: MouseEvent) => {
-      if (!suppressNextClickRef.current) return;
-      suppressNextClickRef.current = false;
-      e.preventDefault();
-      e.stopPropagation();
+  const salaryBreakdown = useMemo(() => {
+    const baseSalary = salaries[selectedEmployee] ?? 0;
+    const workingDaysInMonth = countWorkingDaysInMonth(currentMonth, currentYear);
+    const dailyWage = workingDaysInMonth > 0 ? baseSalary / workingDaysInMonth : 0;
+
+    const monthDatesInRoster = roster ? roster.dateColumns.filter(
+      (d) => d.date.getMonth() === currentMonth && d.date.getFullYear() === currentYear
+    ) : [];
+
+    let workedDays = 0;
+    let nightCount = 0, weekendCount = 0, holidayCount = 0;
+    let nightBonus = 0, weekendBonus = 0, holidayBonus = 0;
+    let basePay = 0;
+
+    monthDatesInRoster.forEach(({ isoDate, date }) => {
+      const raw = roster?.rows[selectedEmployee]?.[isoDate];
+      const code = shiftKey(raw ?? 'OFF');
+      
+      // A day counts for pay as long as it isn't a normal 'OFF' day
+      const isPaidDay = code !== 'OFF';
+      if (!isPaidDay) return;
+
+      workedDays += 1;
+      basePay += dailyWage;
+
+      // If it's a holiday shift ('H8'), stop here so it gets normal pay but zero bonuses
+      if (code === 'H8') return;
+
+      const isNight = code === 'N';
+      const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+      const isHoliday = isNationalHoliday(isoDate);
+
+      if (isNight) { nightCount += 1; nightBonus += dailyWage * 0.25; }
+      if (isWeekend) { weekendCount += 1; weekendBonus += dailyWage * 0.10; }
+      if (isHoliday) { holidayCount += 1; holidayBonus += dailyWage * 1.00; }
+    });
+
+    const total = basePay + nightBonus + weekendBonus + holidayBonus;
+    return {
+      baseSalary, workingDaysInMonth, dailyWage, workedDays, basePay,
+      nightCount, weekendCount, holidayCount,
+      nightBonus, weekendBonus, holidayBonus, total,
     };
-    window.addEventListener('click', swallowGhostClick, true);
-    return () => window.removeEventListener('click', swallowGhostClick, true);
+  }, [roster, salaries, selectedEmployee, currentMonth, currentYear]);
+
+  const mostSeenColleagues = useMemo(() => {
+    if (!roster || !selectedEmployee) return { names: [], count: 0 };
+    const matches: Record<string, number> = {};
+    const targetMonthEvents = currentMonthEvents.filter(e => shiftKey(e.shift) !== 'OFF' && shiftKey(e.shift) !== 'H8');
+
+    targetMonthEvents.forEach((userEvent) => {
+      const activeUserShiftCode = shiftKey(userEvent.shift);
+      roster.employees.forEach((colleague) => {
+        if (colleague === selectedEmployee) return;
+        if (MOST_SEEN_EXCLUDED.includes(normalizeName(colleague))) return;
+        const colleagueShiftRaw = roster.rows[colleague]?.[userEvent.isoDate];
+        const colleagueShiftCode = shiftKey(colleagueShiftRaw ?? 'OFF');
+
+        let isShared = false;
+        if (activeUserShiftCode === colleagueShiftCode && colleagueShiftCode !== 'OFF') {
+          isShared = true;
+        } else if (activeUserShiftCode === 'MID' && (colleagueShiftCode === 'M' || colleagueShiftCode === 'A')) {
+          isShared = true;
+        } else if (colleagueShiftCode === 'MID' && (activeUserShiftCode === 'M' || activeUserShiftCode === 'A')) {
+          isShared = true;
+        }
+
+        if (isShared) {
+          matches[colleague] = (matches[colleague] || 0) + 1;
+        }
+      });
+    });
+
+    const scores = Object.values(matches);
+    if (scores.length === 0) return { names: [], count: 0 };
+    const maxScore = Math.max(...scores);
+    const names = Object.keys(matches).filter(name => matches[name] === maxScore);
+    return { names, count: maxScore };
+  }, [roster, selectedEmployee, currentMonthEvents]);
+
+  const goToPreviousMonth = useCallback(() => {
+    setCurrentMonth((m) => { const d = new Date(currentYear, m - 1); setCurrentYear(d.getFullYear()); return d.getMonth(); });
+  }, [currentYear]);
+
+  const goToNextMonth = useCallback(() => {
+    setCurrentMonth((m) => { const d = new Date(currentYear, m + 1); setCurrentYear(d.getFullYear()); return d.getMonth(); });
+  }, [currentYear]);
+
+  const monthGridRef = useRef<HTMLDivElement>(null);
+  const monthDragStart = useRef<{ x: number; y: number } | null>(null);
+  const monthAxisRef = useRef<'x' | 'y' | null>(null);
+  const monthLastDx = useRef(0);
+  const monthDragPointerId = useRef<number | null>(null);
+  const monthCapturedPointerId = useRef<number | null>(null);
+  const monthAnimatingRef = useRef(false);
+
+  const setMonthTransform = useCallback((x: number, transition: boolean) => {
+    const el = monthGridRef.current; if (!el) return;
+    el.style.transition = transition ? `transform ${MONTH_SWIPE_DURATION}ms cubic-bezier(0.22,1,0.36,1)` : 'none';
+    el.style.transform = `translateX(${x}px)`;
   }, []);
 
-  const setDragBoth = useCallback((next: DragState) => {
-    dragRef.current = next;
-    setDrag(next);
-  }, []);
-
-  const commitSwipe = useCallback((direction: 'next' | 'prev') => {
-    if (animatingRef.current) return;
-    animatingRef.current = true;
-    setDragBoth({ x: direction === 'next' ? -window.innerWidth : window.innerWidth, y: 0, axis: 'x' });
+  const commitMonthSwipe = useCallback((dir: 'next' | 'prev') => {
+    if (monthAnimatingRef.current) return; monthAnimatingRef.current = true;
+    const dist = (monthGridRef.current?.offsetWidth ?? 300) + 24;
+    setMonthTransform(dir === 'next' ? -dist : dist, true);
     window.setTimeout(() => {
-      if (direction === 'next') onNext(); else onPrev();
-      setNoTransition(true);
-      setDragBoth({ x: 0, y: 0, axis: null });
-      requestAnimationFrame(() => requestAnimationFrame(() => setNoTransition(false)));
-      animatingRef.current = false;
-    }, SWIPE_EXIT_DURATION);
-  }, [onNext, onPrev, setDragBoth]);
+      if (dir === 'next') goToNextMonth(); else goToPreviousMonth();
+      setMonthTransform(0, false); monthAnimatingRef.current = false;
+    }, MONTH_SWIPE_DURATION);
+  }, [goToNextMonth, goToPreviousMonth, setMonthTransform]);
 
-  const handlePointerDown = useCallback((e: React.PointerEvent) => {
-    if (animatingRef.current || isDesktop) return;
-    dragStart.current = { x: e.clientX, y: e.clientY, scrollTop: contentRef.current?.scrollTop ?? 0 };
-    dragPointerId.current = e.pointerId;
-    setIsDragging(true);
-  }, [isDesktop]);
+  const handleMonthPointerDown = useCallback((e: React.PointerEvent) => {
+    if (monthAnimatingRef.current) return;
+    monthDragStart.current = { x: e.clientX, y: e.clientY };
+    monthDragPointerId.current = e.pointerId; monthAxisRef.current = null; monthLastDx.current = 0;
+  }, []);
 
   useEffect(() => {
-    if (!isDragging) return;
-
     const handleMove = (e: PointerEvent) => {
-      const start = dragStart.current;
-      if (!start) return;
-      const dx = e.clientX - start.x;
-      const dy = e.clientY - start.y;
-      const current = dragRef.current;
-
-      let axis = current.axis;
+      const start = monthDragStart.current; const grid = monthGridRef.current;
+      if (!start || !grid) return;
+      const dx = e.clientX - start.x; const dy = e.clientY - start.y;
+      let axis = monthAxisRef.current;
       if (!axis) {
-        if (Math.abs(dx) < AXIS_LOCK_THRESHOLD && Math.abs(dy) < AXIS_LOCK_THRESHOLD) return;
-        axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
-        if (dragPointerId.current != null && sheetRef.current) {
-          try {
-            sheetRef.current.setPointerCapture(dragPointerId.current);
-            capturedPointerId.current = dragPointerId.current;
-          } catch {
-            // Safe fallback
+        if (Math.abs(dx) < MONTH_AXIS_LOCK_THRESHOLD && Math.abs(dy) < MONTH_AXIS_LOCK_THRESHOLD) return;
+        axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y'; monthAxisRef.current = axis;
+        if (axis === 'x') {
+          grid.style.willChange = 'transform'; grid.classList.add('select-none');
+          if (monthDragPointerId.current != null) {
+            try { grid.setPointerCapture(monthDragPointerId.current); monthCapturedPointerId.current = monthDragPointerId.current; } catch {}
           }
         }
       }
-
-      if (axis === 'x') {
-        const blocked = (dx > 0 && !canGoPrev) || (dx < 0 && !canGoNext);
-        e.preventDefault();
-        setDragBoth({ x: blocked ? dx / 3 : dx, y: 0, axis });
-        return;
-      }
-
-      const startedAtTop = start.scrollTop <= 0;
-      if (dy > 0 && startedAtTop) {
-        e.preventDefault();
-        setDragBoth({ x: 0, y: dy, axis });
-      } else if (!current.axis) {
-        setDragBoth({ x: 0, y: 0, axis: null });
-      }
+      if (axis !== 'x') return;
+      const applied = dx; monthLastDx.current = applied; e.preventDefault(); setMonthTransform(applied, false);
     };
 
     const handleUp = () => {
-      setIsDragging(false);
-      if (capturedPointerId.current != null && sheetRef.current?.hasPointerCapture(capturedPointerId.current)) {
-        sheetRef.current.releasePointerCapture(capturedPointerId.current);
+      const grid = monthGridRef.current; const axis = monthAxisRef.current;
+      if (monthCapturedPointerId.current != null && grid?.hasPointerCapture(monthCapturedPointerId.current)) {
+        grid.releasePointerCapture(monthCapturedPointerId.current);
       }
-      capturedPointerId.current = null;
-      dragPointerId.current = null;
-      const final = dragRef.current;
-
-      if (final.axis === 'x') {
-        if (final.x <= -SWIPE_COMMIT_THRESHOLD && canGoNext) {
-          commitSwipe('next');
-        } else if (final.x >= SWIPE_COMMIT_THRESHOLD && canGoPrev) {
-          commitSwipe('prev');
-        } else {
-          setDragBoth({ x: 0, y: 0, axis: null });
-        }
-      } else if (final.axis === 'y' && final.y > DISMISS_COMMIT_THRESHOLD) {
-        suppressNextClickRef.current = true;
-        setDragBoth({ x: 0, y: 0, axis: null });
-        onClose();
-      } else {
-        setDragBoth({ x: 0, y: 0, axis: null });
+      monthCapturedPointerId.current = null; monthDragPointerId.current = null;
+      if (axis === 'x' && grid) {
+        grid.style.willChange = ''; grid.classList.remove('select-none');
+        const dx = monthLastDx.current;
+        if (dx <= -MONTH_SWIPE_COMMIT_THRESHOLD) commitMonthSwipe('next');
+        else if (dx >= MONTH_SWIPE_COMMIT_THRESHOLD) commitMonthSwipe('prev');
+        else setMonthTransform(0, true);
       }
-
-      dragStart.current = null;
+      monthDragStart.current = null; monthAxisRef.current = null; monthLastDx.current = 0;
     };
 
     window.addEventListener('pointermove', handleMove, { passive: false });
-    window.addEventListener('pointerup', handleUp);
-    window.addEventListener('pointercancel', handleUp);
+    window.addEventListener('pointerup', handleUp); window.addEventListener('pointercancel', handleUp);
     return () => {
       window.removeEventListener('pointermove', handleMove);
-      window.removeEventListener('pointerup', handleUp);
-      window.removeEventListener('pointercancel', handleUp);
+      window.removeEventListener('pointerup', handleUp); window.removeEventListener('pointercancel', handleUp);
     };
-  }, [isDragging, canGoPrev, canGoNext, onClose, commitSwipe, setDragBoth]);
+  }, [commitMonthSwipe, setMonthTransform]);
 
-  useEffect(() => {
-    if (!open) { setDragBoth({ x: 0, y: 0, axis: null }); setIsDragging(false); }
-  }, [open, setDragBoth]);
+  const handleSelectEmployee = useCallback((name: string) => {
+    setSelectedEmployee(name);
+    localStorage.setItem(EMPLOYEE_STORAGE_KEY, name);
+  }, []);
 
-  useEffect(() => {
-    if (!open) return;
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowLeft' && canGoPrev) onPrev();
-      else if (e.key === 'ArrowRight' && canGoNext) onNext();
-      else if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [open, canGoPrev, canGoNext, onPrev, onNext, onClose]);
+  if (status === 'loading') {
+    return <main className={dark ? 'dark' : ''}><div className="flex h-screen items-center justify-center overscroll-none bg-zinc-100 dark:bg-[#050505] text-zinc-400">Loading schedule…</div></main>;
+  }
 
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    if (animatingRef.current) return;
-    if (Math.abs(e.deltaX) < WHEEL_DELTA_THRESHOLD || Math.abs(e.deltaX) < Math.abs(e.deltaY)) return;
-    if (e.deltaX > 0 && canGoNext) commitSwipe('next');
-    else if (e.deltaX < 0 && canGoPrev) commitSwipe('prev');
-  }, [canGoNext, canGoPrev, commitSwipe]);
+  if (status === 'error' || !roster) {
+    return <main className={dark ? 'dark' : ''}><div className="flex h-screen items-center justify-center overscroll-none p-8 text-red-500 dark:bg-[#050505]">{errorMessage}</div></main>;
+  }
 
-  const toggleExpanded = useCallback(() => setExpanded((v) => !v), []);
-  const noTransitionOrDragging = isDragging || noTransition;
+  const sheetOpen = Boolean(selectedEvent);
+  const tabs = [{ id: 'calendar' as const, label: 'Calendar', Icon: CalendarIcon }, { id: 'reports' as const, label: 'Reports', Icon: BarChart3 }, { id: 'settings' as const, label: 'Settings', Icon: Settings2 }];
+  const activeTabIndex = tabs.findIndex((t) => t.id === activeTab);
+  const statCards = [{ code: 'M', label: 'Morning' }, { code: 'A', label: 'Afternoon' }, { code: 'N', label: 'Night' }, { code: 'MID', label: 'Mid' }, { code: 'OFF', label: 'Off Days' }, { code: 'H8', label: 'Holiday' }];
 
   return (
-    <>
-      <CyberLiquidStyles />
-      
-      {/* Absolute Dark Deep Backdrop Overlay */}
-      <div
-        onClick={onClose}
-        className={`fixed inset-0 z-40 bg-zinc-950/70 backdrop-blur-md transition-opacity duration-500 ${
-          open ? 'opacity-100' : 'pointer-events-none opacity-0'
-        }`}
-      />
+    <main className={dark ? 'dark' : ''}>
+      <div className="flex h-screen justify-center overscroll-none bg-zinc-200 dark:bg-[#050505]">
+        <div className="relative flex h-screen w-full max-w-[430px] flex-col overflow-hidden bg-zinc-100 text-zinc-950 dark:bg-[#050505] dark:text-white lg:max-w-none lg:flex-row">
 
-      {/* Main Liquid Cyber Glass Sheet Structure */}
-      <div
-        ref={sheetRef}
-        role="dialog"
-        aria-modal="true"
-        onPointerDown={handlePointerDown}
-        style={{
-          transform: isDesktop
-            ? `translate(-50%, -50%) scale(${open ? 1 : 0.95})`
-            : (open ? `translateY(${drag.axis === 'y' ? drag.y : 0}px)` : 'translateY(100%)'),
-          opacity: isDesktop ? (open ? 1 : 0) : undefined,
-          transition: noTransitionOrDragging
-            ? 'none'
-            : (isDesktop ? 'transform 300ms cubic-bezier(0.16, 1, 0.3, 1), opacity 250ms ease' : 'transform 400ms cubic-bezier(0.16, 1, 0.3, 1)'),
-        }}
-        className={`fixed inset-x-0 bottom-0 z-50 mx-auto flex max-h-[92vh] w-full max-w-[430px] flex-col overflow-hidden rounded-t-[36px] border-t border-x border-white/20 bg-zinc-950/80 text-white shadow-[0_-20px_60px_rgba(0,0,0,0.8)] backdrop-blur-3xl lg:inset-x-auto lg:bottom-auto lg:left-1/2 lg:top-1/2 lg:max-h-[85vh] lg:max-w-2xl lg:rounded-[28px] lg:border lg:shadow-[0_20px_80px_rgba(0,0,0,0.7)] ${
-          open ? '' : 'pointer-events-none'
-        } ${isDragging ? 'select-none' : ''}`}
-      >
-        
-        {/* PHYSICAL LIQUID ENGINE: Moving organic elements trapped beneath the sheet */}
-        <div className="absolute inset-0 -z-10 overflow-hidden opacity-50 mix-blend-screen pointer-events-none">
-          <div className="liquid-blob-1 absolute -top-12 -left-12 size-52 rounded-full bg-cyan-500/30" />
-          <div className="liquid-blob-2 absolute top-1/3 -right-20 size-64 rounded-full bg-fuchsia-500/25" />
-          <div className="liquid-blob-1 absolute -bottom-16 left-1/4 size-48 rounded-full bg-indigo-500/30" />
-        </div>
-
-        {/* Top Control Notch Bar */}
-        <div className="flex shrink-0 flex-col items-center pb-1 pt-3 lg:hidden" style={{ touchAction: 'none' }}>
-          <div className="h-1 w-14 rounded-full bg-white/20" />
-        </div>
-
-        {event && (
-          <>
-            {/* Header Telemetry Navigation Block */}
-            <div className="flex shrink-0 items-center justify-between px-3 pb-2 border-b border-white/10" style={{ touchAction: 'none' }}>
-              <button
-                onClick={onPrev}
-                disabled={!canGoPrev}
-                className="flex h-9 items-center gap-1 rounded-xl px-2.5 font-mono text-[11px] font-black tracking-wider text-cyan-400 transition-all hover:bg-white/5 active:scale-95 disabled:pointer-events-none disabled:opacity-10"
-              >
-                <ChevronLeft className="size-4" />
-                PREV
-              </button>
-              
-              <div className="flex items-center gap-2 rounded-lg bg-zinc-900/60 border border-white/10 px-3 py-1">
-                <Activity className="size-3.5 text-fuchsia-400 animate-pulse" />
-                <p className="font-mono text-[11px] font-black tracking-widest text-zinc-100 uppercase">{dayLabel}</p>
-              </div>
-
-              <button
-                onClick={onNext}
-                disabled={!canGoNext}
-                className="flex h-9 items-center gap-1 rounded-xl px-2.5 font-mono text-[11px] font-black tracking-wider text-cyan-400 transition-all hover:bg-white/5 active:scale-95 disabled:pointer-events-none disabled:opacity-10"
-              >
-                NEXT
-                <ChevronRight className="size-4" />
-              </button>
+          {/* Desktop sidebar nav — hidden on mobile, replaces the bottom tab bar at lg+ */}
+          <nav className="hidden shrink-0 flex-col border-r border-zinc-950/[0.06] px-3 py-8 dark:border-white/[0.06] lg:flex lg:w-64">
+            <p className="truncate px-3 text-[15px] font-bold tracking-tight">{title}</p>
+            <p className="mt-0.5 truncate px-3 pb-6 text-[13px] font-medium text-zinc-400 dark:text-zinc-500">{selectedEmployee}</p>
+            <div className="flex flex-col gap-1">
+              {tabs.map(({ id, label, Icon }) => (
+                <button
+                  key={id}
+                  onClick={() => handleTabChange(id)}
+                  className={`flex items-center gap-3 rounded-2xl px-3 py-2.5 text-left text-[14px] font-semibold transition-colors ${activeTab === id ? 'bg-blue-500/10 text-blue-500' : 'text-zinc-500 hover:bg-zinc-950/[0.04] dark:text-zinc-400 dark:hover:bg-white/[0.06]'}`}
+                >
+                  <Icon className="size-5" />
+                  {label}
+                </button>
+              ))}
             </div>
+          </nav>
 
-            {/* Scrollable Container Body */}
-            <div
-              ref={contentRef}
-              onWheel={handleWheel}
-              style={{
-                transform: `translateX(${drag.axis === 'x' ? drag.x : 0}px)`,
-                transition: noTransitionOrDragging ? 'none' : 'transform 260ms cubic-bezier(0.16, 1, 0.3, 1)',
-                touchAction: drag.axis ? 'none' : 'pan-y',
-                paddingBottom: 'max(2rem, env(safe-area-inset-bottom))',
-              }}
-              className="overflow-y-auto px-5 pt-3"
-            >
-              <p className="font-mono text-[10px] uppercase tracking-widest text-zinc-400 text-center mb-3">
-                Index // <span className="text-zinc-200">{fullDateLabel}</span>
-              </p>
+          <div className="flex min-h-0 flex-1 flex-col lg:overflow-y-auto">
+          <div className={`flex min-h-0 flex-1 flex-col transition-[filter] duration-200 ${sheetOpen ? 'pointer-events-none select-none blur-[1px]' : ''}`} aria-hidden={sheetOpen}>
+            <div className="mx-auto flex min-h-0 w-full flex-1 flex-col lg:max-w-4xl lg:px-10 lg:py-8">
+            {activeTab === 'calendar' && (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <header className="shrink-0 px-5 pb-3 pt-6 lg:hidden">
+                  <div className="flex items-start justify-between">
+                    <div className="min-w-0">
+                      <h1 className="truncate text-[34px] font-bold leading-none tracking-tight">{title}</h1>
+                      <p className="mt-1 truncate text-[15px] font-medium text-zinc-400 dark:text-zinc-500">{selectedEmployee}</p>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex items-center justify-center gap-1">
+                    <button onClick={goToPreviousMonth} className="flex size-8 items-center justify-center rounded-full text-zinc-400"><ChevronLeft className="size-5"/></button>
+                    <span className="text-[13px] font-semibold text-zinc-400">Swipe months</span>
+                    <button onClick={goToNextMonth} className="flex size-8 items-center justify-center rounded-full text-zinc-400"><ChevronRight className="size-5"/></button>
+                  </div>
+                </header>
 
-              {/* Liquid-Frosted Glass Hero Shift Badge */}
-              <div className="cyber-panel-border relative my-4 overflow-hidden rounded-2xl bg-zinc-950/40 p-6 text-center border border-white/20 shadow-2xl">
-                {/* Dynamic colored ambient backing syncs with actual code styles color */}
-                <div className={`absolute -inset-10 -z-10 opacity-30 blur-2xl ${solidColorFor(event.shift)}`} />
-                <div className="absolute inset-0 bg-gradient-to-b from-white/10 to-transparent mix-blend-overlay" />
-                
-                <div className="text-glow text-[38px] font-black tracking-tight uppercase leading-none text-white">
-                  {shiftLabel(event.shift)}
+                <div className="hidden shrink-0 items-center justify-between pb-4 lg:flex">
+                  <button onClick={goToPreviousMonth} className="flex size-9 items-center justify-center rounded-full text-zinc-400 hover:bg-zinc-950/[0.04] dark:hover:bg-white/[0.06]"><ChevronLeft className="size-5"/></button>
+                  <h2 className="text-[20px] font-bold tracking-tight">{title}</h2>
+                  <button onClick={goToNextMonth} className="flex size-9 items-center justify-center rounded-full text-zinc-400 hover:bg-zinc-950/[0.04] dark:hover:bg-white/[0.06]"><ChevronRight className="size-5"/></button>
                 </div>
-                <div className="mt-2 font-mono text-xs font-black tracking-widest text-zinc-300 uppercase">
-                  {shiftHours(event.shift)}
+
+                <div className="flex min-h-0 flex-1 flex-col px-3 pb-24 lg:px-0 lg:pb-4">
+                  <div className="grid shrink-0 grid-cols-7 text-center text-[11px] font-semibold text-zinc-400">
+                    {weekdays.map((day, i) => <div className="py-1.5" key={`${day}-${i}`}>{day}</div>)}
+                  </div>
+                  <div className={`relative min-h-0 flex-1 overflow-hidden ${GLASS_CARD}`}>
+                    <div ref={monthGridRef} onPointerDown={handleMonthPointerDown} style={{ touchAction: 'pan-y' }} className="grid h-full grid-cols-7 grid-rows-6">
+                      {calendarDays.map((day) => {
+                        const dayIso = iso(day); const inRoster = rosterDateSet.has(dayIso);
+                        const event = eventMap[dayIso] ?? (inRoster ? eventForIso(roster, selectedEmployee, dayIso) : undefined);
+                        const colors = event ? colorFor(event.shift) : { bg: '', text: '' };
+                        const isOff = event && shiftKey(event.shift) === 'OFF'; const isToday = dayIso === todayIso;
+                        const isHoliday = isNationalHoliday(dayIso);
+                        return <button
+                          key={dayIso} onClick={() => inRoster && event && setSelectedEvent(event)} disabled={!inRoster}
+                          className={`flex flex-col items-center justify-start gap-1 border-b border-r border-zinc-950/[0.04] pt-1.5 dark:border-white/[0.06] ${inRoster ? 'active:scale-[0.96]' : ''} ${day.getMonth() !== currentMonth ? 'opacity-30' : ''} ${isHoliday ? 'bg-red-500/10' : ''}`}
+                        >
+                          <span className={`flex size-8 items-center justify-center rounded-full text-[18px] ${isToday ? 'bg-red-500 text-white font-bold' : isHoliday ? 'font-extrabold text-red-500 ring-2 ring-red-500' : ''}`}>{day.getDate()}</span>
+                          {event ? (isOff ? <span className="mt-0.5 size-1.5 rounded-full bg-zinc-300 dark:bg-zinc-600"/> : <span className={`mx-1 truncate rounded-full px-1.5 py-[1px] text-[9px] font-bold ${colors.bg} ${colors.text}`}>{event.shift}</span>) : null}
+                        </button>;
+                      })}
+                    </div>
+                  </div>
                 </div>
               </div>
+            )}
 
-              {/* Main Structural Information Groups */}
-              <div className="space-y-4">
-                <WorkingSection group={workingGroup}/>
-                <AllShiftsSection groups={allShiftsGroups} expanded={expanded} onToggle={toggleExpanded}/>
+            {activeTab === 'reports' && (
+              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-24 pt-6 lg:px-0 lg:pb-8">
+                <h1 className="text-[34px] font-bold tracking-tight lg:hidden">Reports</h1>
+                <p className="mt-1 text-[15px] font-medium text-zinc-400 dark:text-zinc-500 lg:hidden">{selectedEmployee} · {title}</p>
+                <h2 className="hidden text-[20px] font-bold tracking-tight lg:block">{title} overview</h2>
+
+                <div className="lg:grid lg:grid-cols-3 lg:items-start lg:gap-4">
+                <section className="mt-4 lg:col-span-1 lg:mt-4">
+                  <div className={`p-4 border border-blue-500/20 bg-blue-500/5 ${GLASS_CARD}`}>
+                    <div className="flex items-center gap-2 text-blue-600 dark:text-blue-400 mb-1.5">
+                      <Users className="size-4" />
+                      <h3 className="text-[12px] font-bold uppercase tracking-wider">Most Seen Colleague This Month</h3>
+                    </div>
+                    {mostSeenColleagues.names.length > 0 ? (
+                      <div>
+                        <p className="text-[16px] font-bold tracking-wide">
+                          {mostSeenColleagues.names.join(', ')}
+                        </p>
+                        <p className="text-[11px] font-mono text-zinc-400 mt-0.5">
+                          Shared {mostSeenColleagues.count} operational shifts together
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="text-xs font-medium text-zinc-400 italic">No shared shift duties recorded this month.</p>
+                    )}
+                  </div>
+                </section>
+
+                <div className="mt-4 grid grid-cols-2 gap-3 lg:col-span-2 lg:mt-4 lg:grid-cols-3">
+                  {statCards.map(({ code, label }) => <div key={code} className={`p-4 ${GLASS_CARD}`}>
+                    <p className="text-[13px] font-semibold text-zinc-400">{label}</p>
+                    <p className="mt-1 text-[28px] font-bold tracking-tight">{monthlyStats.counts[code] ?? 0}</p>
+                  </div>)}
+                  <div className={`p-4 ${GLASS_CARD}`}>
+                    <p className="text-[13px] font-semibold text-zinc-400">Weekend</p>
+                    <p className="mt-1 text-[28px] font-bold tracking-tight">{monthlyStats.weekendDays}</p>
+                  </div>
+                </div>
+
+                <div className="mt-3 grid grid-cols-2 gap-3 lg:col-span-3 lg:mt-1">
+                  <div className="rounded-[28px] bg-blue-500/10 p-4"><p className="text-[13px] font-semibold text-blue-500">Working Shifts</p><p className="mt-1 text-[28px] font-bold text-blue-500">{monthlyStats.workingShifts}</p></div>
+                  <div className="rounded-[28px] bg-green-500/10 p-4"><p className="text-[13px] font-semibold text-green-600 dark:text-green-400">Total Hours</p><p className="mt-1 text-[28px] font-bold text-green-600 dark:text-green-400">{monthlyStats.totalHours}h</p></div>
+                </div>
+                </div>
+
+                <section className="mt-4">
+                  <div className="flex items-center gap-2 px-1">
+                    <Wallet className="size-4 text-emerald-500" />
+                    <h3 className="text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Expected Salary — {title}</h3>
+                  </div>
+                  <div className={`mt-2 p-4 ${GLASS_CARD}`}>
+                    <div className="flex items-center justify-between gap-3">
+                      <label htmlFor="base-salary-input" className="shrink-0 text-[13px] font-semibold text-zinc-400">Base salary (RON)</label>
+                      <input
+                        id="base-salary-input"
+                        type="number"
+                        inputMode="decimal"
+                        min={0}
+                        value={salaries[selectedEmployee] ?? ''}
+                        onChange={(e) => handleSalaryChange(selectedEmployee, e.target.value)}
+                        placeholder="e.g. 4300"
+                        className="w-32 rounded-xl border border-zinc-950/10 bg-transparent px-3 py-1.5 text-right text-[15px] font-semibold outline-none focus:border-blue-500 dark:border-white/10"
+                      />
+                    </div>
+
+                    {salaryBreakdown.baseSalary > 0 ? (
+                      <>
+                        <div className="mt-4 flex items-center justify-between text-[12px] text-zinc-400">
+                          <span>{salaryBreakdown.workingDaysInMonth} working days this month</span>
+                          <span className="font-mono">{formatRon(salaryBreakdown.dailyWage)} / day</span>
+                        </div>
+
+                        <div className="mt-3 space-y-2 border-t border-zinc-950/10 pt-3 dark:border-white/10">
+                          <div className="flex items-center justify-between text-[14px]">
+                            <span>Base pay · {salaryBreakdown.workedDays} days worked</span>
+                            <span className="font-mono font-semibold">{formatRon(salaryBreakdown.basePay)}</span>
+                          </div>
+                          {salaryBreakdown.nightCount > 0 && (
+                            <div className="flex items-center justify-between text-[14px] text-indigo-400">
+                              <span>{salaryBreakdown.nightCount} night shift{salaryBreakdown.nightCount === 1 ? '' : 's'} · +25%</span>
+                              <span className="font-mono font-semibold">+{formatRon(salaryBreakdown.nightBonus)}</span>
+                            </div>
+                          )}
+                          {salaryBreakdown.weekendCount > 0 && (
+                            <div className="flex items-center justify-between text-[14px] text-cyan-400">
+                              <span>{salaryBreakdown.weekendCount} weekend day{salaryBreakdown.weekendCount === 1 ? '' : 's'} · +10%</span>
+                              <span className="font-mono font-semibold">+{formatRon(salaryBreakdown.weekendBonus)}</span>
+                            </div>
+                          )}
+                          {salaryBreakdown.holidayCount > 0 && (
+                            <div className="flex items-center justify-between text-[14px] text-red-400">
+                              <span>{salaryBreakdown.holidayCount} national holiday{salaryBreakdown.holidayCount === 1 ? '' : 's'} · +100%</span>
+                              <span className="font-mono font-semibold">+{formatRon(salaryBreakdown.holidayBonus)}</span>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="mt-3 flex items-center justify-between rounded-2xl bg-emerald-500/10 p-3.5">
+                          <span className="text-[15px] font-bold text-emerald-500">Total Expected</span>
+                          <span className="text-[22px] font-bold text-emerald-500">{formatRon(salaryBreakdown.total)}</span>
+                        </div>
+                      </>
+                    ) : (
+                      <p className="mt-3 text-xs italic text-zinc-400">Enter a base salary to see the earnings breakdown.</p>
+                    )}
+                  </div>
+                </section>
               </div>
+            )}
 
-              {/* Modern Flush Close System Button */}
-              <button
-                onClick={onClose}
-                className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl border border-red-500/30 bg-red-950/20 py-3.5 font-mono text-xs font-black uppercase tracking-widest text-red-400 transition-all hover:bg-red-500/20 active:scale-98"
-              >
-                <ShieldAlert className="size-4" />
-                Close Operational Log
-              </button>
+            {activeTab === 'settings' && (
+              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-24 pt-6 lg:px-0 lg:pb-8">
+                <h1 className="text-[34px] font-bold tracking-tight lg:hidden">Settings</h1>
+
+                <div className="lg:grid lg:grid-cols-2 lg:items-start lg:gap-4">
+                <section className="mt-6 lg:mt-0">
+                  <h3 className="px-1 text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Appearance</h3>
+                  <div className={`mt-2 flex items-center justify-between p-4 ${GLASS_CARD}`}>
+                    <div className="flex items-center gap-3">
+                      {dark ? <Moon className="size-5 text-zinc-400"/> : <Sun className="size-5 text-zinc-500"/>}
+                      <div>
+                        <p className="text-[15px] font-semibold">Dark Appearance</p>
+                        <p className="text-[12px] text-zinc-400 dark:text-zinc-500">Optimizes display contrast</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={toggleAppearance}
+                      style={{ backgroundColor: dark ? IOS_SWITCH_ON : IOS_SWITCH_OFF }}
+                      className="relative h-[31px] w-[51px] shrink-0 rounded-full p-0.5 transition-colors duration-200"
+                    >
+                      <div className={`h-[27px] w-[27px] rounded-full bg-white shadow-sm ring-1 ring-black/[0.04] transition-transform duration-200 ${dark ? 'translate-x-[20px]' : 'translate-x-0'}`} />
+                    </button>
+                  </div>
+                </section>
+
+                <section className="mt-6 lg:mt-0">
+                  <div className="flex items-center justify-between px-1">
+                    <h3 className="text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Active Roster</h3>
+                    <span className="text-[11px] font-mono text-zinc-400 dark:text-zinc-500 truncate max-w-[180px]">{displayFileName(roster?.fileName)}</span>
+                  </div>
+                  <div className={`mt-2 ${GLASS_CARD}`}>
+                    <div className="flex items-center gap-2 px-4 pt-3.5"><Search className="size-4 text-zinc-400"/><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search employee" className="w-full bg-transparent py-2 text-[15px] outline-none"/></div>
+                    <div className="max-h-64 divide-y divide-zinc-950/[0.06] overflow-y-auto dark:divide-white/[0.06]">{filteredEmployees.map((name) => <button key={name} onClick={() => handleSelectEmployee(name)} className="flex w-full items-center justify-between px-4 py-3 text-left"><span className="text-[15px]">{name}</span>{name === selectedEmployee && <Check className="size-4 text-blue-500"/>}</button>)}</div>
+                  </div>
+                </section>
+                </div>
+              </div>
+            )}
             </div>
-          </>
-        )}
+          </div>
+
+          <DayDetailsModal
+            event={selectedEvent}
+            dailyRoster={selectedEvent ? rosterIndex[selectedEvent.isoDate] : undefined}
+            selectedEmployee={selectedEmployee}
+            canGoPrev={canGoPrevDay} canGoNext={canGoNextDay}
+            onPrev={goToPrevDay} onNext={goToNextDay}
+            onClose={() => setSelectedEvent(null)}
+          />
+
+          <nav aria-hidden={sheetOpen} className={`fixed inset-x-0 bottom-0 z-10 flex justify-center px-5 pb-3 transition-[filter] duration-200 lg:hidden ${sheetOpen ? 'blur-[1px] pointer-events-none' : ''}`}>
+            <div className={`relative flex w-full max-w-[380px] p-1.5 ${GLASS_NAV}`}>
+              <div style={{ width: 'calc((100% - 1.5rem) / 3)' }} className={`absolute inset-y-1.5 left-1.5 rounded-[22px] bg-white/85 shadow-md transition-transform duration-[220ms] dark:bg-white/[0.16] ${NAV_INDICATOR_OFFSETS[activeTabIndex] || NAV_INDICATOR_OFFSETS[0]}`} />
+              {tabs.map(({ id, label, Icon }) => <button key={id} onClick={() => handleTabChange(id)} className={`relative z-10 flex flex-1 flex-col items-center gap-0.5 py-2 ${activeTab === id ? 'text-blue-500' : 'text-zinc-400'}`}><Icon className="size-5"/><span className="text-[10px] font-semibold">{label}</span></button>)}
+            </div>
+          </nav>
+          </div>
+        </div>
       </div>
-    </>
+    </main>
   );
 }
