@@ -1,7 +1,7 @@
 // App.tsx
 import type React from 'react';
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, Moon, Search, Settings2, Sun, Users } from 'lucide-react';
+import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, Moon, Search, Settings2, Sun, Users, Wallet } from 'lucide-react';
 import type { RosterData, ShiftEvent } from './types';
 import { colorFor, shiftKey, shiftHourValues, buildRosterIndex, eventForIso, GLASS_CARD, GLASS_NAV } from './scheduleUtils';
 import DayDetailsModal from './DayDetailsModal';
@@ -9,6 +9,45 @@ import DayDetailsModal from './DayDetailsModal';
 const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 const EMPLOYEE_STORAGE_KEY = 'work-schedule-employee';
 const DARK_MODE_STORAGE_KEY = 'work-schedule-dark-mode';
+const SALARY_STORAGE_KEY = 'work-schedule-salaries';
+
+// Romanian legal public holidays for 2026 (source: zileliberelegale.ro). Update this list for other years.
+const ROMANIAN_HOLIDAYS_2026 = new Set<string>([
+  '2026-01-01', // Anul Nou
+  '2026-01-02', // Anul Nou
+  '2026-01-06', // Boboteaza
+  '2026-01-07', // Sfântul Ioan Botezătorul
+  '2026-01-24', // Ziua Unirii Principatelor Române
+  '2026-04-10', // Vinerea Mare
+  '2026-04-12', // Paștele
+  '2026-04-13', // Paștele
+  '2026-05-01', // Ziua Muncii
+  '2026-05-31', // Rusalii
+  '2026-06-01', // Ziua Copilului / Rusalii
+  '2026-08-15', // Adormirea Maicii Domnului
+  '2026-11-30', // Sfântul Andrei
+  '2026-12-01', // Ziua Națională a României
+  '2026-12-25', // Crăciunul
+  '2026-12-26', // Crăciunul
+]);
+
+function isNationalHoliday(isoDate: string) {
+  return ROMANIAN_HOLIDAYS_2026.has(isoDate);
+}
+
+// "Working days" for salary purposes = weekdays (Mon-Fri) that aren't a national holiday.
+function countWorkingDaysInMonth(month: number, year: number) {
+  let count = 0;
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  for (let day = 1; day <= daysInMonth; day++) {
+    const date = new Date(year, month, day);
+    const dayOfWeek = date.getDay();
+    if (dayOfWeek === 0 || dayOfWeek === 6) continue;
+    if (isNationalHoliday(iso(date))) continue;
+    count += 1;
+  }
+  return count;
+}
 
 // Normalizes a name for comparison: lowercase, hyphens/extra spaces collapsed, words sorted
 // so "Palade Alexandru-Ionut" and "Alexandru Ionut Palade" are treated as the same person.
@@ -48,6 +87,10 @@ function displayFileName(fileName: string | undefined | null) {
   if (!fileName || !fileName.trim()) return 'Untitled roster';
   const base = fileName.trim().split(/[\\/]/).pop() ?? fileName;
   return base.replace(/\.(xlsx|xls|xlsm|csv|json)$/i, '');
+}
+
+function formatRon(amount: number) {
+  return `${amount.toLocaleString('ro-RO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} RON`;
 }
 
 type ScheduleJson = {
@@ -91,6 +134,23 @@ export default function App() {
   const [currentMonth, setCurrentMonth] = useState(new Date().getMonth());
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
   const [selectedEvent, setSelectedEvent] = useState<ShiftEvent | null>(null);
+  const [salaries, setSalaries] = useState<Record<string, number>>(() => {
+    try {
+      const saved = localStorage.getItem(SALARY_STORAGE_KEY);
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const handleSalaryChange = useCallback((employee: string, value: string) => {
+    const parsed = value === '' ? 0 : Number(value);
+    setSalaries((prev) => {
+      const next = { ...prev, [employee]: Number.isFinite(parsed) ? parsed : 0 };
+      localStorage.setItem(SALARY_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -218,6 +278,47 @@ export default function App() {
     const daysOff = counts.OFF + counts.H8;
     return { counts, workingShifts, totalHours, daysOff, weekendDays };
   }, [roster, selectedEmployee, currentMonth, currentYear]);
+
+  const salaryBreakdown = useMemo(() => {
+    const baseSalary = salaries[selectedEmployee] ?? 0;
+    const workingDaysInMonth = countWorkingDaysInMonth(currentMonth, currentYear);
+    const dailyWage = workingDaysInMonth > 0 ? baseSalary / workingDaysInMonth : 0;
+
+    const monthDatesInRoster = roster ? roster.dateColumns.filter(
+      (d) => d.date.getMonth() === currentMonth && d.date.getFullYear() === currentYear
+    ) : [];
+
+    let workedDays = 0;
+    let nightCount = 0, weekendCount = 0, holidayCount = 0;
+    let nightBonus = 0, weekendBonus = 0, holidayBonus = 0;
+    let basePay = 0;
+
+    monthDatesInRoster.forEach(({ isoDate, date }) => {
+      const raw = roster?.rows[selectedEmployee]?.[isoDate];
+      const code = shiftKey(raw ?? 'OFF');
+      const isWorking = code !== 'OFF' && code !== 'H8';
+      if (!isWorking) return;
+
+      workedDays += 1;
+      basePay += dailyWage;
+
+      const isNight = code === 'N';
+      const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+      const isHoliday = isNationalHoliday(isoDate);
+
+      if (isNight) { nightCount += 1; nightBonus += dailyWage * 0.25; }
+      if (isWeekend) { weekendCount += 1; weekendBonus += dailyWage * 0.10; }
+      if (isHoliday) { holidayCount += 1; holidayBonus += dailyWage * 1.00; }
+    });
+
+    const total = basePay + nightBonus + weekendBonus + holidayBonus;
+    return {
+      baseSalary, workingDaysInMonth, dailyWage, workedDays, basePay,
+      nightCount, weekendCount, holidayCount,
+      nightBonus, weekendBonus, holidayBonus, total,
+    };
+  }, [roster, salaries, selectedEmployee, currentMonth, currentYear]);
+
 
   const mostSeenColleagues = useMemo(() => {
     if (!roster || !selectedEmployee) return { names: [], count: 0 };
@@ -413,11 +514,12 @@ export default function App() {
                         const event = eventMap[dayIso] ?? (inRoster ? eventForIso(roster, selectedEmployee, dayIso) : undefined);
                         const colors = event ? colorFor(event.shift) : { bg: '', text: '' };
                         const isOff = event && shiftKey(event.shift) === 'OFF'; const isToday = dayIso === todayIso;
+                        const isHoliday = isNationalHoliday(dayIso);
                         return <button
                           key={dayIso} onClick={() => inRoster && event && setSelectedEvent(event)} disabled={!inRoster}
-                          className={`flex flex-col items-center justify-start gap-1 border-b border-r border-zinc-950/[0.04] pt-1.5 dark:border-white/[0.06] ${inRoster ? 'active:scale-[0.96]' : ''} ${day.getMonth() !== currentMonth ? 'opacity-30' : ''}`}
+                          className={`flex flex-col items-center justify-start gap-1 border-b border-r border-zinc-950/[0.04] pt-1.5 dark:border-white/[0.06] ${inRoster ? 'active:scale-[0.96]' : ''} ${day.getMonth() !== currentMonth ? 'opacity-30' : ''} ${isHoliday ? 'bg-red-500/10' : ''}`}
                         >
-                          <span className={`flex size-8 items-center justify-center rounded-full text-[18px] ${isToday ? 'bg-red-500 text-white font-bold' : ''}`}>{day.getDate()}</span>
+                          <span className={`flex size-8 items-center justify-center rounded-full text-[18px] ${isToday ? 'bg-red-500 text-white font-bold' : isHoliday ? 'font-extrabold text-red-500 ring-2 ring-red-500' : ''}`}>{day.getDate()}</span>
                           {event ? (isOff ? <span className="mt-0.5 size-1.5 rounded-full bg-zinc-300 dark:bg-zinc-600"/> : <span className={`mx-1 truncate rounded-full px-1.5 py-[1px] text-[9px] font-bold ${colors.bg} ${colors.text}`}>{event.shift}</span>) : null}
                         </button>;
                       })}
@@ -471,6 +573,69 @@ export default function App() {
                   <div className="rounded-[28px] bg-green-500/10 p-4"><p className="text-[13px] font-semibold text-green-600 dark:text-green-400">Total Hours</p><p className="mt-1 text-[28px] font-bold text-green-600 dark:text-green-400">{monthlyStats.totalHours}h</p></div>
                 </div>
                 </div>
+
+                <section className="mt-4">
+                  <div className="flex items-center gap-2 px-1">
+                    <Wallet className="size-4 text-emerald-500" />
+                    <h3 className="text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Expected Salary — {title}</h3>
+                  </div>
+                  <div className={`mt-2 p-4 ${GLASS_CARD}`}>
+                    <div className="flex items-center justify-between gap-3">
+                      <label htmlFor="base-salary-input" className="shrink-0 text-[13px] font-semibold text-zinc-400">Base salary (RON)</label>
+                      <input
+                        id="base-salary-input"
+                        type="number"
+                        inputMode="decimal"
+                        min={0}
+                        value={salaries[selectedEmployee] ?? ''}
+                        onChange={(e) => handleSalaryChange(selectedEmployee, e.target.value)}
+                        placeholder="e.g. 4300"
+                        className="w-32 rounded-xl border border-zinc-950/10 bg-transparent px-3 py-1.5 text-right text-[15px] font-semibold outline-none focus:border-blue-500 dark:border-white/10"
+                      />
+                    </div>
+
+                    {salaryBreakdown.baseSalary > 0 ? (
+                      <>
+                        <div className="mt-4 flex items-center justify-between text-[12px] text-zinc-400">
+                          <span>{salaryBreakdown.workingDaysInMonth} working days this month</span>
+                          <span className="font-mono">{formatRon(salaryBreakdown.dailyWage)} / day</span>
+                        </div>
+
+                        <div className="mt-3 space-y-2 border-t border-zinc-950/10 pt-3 dark:border-white/10">
+                          <div className="flex items-center justify-between text-[14px]">
+                            <span>Base pay · {salaryBreakdown.workedDays} days worked</span>
+                            <span className="font-mono font-semibold">{formatRon(salaryBreakdown.basePay)}</span>
+                          </div>
+                          {salaryBreakdown.nightCount > 0 && (
+                            <div className="flex items-center justify-between text-[14px] text-indigo-400">
+                              <span>{salaryBreakdown.nightCount} night shift{salaryBreakdown.nightCount === 1 ? '' : 's'} · +25%</span>
+                              <span className="font-mono font-semibold">+{formatRon(salaryBreakdown.nightBonus)}</span>
+                            </div>
+                          )}
+                          {salaryBreakdown.weekendCount > 0 && (
+                            <div className="flex items-center justify-between text-[14px] text-cyan-400">
+                              <span>{salaryBreakdown.weekendCount} weekend day{salaryBreakdown.weekendCount === 1 ? '' : 's'} · +10%</span>
+                              <span className="font-mono font-semibold">+{formatRon(salaryBreakdown.weekendBonus)}</span>
+                            </div>
+                          )}
+                          {salaryBreakdown.holidayCount > 0 && (
+                            <div className="flex items-center justify-between text-[14px] text-red-400">
+                              <span>{salaryBreakdown.holidayCount} national holiday{salaryBreakdown.holidayCount === 1 ? '' : 's'} · +100%</span>
+                              <span className="font-mono font-semibold">+{formatRon(salaryBreakdown.holidayBonus)}</span>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="mt-3 flex items-center justify-between rounded-2xl bg-emerald-500/10 p-3.5">
+                          <span className="text-[15px] font-bold text-emerald-500">Total Expected</span>
+                          <span className="text-[22px] font-bold text-emerald-500">{formatRon(salaryBreakdown.total)}</span>
+                        </div>
+                      </>
+                    ) : (
+                      <p className="mt-3 text-xs italic text-zinc-400">Enter a base salary to see the earnings breakdown.</p>
+                    )}
+                  </div>
+                </section>
               </div>
             )}
 
