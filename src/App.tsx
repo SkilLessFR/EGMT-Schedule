@@ -10,6 +10,21 @@ const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 const EMPLOYEE_STORAGE_KEY = 'work-schedule-employee';
 const DARK_MODE_STORAGE_KEY = 'work-schedule-dark-mode';
 
+// Normalizes a name for comparison: lowercase, hyphens/extra spaces collapsed, words sorted
+// so "Palade Alexandru-Ionut" and "Alexandru Ionut Palade" are treated as the same person.
+function normalizeName(name: string) {
+  return name
+    .toLowerCase()
+    .replace(/-/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .sort()
+    .join(' ');
+}
+
+// These colleagues work mid shifts and shouldn't be counted in the "most seen colleague" stat.
+const MOST_SEEN_EXCLUDED = [normalizeName('Palade Alexandru-Ionut'), normalizeName('Tir George Cristian')];
+
 const APP_DARK_BG = '#050505';
 const APP_LIGHT_BG = '#f4f4f5';
 
@@ -184,7 +199,8 @@ export default function App() {
       (d) => d.date.getMonth() === currentMonth && d.date.getFullYear() === currentYear
     ) : [];
 
-    monthDatesInRoster.forEach(({ isoDate }) => {
+    let weekendDays = 0;
+    monthDatesInRoster.forEach(({ isoDate, date }) => {
       const rawShift = roster?.rows[selectedEmployee]?.[isoDate];
       const code = shiftKey(rawShift ?? 'OFF');
       if (code in counts) {
@@ -192,12 +208,15 @@ export default function App() {
       } else {
         counts['OFF'] += 1;
       }
+      const isWeekendDate = date.getDay() === 0 || date.getDay() === 6;
+      const isWorking = code !== 'OFF' && code !== 'H8';
+      if (isWeekendDate && isWorking) weekendDays += 1;
     });
 
     const workingShifts = counts.M + counts.A + counts.N + counts.MID;
     const totalHours = Object.entries(counts).reduce((sum, [code, count]) => sum + count * (shiftHourValues[code] ?? 0), 0);
     const daysOff = counts.OFF + counts.H8;
-    return { counts, workingShifts, totalHours, daysOff };
+    return { counts, workingShifts, totalHours, daysOff, weekendDays };
   }, [roster, selectedEmployee, currentMonth, currentYear]);
 
   const mostSeenColleagues = useMemo(() => {
@@ -209,6 +228,7 @@ export default function App() {
       const activeUserShiftCode = shiftKey(userEvent.shift);
       roster.employees.forEach((colleague) => {
         if (colleague === selectedEmployee) return;
+        if (MOST_SEEN_EXCLUDED.includes(normalizeName(colleague))) return;
         const colleagueShiftRaw = roster.rows[colleague]?.[userEvent.isoDate];
         const colleagueShiftCode = shiftKey(colleagueShiftRaw ?? 'OFF');
 
@@ -337,12 +357,32 @@ export default function App() {
   return (
     <main className={dark ? 'dark' : ''}>
       <div className="flex h-screen justify-center overscroll-none bg-zinc-200 dark:bg-[#050505]">
-        <div className="relative flex h-screen w-full max-w-[430px] flex-col overflow-hidden bg-zinc-100 text-zinc-950 dark:bg-[#050505] dark:text-white">
+        <div className="relative flex h-screen w-full max-w-[430px] flex-col overflow-hidden bg-zinc-100 text-zinc-950 dark:bg-[#050505] dark:text-white lg:max-w-none lg:flex-row">
+
+          {/* Desktop sidebar nav — hidden on mobile, replaces the bottom tab bar at lg+ */}
+          <nav className="hidden shrink-0 flex-col border-r border-zinc-950/[0.06] px-3 py-8 dark:border-white/[0.06] lg:flex lg:w-64">
+            <p className="truncate px-3 text-[15px] font-bold tracking-tight">{title}</p>
+            <p className="mt-0.5 truncate px-3 pb-6 text-[13px] font-medium text-zinc-400 dark:text-zinc-500">{selectedEmployee}</p>
+            <div className="flex flex-col gap-1">
+              {tabs.map(({ id, label, Icon }) => (
+                <button
+                  key={id}
+                  onClick={() => handleTabChange(id)}
+                  className={`flex items-center gap-3 rounded-2xl px-3 py-2.5 text-left text-[14px] font-semibold transition-colors ${activeTab === id ? 'bg-blue-500/10 text-blue-500' : 'text-zinc-500 hover:bg-zinc-950/[0.04] dark:text-zinc-400 dark:hover:bg-white/[0.06]'}`}
+                >
+                  <Icon className="size-5" />
+                  {label}
+                </button>
+              ))}
+            </div>
+          </nav>
+
+          <div className="flex min-h-0 flex-1 flex-col lg:overflow-y-auto">
           <div className={`flex min-h-0 flex-1 flex-col transition-[filter] duration-200 ${sheetOpen ? 'pointer-events-none select-none blur-[1px]' : ''}`} aria-hidden={sheetOpen}>
-            
+            <div className="mx-auto flex min-h-0 w-full flex-1 flex-col lg:max-w-4xl lg:px-10 lg:py-8">
             {activeTab === 'calendar' && (
               <div className="flex min-h-0 flex-1 flex-col">
-                <header className="shrink-0 px-5 pb-3 pt-6">
+                <header className="shrink-0 px-5 pb-3 pt-6 lg:hidden">
                   <div className="flex items-start justify-between">
                     <div className="min-w-0">
                       <h1 className="truncate text-[34px] font-bold leading-none tracking-tight">{title}</h1>
@@ -356,7 +396,13 @@ export default function App() {
                   </div>
                 </header>
 
-                <div className="flex min-h-0 flex-1 flex-col px-3 pb-24">
+                <div className="hidden shrink-0 items-center justify-between pb-4 lg:flex">
+                  <button onClick={goToPreviousMonth} className="flex size-9 items-center justify-center rounded-full text-zinc-400 hover:bg-zinc-950/[0.04] dark:hover:bg-white/[0.06]"><ChevronLeft className="size-5"/></button>
+                  <h2 className="text-[20px] font-bold tracking-tight">{title}</h2>
+                  <button onClick={goToNextMonth} className="flex size-9 items-center justify-center rounded-full text-zinc-400 hover:bg-zinc-950/[0.04] dark:hover:bg-white/[0.06]"><ChevronRight className="size-5"/></button>
+                </div>
+
+                <div className="flex min-h-0 flex-1 flex-col px-3 pb-24 lg:px-0 lg:pb-4">
                   <div className="grid shrink-0 grid-cols-7 text-center text-[11px] font-semibold text-zinc-400">
                     {weekdays.map((day, i) => <div className="py-1.5" key={`${day}-${i}`}>{day}</div>)}
                   </div>
@@ -382,11 +428,13 @@ export default function App() {
             )}
 
             {activeTab === 'reports' && (
-              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-24 pt-6">
-                <h1 className="text-[34px] font-bold tracking-tight">Reports</h1>
-                <p className="mt-1 text-[15px] font-medium text-zinc-400 dark:text-zinc-500">{selectedEmployee} · {title}</p>
+              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-24 pt-6 lg:px-0 lg:pb-8">
+                <h1 className="text-[34px] font-bold tracking-tight lg:hidden">Reports</h1>
+                <p className="mt-1 text-[15px] font-medium text-zinc-400 dark:text-zinc-500 lg:hidden">{selectedEmployee} · {title}</p>
+                <h2 className="hidden text-[20px] font-bold tracking-tight lg:block">{title} overview</h2>
 
-                <section className="mt-4">
+                <div className="lg:grid lg:grid-cols-3 lg:items-start lg:gap-4">
+                <section className="mt-4 lg:col-span-1 lg:mt-4">
                   <div className={`p-4 border border-blue-500/20 bg-blue-500/5 ${GLASS_CARD}`}>
                     <div className="flex items-center gap-2 text-blue-600 dark:text-blue-400 mb-1.5">
                       <Users className="size-4" />
@@ -407,25 +455,31 @@ export default function App() {
                   </div>
                 </section>
 
-                <div className="mt-4 grid grid-cols-2 gap-3">
+                <div className="mt-4 grid grid-cols-2 gap-3 lg:col-span-2 lg:mt-4 lg:grid-cols-3">
                   {statCards.map(({ code, label }) => <div key={code} className={`p-4 ${GLASS_CARD}`}>
                     <p className="text-[13px] font-semibold text-zinc-400">{label}</p>
                     <p className="mt-1 text-[28px] font-bold tracking-tight">{monthlyStats.counts[code] ?? 0}</p>
                   </div>)}
+                  <div className={`p-4 ${GLASS_CARD}`}>
+                    <p className="text-[13px] font-semibold text-zinc-400">Weekend</p>
+                    <p className="mt-1 text-[28px] font-bold tracking-tight">{monthlyStats.weekendDays}</p>
+                  </div>
                 </div>
 
-                <div className="mt-3 grid grid-cols-2 gap-3">
+                <div className="mt-3 grid grid-cols-2 gap-3 lg:col-span-3 lg:mt-1">
                   <div className="rounded-[28px] bg-blue-500/10 p-4"><p className="text-[13px] font-semibold text-blue-500">Working Shifts</p><p className="mt-1 text-[28px] font-bold text-blue-500">{monthlyStats.workingShifts}</p></div>
                   <div className="rounded-[28px] bg-green-500/10 p-4"><p className="text-[13px] font-semibold text-green-600 dark:text-green-400">Total Hours</p><p className="mt-1 text-[28px] font-bold text-green-600 dark:text-green-400">{monthlyStats.totalHours}h</p></div>
+                </div>
                 </div>
               </div>
             )}
 
             {activeTab === 'settings' && (
-              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-24 pt-6">
-                <h1 className="text-[34px] font-bold tracking-tight">Settings</h1>
-                
-                <section className="mt-6">
+              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-24 pt-6 lg:px-0 lg:pb-8">
+                <h1 className="text-[34px] font-bold tracking-tight lg:hidden">Settings</h1>
+
+                <div className="lg:grid lg:grid-cols-2 lg:items-start lg:gap-4">
+                <section className="mt-6 lg:mt-0">
                   <h3 className="px-1 text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Appearance</h3>
                   <div className={`mt-2 flex items-center justify-between p-4 ${GLASS_CARD}`}>
                     <div className="flex items-center gap-3">
@@ -445,7 +499,7 @@ export default function App() {
                   </div>
                 </section>
 
-                <section className="mt-6">
+                <section className="mt-6 lg:mt-0">
                   <div className="flex items-center justify-between px-1">
                     <h3 className="text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Active Roster</h3>
                     <span className="text-[11px] font-mono text-zinc-400 dark:text-zinc-500 truncate max-w-[180px]">{displayFileName(roster?.fileName)}</span>
@@ -455,8 +509,10 @@ export default function App() {
                     <div className="max-h-64 divide-y divide-zinc-950/[0.06] overflow-y-auto dark:divide-white/[0.06]">{filteredEmployees.map((name) => <button key={name} onClick={() => handleSelectEmployee(name)} className="flex w-full items-center justify-between px-4 py-3 text-left"><span className="text-[15px]">{name}</span>{name === selectedEmployee && <Check className="size-4 text-blue-500"/>}</button>)}</div>
                   </div>
                 </section>
+                </div>
               </div>
             )}
+            </div>
           </div>
 
           <DayDetailsModal
@@ -469,12 +525,13 @@ export default function App() {
             // Fixed: Removed the untyped parameter handler to resolve VS Code compilation errors
           />
 
-          <nav aria-hidden={sheetOpen} className={`fixed inset-x-0 bottom-0 z-10 flex justify-center px-5 pb-3 transition-[filter] duration-200 ${sheetOpen ? 'blur-[1px] pointer-events-none' : ''}`}>
+          <nav aria-hidden={sheetOpen} className={`fixed inset-x-0 bottom-0 z-10 flex justify-center px-5 pb-3 transition-[filter] duration-200 lg:hidden ${sheetOpen ? 'blur-[1px] pointer-events-none' : ''}`}>
             <div className={`relative flex w-full max-w-[380px] p-1.5 ${GLASS_NAV}`}>
               <div style={{ width: 'calc((100% - 1.5rem) / 3)' }} className={`absolute inset-y-1.5 left-1.5 rounded-[22px] bg-white/85 shadow-md transition-transform duration-[220ms] dark:bg-white/[0.16] ${NAV_INDICATOR_OFFSETS[activeTabIndex] || NAV_INDICATOR_OFFSETS[0]}`} />
               {tabs.map(({ id, label, Icon }) => <button key={id} onClick={() => handleTabChange(id)} className={`relative z-10 flex flex-1 flex-col items-center gap-0.5 py-2 ${activeTab === id ? 'text-blue-500' : 'text-zinc-400'}`}><Icon className="size-5"/><span className="text-[10px] font-semibold">{label}</span></button>)}
             </div>
           </nav>
+          </div>
         </div>
       </div>
     </main>
