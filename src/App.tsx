@@ -163,8 +163,6 @@ export default function App() {
         if (!mounted) return;
         const parsed = hydrateRoster(json);
         setRoster(parsed);
-        // Fixed: Removed the lines forcing currentMonth and currentYear to match the roster file 
-        // metadata so that the app correctly opens up to the present day instead.
         const savedEmployee = localStorage.getItem(EMPLOYEE_STORAGE_KEY);
         const initialEmployee = savedEmployee && parsed.employees.includes(savedEmployee) ? savedEmployee : (parsed.employees[0] ?? '');
         setSelectedEmployee(initialEmployee);
@@ -296,11 +294,16 @@ export default function App() {
     monthDatesInRoster.forEach(({ isoDate, date }) => {
       const raw = roster?.rows[selectedEmployee]?.[isoDate];
       const code = shiftKey(raw ?? 'OFF');
-      const isWorking = code !== 'OFF' && code !== 'H8';
-      if (!isWorking) return;
+      
+      // A day counts for pay as long as it isn't a normal 'OFF' day
+      const isPaidDay = code !== 'OFF';
+      if (!isPaidDay) return;
 
       workedDays += 1;
       basePay += dailyWage;
+
+      // If it's a holiday shift ('H8'), stop here so it gets normal pay but zero bonuses
+      if (code === 'H8') return;
 
       const isNight = code === 'N';
       const isWeekend = date.getDay() === 0 || date.getDay() === 6;
@@ -318,7 +321,6 @@ export default function App() {
       nightBonus, weekendBonus, holidayBonus, total,
     };
   }, [roster, salaries, selectedEmployee, currentMonth, currentYear]);
-
 
   const mostSeenColleagues = useMemo(() => {
     if (!roster || !selectedEmployee) return { names: [], count: 0 };
@@ -687,7 +689,6 @@ export default function App() {
             canGoPrev={canGoPrevDay} canGoNext={canGoNextDay}
             onPrev={goToPrevDay} onNext={goToNextDay}
             onClose={() => setSelectedEvent(null)}
-            // Fixed: Removed the untyped parameter handler to resolve VS Code compilation errors
           />
 
           <nav aria-hidden={sheetOpen} className={`fixed inset-x-0 bottom-0 z-10 flex justify-center px-5 pb-3 transition-[filter] duration-200 lg:hidden ${sheetOpen ? 'blur-[1px] pointer-events-none' : ''}`}>
