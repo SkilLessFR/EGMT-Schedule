@@ -1,41 +1,46 @@
 // App.tsx
 import type React from 'react';
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, Moon, Search, Settings2, Sun, Users, Wallet } from 'lucide-react';
+import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, Moon, Search, Settings2, Sun, Users, Wallet, CheckSquare, Plus, Trash2, Bell, AlertTriangle, Edit2, X } from 'lucide-react';
 import type { RosterData, ShiftEvent } from './types';
 import { colorFor, shiftKey, shiftHourValues, buildRosterIndex, eventForIso, GLASS_CARD, GLASS_NAV } from './scheduleUtils';
 import DayDetailsModal from './DayDetailsModal';
 
 const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+const WEEKDAYS_MAP = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const WEEKDAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const WEEKDAY_INDEXES = [1, 2, 3, 4, 5, 6, 0]; 
+
 const EMPLOYEE_STORAGE_KEY = 'work-schedule-employee';
 const DARK_MODE_STORAGE_KEY = 'work-schedule-dark-mode';
 const SALARY_STORAGE_KEY = 'work-schedule-salaries';
 
-// Romanian legal public holidays for 2026 (source: zileliberelegale.ro). Update this list for other years.
+type ScheduleType = 'once' | 'daily' | 'weekly';
+
+interface Task {
+  id: string;
+  title: string;
+  times: string[]; 
+  scheduleType: ScheduleType;
+  daysOfWeek?: number[]; 
+  dateCreated: string; 
+}
+
+interface TimeSelection {
+  hour: string;
+  minute: string;
+}
+
 const ROMANIAN_HOLIDAYS_2026 = new Set<string>([
-  '2026-01-01', // Anul Nou
-  '2026-01-02', // Anul Nou
-  '2026-01-06', // Boboteaza
-  '2026-01-07', // Sfântul Ioan Botezătorul
-  '2026-01-24', // Ziua Unirii Principatelor Române
-  '2026-04-10', // Vinerea Mare
-  '2026-04-12', // Paștele
-  '2026-04-13', // Paștele
-  '2026-05-01', // Ziua Muncii
-  '2026-05-31', // Rusalii
-  '2026-06-01', // Ziua Copilului / Rusalii
-  '2026-08-15', // Adormirea Maicii Domnului
-  '2026-11-30', // Sfântul Andrei
-  '2026-12-01', // Ziua Națională a României
-  '2026-12-25', // Crăciunul
-  '2026-12-26', // Crăciunul
+  '2026-01-01', '2026-01-02', '2026-01-06', '2026-01-07', '2026-01-24',
+  '2026-04-10', '2026-04-12', '2026-04-13', '2026-05-01', '2026-05-31',
+  '2026-06-01', '2026-08-15', '2026-11-30', '2026-12-01', '2026-12-25', '2026-12-26'
 ]);
 
 function isNationalHoliday(isoDate: string) {
   return ROMANIAN_HOLIDAYS_2026.has(isoDate);
 }
 
-// "Working days" for salary purposes = weekdays (Mon-Fri) that aren't a national holiday.
 function countWorkingDaysInMonth(month: number, year: number) {
   let count = 0;
   const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -49,19 +54,10 @@ function countWorkingDaysInMonth(month: number, year: number) {
   return count;
 }
 
-// Normalizes a name for comparison: lowercase, hyphens/extra spaces collapsed, words sorted
-// so "Palade Alexandru-Ionut" and "Alexandru Ionut Palade" are treated as the same person.
 function normalizeName(name: string) {
-  return name
-    .toLowerCase()
-    .replace(/-/g, ' ')
-    .split(/\s+/)
-    .filter(Boolean)
-    .sort()
-    .join(' ');
+  return name.toLowerCase().replace(/-/g, ' ').split(/\s+/).filter(Boolean).sort().join(' ');
 }
 
-// These colleagues work mid shifts and shouldn't be counted in the "most seen colleague" stat.
 const MOST_SEEN_EXCLUDED = [normalizeName('Palade Alexandru-Ionut'), normalizeName('Tir George Cristian')];
 
 const APP_DARK_BG = '#050505';
@@ -70,7 +66,12 @@ const APP_LIGHT_BG = '#f4f4f5';
 const MONTH_AXIS_LOCK_THRESHOLD = 8;
 const MONTH_SWIPE_COMMIT_THRESHOLD = 70;
 const MONTH_SWIPE_DURATION = 260;
-const NAV_INDICATOR_OFFSETS = ['translate-x-0', 'translate-x-[calc(100%+0.375rem)]', 'translate-x-[calc(200%+0.75rem)]'];
+const NAV_INDICATOR_OFFSETS = [
+  'translate-x-0', 
+  'translate-x-[calc(100%+0.375rem)]', 
+  'translate-x-[calc(200%+0.75rem)]',
+  'translate-x-[calc(300%+1.125rem)]'
+];
 
 const IOS_SWITCH_ON = '#34c759';
 const IOS_SWITCH_OFF = '#e5e5ea';
@@ -121,6 +122,26 @@ function eventsForEmployee(roster: RosterData, employee: string): ShiftEvent[] {
   }, []);
 }
 
+// Helper utility to programmatically bundle state data and initiate a localized application download
+const triggerTasksJsonDownload = (tasksData: Task[]) => {
+  try {
+    const jsonString = JSON.stringify(tasksData, null, 2);
+    const blob = new Blob([jsonString], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    
+    const tempLink = document.createElement('a');
+    tempLink.href = url;
+    tempLink.download = 'tasks.json';
+    document.body.appendChild(tempLink);
+    tempLink.click();
+    
+    document.body.removeChild(tempLink);
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    console.error("Failed handling client-side task payload download compile:", error);
+  }
+};
+
 export default function App() {
   const [dark, setDark] = useState(() => {
     const saved = localStorage.getItem(DARK_MODE_STORAGE_KEY);
@@ -143,6 +164,22 @@ export default function App() {
     }
   });
 
+  // Load baseline values locally on launch from the bundle file, then rely on interactive updates
+  const [tasks, setTasks] = useState<Task[]>([]);
+  
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [scheduleType, setScheduleType] = useState<ScheduleType>('daily');
+  const [selectedDays, setSelectedDays] = useState<number[]>([]);
+  const [newTaskTimes, setNewTaskTimes] = useState<TimeSelection[]>([{ hour: '00', minute: '00' }]);
+  
+  const [activeAlarmTask, setActiveAlarmTask] = useState<{ id: string; taskTitle: string; time: string; type: ScheduleType } | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const lastCheckedMinute = useRef<string>('');
+
+  const hoursArray = useMemo(() => Array.from({ length: 24 }, (_, i) => String(i).padStart(2, '0')), []);
+  const minutesArray = useMemo(() => Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0')), []);
+
   const handleSalaryChange = useCallback((employee: string, value: string) => {
     const parsed = value === '' ? 0 : Number(value);
     setSalaries((prev) => {
@@ -152,11 +189,177 @@ export default function App() {
     });
   }, []);
 
+  // Hydrate custom tasks baseline structural format on load from local app route assets
+  useEffect(() => {
+    let isMounted = true;
+    fetch(`${import.meta.env.BASE_URL}tasks.json`, { cache: 'no-store' })
+      .then((res) => {
+        if (!res.ok) throw new Error('Could not download initial baseline array schema.');
+        return res.json() as Promise<Task[]>;
+      })
+      .then((data) => {
+        if (isMounted) setTasks(data);
+      })
+      .catch((err) => console.log("No initial tasks bundle setup found, starting fresh:", err));
+      
+    return () => { isMounted = false; };
+  }, []);
+
+  useEffect(() => {
+    audioRef.current = new Audio('/alarm.mp3');
+    audioRef.current.loop = true;
+
+    const timer = setInterval(() => {
+      const now = new Date();
+      const currentHHMM = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+      const currentDayOfWeek = now.getDay();
+      const currentIsoDate = iso(now);
+      
+      if (lastCheckedMinute.current === currentHHMM) return;
+      lastCheckedMinute.current = currentHHMM;
+
+      tasks.forEach((task) => {
+        if (!task.times.includes(currentHHMM)) return;
+
+        let shouldTrigger = false;
+
+        if (task.scheduleType === 'daily') {
+          shouldTrigger = true;
+        } else if (task.scheduleType === 'once' && task.dateCreated === currentIsoDate) {
+          shouldTrigger = true;
+        } else if (task.scheduleType === 'weekly' && task.daysOfWeek?.includes(currentDayOfWeek)) {
+          shouldTrigger = true;
+        }
+
+        if (shouldTrigger) {
+          setActiveAlarmTask({ id: task.id, taskTitle: task.title, time: currentHHMM, type: task.scheduleType });
+          if (audioRef.current) {
+            audioRef.current.currentTime = 0;
+            audioRef.current.play().catch(err => console.log("Audio deferred configuration:", err));
+          }
+        }
+      });
+    }, 1000);
+
+    return () => {
+      clearInterval(timer);
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+    };
+  }, [tasks]);
+
+  const dismissAlarm = useCallback(() => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
+    
+    if (activeAlarmTask && activeAlarmTask.type === 'once') {
+      const nextStore = tasks.filter((t) => t.id !== activeAlarmTask.id);
+      setTasks(nextStore);
+      triggerTasksJsonDownload(nextStore); // Auto-download upon clean runtime expiration triggers
+    }
+    
+    setActiveAlarmTask(null);
+  }, [activeAlarmTask, tasks]);
+
+  const handleSaveTask = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTaskTitle.trim()) return;
+    if (scheduleType === 'weekly' && selectedDays.length === 0) return;
+
+    const generatedTimes = newTaskTimes.map(t => `${t.hour}:${t.minute}`);
+    const finalTimes = Array.from(new Set(generatedTimes)).sort();
+    
+    let nextStore: Task[] = [];
+
+    if (editingTaskId) {
+      nextStore = tasks.map((t) => 
+        t.id === editingTaskId 
+          ? { 
+              ...t, 
+              title: newTaskTitle.trim(), 
+              times: finalTimes, 
+              scheduleType, 
+              daysOfWeek: scheduleType === 'weekly' ? [...selectedDays].sort() : undefined 
+            }
+          : t
+      );
+    } else {
+      const newTask: Task = {
+        id: crypto.randomUUID(),
+        title: newTaskTitle.trim(),
+        times: finalTimes,
+        scheduleType,
+        daysOfWeek: scheduleType === 'weekly' ? [...selectedDays].sort() : undefined,
+        dateCreated: iso(new Date()),
+      };
+      nextStore = [...tasks, newTask];
+    }
+
+    setTasks(nextStore);
+    triggerTasksJsonDownload(nextStore); // Instantly compile and down-stream file on save action
+    resetForm();
+  };
+
+  const handleRemoveTask = (id: string) => {
+    const nextStore = tasks.filter((t) => t.id !== id);
+    setTasks(nextStore);
+    triggerTasksJsonDownload(nextStore); // Instantly compile and down-stream file on removal action
+    if (editingTaskId === id) resetForm();
+  };
+
+  const startEditingTask = (task: Task) => {
+    setEditingTaskId(task.id);
+    setNewTaskTitle(task.title);
+    setScheduleType(task.scheduleType);
+    setSelectedDays(task.daysOfWeek || []);
+    
+    const splitTimes = task.times.map(t => {
+      const parts = t.split(':');
+      return { hour: parts[0] || '00', minute: parts[1] || '00' };
+    });
+    setNewTaskTimes(splitTimes);
+  };
+
+  const resetForm = () => {
+    setEditingTaskId(null);
+    setNewTaskTitle('');
+    setScheduleType('daily');
+    setSelectedDays([]);
+    setNewTaskTimes([{ hour: '00', minute: '00' }]);
+  };
+
+  const toggleDaySelection = (dayIndex: number) => {
+    setSelectedDays((prev) => 
+      prev.includes(dayIndex) ? prev.filter(d => d !== dayIndex) : [...prev, dayIndex]
+    );
+  };
+
+  const handleTimeDropdownChange = (index: number, field: 'hour' | 'minute', value: string) => {
+    setNewTaskTimes((prev) => {
+      const next = [...prev];
+      next[index] = { ...next[index], [field]: value };
+      return next;
+    });
+  };
+
+  const addTimeInputField = () => {
+    setNewTaskTimes((prev) => [...prev, { hour: '00', minute: '00' }]);
+  };
+
+  const removeTimeInputField = (index: number) => {
+    if (newTaskTimes.length <= 1) return;
+    setNewTaskTimes((prev) => prev.filter((_, i) => i !== index));
+  };
+
   useEffect(() => {
     let mounted = true;
     fetch(`${import.meta.env.BASE_URL}schedule.json`)
       .then((res) => {
-        if (!res.ok) throw new Error('Schedule file not found. Run npm run import.');
+        if (!res.ok) throw new Error('Schedule structural asset missing.');
         return res.json() as Promise<ScheduleJson>;
       })
       .then((json) => {
@@ -170,7 +373,7 @@ export default function App() {
       })
       .catch((err) => {
         if (!mounted) return;
-        setErrorMessage(err instanceof Error ? err.message : 'Unable to load schedule.');
+        setErrorMessage(err instanceof Error ? err.message : 'Unable to query backend schema.');
         setStatus('error');
       });
     return () => { mounted = false; };
@@ -198,8 +401,8 @@ export default function App() {
     };
   }, [dark]);
 
-  const [activeTab, setActiveTab] = useState<'calendar' | 'reports' | 'settings'>('calendar');
-  const handleTabChange = useCallback((tab: 'calendar' | 'reports' | 'settings') => {
+  const [activeTab, setActiveTab] = useState<'calendar' | 'reports' | 'tasks' | 'settings'>('calendar');
+  const handleTabChange = useCallback((tab: 'calendar' | 'reports' | 'tasks' | 'settings') => {
     setActiveTab(tab);
     setSelectedEvent(null);
   }, []);
@@ -295,14 +498,12 @@ export default function App() {
       const raw = roster?.rows[selectedEmployee]?.[isoDate];
       const code = shiftKey(raw ?? 'OFF');
       
-      // A day counts for pay as long as it isn't a normal 'OFF' day
       const isPaidDay = code !== 'OFF';
       if (!isPaidDay) return;
 
       workedDays += 1;
       basePay += dailyWage;
 
-      // If it's a holiday shift ('H8'), stop here so it gets normal pay but zero bonuses
       if (code === 'H8') return;
 
       const isNight = code === 'N';
@@ -452,17 +653,30 @@ export default function App() {
     return <main className={dark ? 'dark' : ''}><div className="flex h-screen items-center justify-center overscroll-none p-8 text-red-500 dark:bg-[#050505]">{errorMessage}</div></main>;
   }
 
-  const sheetOpen = Boolean(selectedEvent);
-  const tabs = [{ id: 'calendar' as const, label: 'Calendar', Icon: CalendarIcon }, { id: 'reports' as const, label: 'Reports', Icon: BarChart3 }, { id: 'settings' as const, label: 'Settings', Icon: Settings2 }];
+  const sheetOpen = Boolean(selectedEvent) || Boolean(activeAlarmTask);
+  const tabs = [
+    { id: 'calendar' as const, label: 'Calendar', Icon: CalendarIcon }, 
+    { id: 'reports' as const, label: 'Reports', Icon: BarChart3 }, 
+    { id: 'tasks' as const, label: 'Tasks', Icon: CheckSquare },
+    { id: 'settings' as const, label: 'Settings', Icon: Settings2 }
+  ];
   const activeTabIndex = tabs.findIndex((t) => t.id === activeTab);
-  const statCards = [{ code: 'M', label: 'Morning' }, { code: 'A', label: 'Afternoon' }, { code: 'N', label: 'Night' }, { code: 'MID', label: 'Mid' }, { code: 'OFF', label: 'Off Days' }, { code: 'H8', label: 'Holiday' }];
+  
+  const statCards = [
+    { code: 'M', label: 'Morning' }, 
+    { code: 'A', label: 'Afternoon' }, 
+    { code: 'N', label: 'Night' }, 
+    { code: 'MID', label: 'Mid' }, 
+    { code: 'OFF', label: 'Off Days' }, 
+    { code: 'H8', label: 'Holiday' }
+  ];
 
   return (
     <main className={dark ? 'dark' : ''}>
       <div className="flex h-screen justify-center overscroll-none bg-zinc-200 dark:bg-[#050505]">
         <div className="relative flex h-screen w-full max-w-[430px] flex-col overflow-hidden bg-zinc-100 text-zinc-950 dark:bg-[#050505] dark:text-white lg:max-w-none lg:flex-row">
 
-          {/* Desktop sidebar nav — hidden on mobile, replaces the bottom tab bar at lg+ */}
+          {/* Desktop Nav Layout */}
           <nav className="hidden shrink-0 flex-col border-r border-zinc-950/[0.06] px-3 py-8 dark:border-white/[0.06] lg:flex lg:w-64">
             <p className="truncate px-3 text-[15px] font-bold tracking-tight">{title}</p>
             <p className="mt-0.5 truncate px-3 pb-6 text-[13px] font-medium text-zinc-400 dark:text-zinc-500">{selectedEmployee}</p>
@@ -554,18 +768,20 @@ export default function App() {
                         </p>
                       </div>
                     ) : (
-                      <p className="text-xs font-medium text-zinc-400 italic">No shared shift duties recorded this month.</p>
+                      <p className="text-xs font-medium text-zinc-400 italic">No shared shifts recorded this month.</p>
                     )}
                   </div>
                 </section>
 
                 <div className="mt-4 grid grid-cols-2 gap-3 lg:col-span-2 lg:mt-4 lg:grid-cols-3">
-                  {statCards.map(({ code, label }) => <div key={code} className={`p-4 ${GLASS_CARD}`}>
-                    <p className="text-[13px] font-semibold text-zinc-400">{label}</p>
-                    <p className="mt-1 text-[28px] font-bold tracking-tight">{monthlyStats.counts[code] ?? 0}</p>
-                  </div>)}
+                  {statCards.map(({ code, label }) => (
+                    <div key={code} className={`p-4 ${GLASS_CARD}`}>
+                      <p className="text-[13px] font-bold text-zinc-400">{label}</p>
+                      <p className="mt-1 text-[28px] font-bold tracking-tight">{monthlyStats.counts[code] ?? 0}</p>
+                    </div>
+                  ))}
                   <div className={`p-4 ${GLASS_CARD}`}>
-                    <p className="text-[13px] font-semibold text-zinc-400">Weekend</p>
+                    <p className="text-[13px] font-bold text-zinc-400">Weekend Shifts</p>
                     <p className="mt-1 text-[28px] font-bold tracking-tight">{monthlyStats.weekendDays}</p>
                   </div>
                 </div>
@@ -641,28 +857,209 @@ export default function App() {
               </div>
             )}
 
+            {activeTab === 'tasks' && (
+              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-24 pt-6 lg:px-0 lg:pb-8">
+                <div>
+                  <h1 className="text-[34px] font-bold tracking-tight">Recurring Tasks</h1>
+                  <p className="mt-1 text-[15px] font-medium text-zinc-400 dark:text-zinc-500">Triggers an automatic file download download upon any modification</p>
+                </div>
+                
+                <section className="mt-6">
+                  <form onSubmit={handleSaveTask} className={`p-4 ${GLASS_CARD} space-y-4`}>
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-[14px] font-bold text-zinc-400 uppercase tracking-wide">
+                        {editingTaskId ? 'Edit Alert Monitor' : 'Create Dynamic Alert'}
+                      </h3>
+                      {editingTaskId && (
+                        <button 
+                          type="button" 
+                          onClick={resetForm}
+                          className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-100"
+                        >
+                          <X className="size-3.5" /> Cancel Edit
+                        </button>
+                      )}
+                    </div>
+                    
+                    <div>
+                      <label className="block text-[12px] font-semibold text-zinc-400 mb-1">Task Title</label>
+                      <input 
+                        type="text"
+                        value={newTaskTitle}
+                        onChange={(e) => setNewTaskTitle(e.target.value)}
+                        placeholder="e.g. Verify API endpoint updates"
+                        className="w-full rounded-xl border border-zinc-950/10 bg-transparent px-3 py-2 text-[15px] outline-none focus:border-blue-500 dark:border-white/10"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[12px] font-semibold text-zinc-400 mb-1.5">Schedule Configuration</label>
+                      <div className="grid grid-cols-3 gap-1 rounded-xl bg-zinc-950/5 p-1 dark:bg-white/5">
+                        {(['once', 'daily', 'weekly'] as ScheduleType[]).map((t) => (
+                          <button
+                            key={t}
+                            type="button"
+                            onClick={() => setScheduleType(t)}
+                            className={`rounded-lg py-1.5 text-center text-[13px] font-semibold capitalize transition-all ${scheduleType === t ? 'bg-white shadow-sm dark:bg-zinc-800 text-blue-500' : 'text-zinc-400'}`}
+                          >
+                            {t === 'once' ? 'Run Once' : t}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {scheduleType === 'weekly' && (
+                      <div className="animate-fadeIn">
+                        <label className="block text-[12px] font-semibold text-zinc-400 mb-1.5">Active Days</label>
+                        <div className="flex items-center justify-between gap-1">
+                          {WEEKDAY_LABELS.map((label, idx) => {
+                            const systemDayVal = WEEKDAY_INDEXES[idx];
+                            const isChosen = selectedDays.includes(systemDayVal);
+                            return (
+                              <button
+                                key={label}
+                                type="button"
+                                onClick={() => toggleDaySelection(systemDayVal)}
+                                className={`flex-1 rounded-xl py-2 text-center text-[12px] font-bold transition-all ${isChosen ? 'bg-blue-500 text-white shadow-md shadow-blue-500/10' : 'bg-zinc-950/5 text-zinc-400 dark:bg-white/5'}`}
+                              >
+                                {label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="space-y-2">
+                      <label className="block text-[12px] font-semibold text-zinc-400">Alarm Triggers (24-Hour Format)</label>
+                      {newTaskTimes.map((timeObj, index) => (
+                        <div key={index} className="flex items-center gap-2">
+                          <div className="flex flex-1 items-center gap-1 rounded-xl border border-zinc-950/10 bg-transparent px-2 py-1 dark:border-white/10">
+                            <select 
+                              value={timeObj.hour}
+                              onChange={(e) => handleTimeDropdownChange(index, 'hour', e.target.value)}
+                              className="w-full bg-transparent py-1 text-center text-[16px] font-semibold outline-none dark:text-white [color-scheme:dark]"
+                            >
+                              {hoursArray.map(h => <option key={h} value={h} className="bg-zinc-100 dark:bg-zinc-900">{h}</option>)}
+                            </select>
+                            <span className="text-zinc-400 font-bold">:</span>
+                            <select 
+                              value={timeObj.minute}
+                              onChange={(e) => handleTimeDropdownChange(index, 'minute', e.target.value)}
+                              className="w-full bg-transparent py-1 text-center text-[16px] font-semibold outline-none dark:text-white [color-scheme:dark]"
+                            >
+                              {minutesArray.map(m => <option key={m} value={m} className="bg-zinc-100 dark:bg-zinc-900">{m}</option>)}
+                            </select>
+                          </div>
+                          {newTaskTimes.length > 1 && (
+                            <button 
+                              type="button" 
+                              onClick={() => removeTimeInputField(index)}
+                              className="p-2 text-red-500 hover:bg-red-500/10 rounded-xl shrink-0"
+                            >
+                              <Trash2 className="size-4" />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                      <button 
+                        type="button"
+                        onClick={addTimeInputField}
+                        className="flex items-center gap-1.5 text-[13px] font-bold text-blue-500 mt-1 hover:underline"
+                      >
+                        <Plus className="size-4" /> Add another time
+                      </button>
+                    </div>
+
+                    <button 
+                      type="submit"
+                      disabled={scheduleType === 'weekly' && selectedDays.length === 0}
+                      className="w-full flex items-center justify-center gap-2 bg-blue-500 hover:bg-blue-600 disabled:opacity-40 disabled:hover:bg-blue-500 text-white font-semibold py-2.5 px-4 rounded-xl transition-colors"
+                    >
+                      <Bell className="size-4" /> {editingTaskId ? 'Save and Export JSON' : 'Save and Export JSON'}
+                    </button>
+                  </form>
+                </section>
+
+                <section className="mt-6">
+                  <h3 className="px-1 text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500 mb-2">Active Monitor Configuration</h3>
+                  <div className="space-y-2">
+                    {tasks.length === 0 ? (
+                      <p className="text-xs italic text-zinc-400 px-1">No custom metrics monitored. Create a task above.</p>
+                    ) : (
+                      tasks.map((task) => (
+                        <div key={task.id} className={`flex items-center justify-between p-4 ${GLASS_CARD} ${editingTaskId === task.id ? 'ring-2 ring-blue-500/50 bg-blue-500/[0.02]' : ''}`}>
+                          <div className="min-w-0 flex-1 pr-4">
+                            <div className="flex items-center gap-2">
+                              <p className="font-semibold text-[15px] truncate">{task.title}</p>
+                              <span className={`rounded-full px-2 py-0.5 text-[9px] font-extrabold tracking-wide uppercase ${task.scheduleType === 'once' ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20' : task.scheduleType === 'weekly' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'bg-green-500/10 text-green-400 border border-green-500/20'}`}>
+                                {task.scheduleType === 'once' ? 'One Time' : task.scheduleType}
+                              </span>
+                            </div>
+                            
+                            {task.scheduleType === 'weekly' && task.daysOfWeek && (
+                              <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1 font-medium">
+                                Active on: {task.daysOfWeek.map(d => WEEKDAYS_MAP[d].substring(0,3)).join(', ')}
+                              </p>
+                            )}
+
+                            <div className="flex flex-wrap gap-1 mt-1.5">
+                              {task.times.map((t) => (
+                                <span key={t} className="text-[10px] font-mono font-bold bg-zinc-950/5 dark:bg-white/10 text-zinc-500 dark:text-zinc-400 px-2 py-0.5 rounded-md">
+                                  {t}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                          
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button 
+                              onClick={() => startEditingTask(task)}
+                              className="p-2.5 text-zinc-400 hover:text-blue-500 hover:bg-blue-500/10 rounded-xl transition-colors"
+                              title="Edit Task parameters"
+                            >
+                              <Edit2 className="size-4" />
+                            </button>
+                            <button 
+                              onClick={() => handleRemoveTask(task.id)}
+                              className="p-2.5 text-zinc-400 hover:text-red-500 hover:bg-red-500/10 rounded-xl transition-colors"
+                              title="Delete task configuration"
+                            >
+                              <Trash2 className="size-4" />
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </section>
+              </div>
+            )}
+
             {activeTab === 'settings' && (
               <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-24 pt-6 lg:px-0 lg:pb-8">
                 <h1 className="text-[34px] font-bold tracking-tight lg:hidden">Settings</h1>
 
                 <div className="lg:grid lg:grid-cols-2 lg:items-start lg:gap-4">
-                <section className="mt-6 lg:mt-0">
-                  <h3 className="px-1 text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Appearance</h3>
-                  <div className={`mt-2 flex items-center justify-between p-4 ${GLASS_CARD}`}>
-                    <div className="flex items-center gap-3">
-                      {dark ? <Moon className="size-5 text-zinc-400"/> : <Sun className="size-5 text-zinc-500"/>}
-                      <div>
-                        <p className="text-[15px] font-semibold">Dark Appearance</p>
-                        <p className="text-[12px] text-zinc-400 dark:text-zinc-500">Optimizes display contrast</p>
+                <section className="mt-6 lg:mt-0 space-y-4">
+                  <div>
+                    <h3 className="px-1 text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Appearance</h3>
+                    <div className={`mt-2 flex items-center justify-between p-4 ${GLASS_CARD}`}>
+                      <div className="flex items-center gap-3">
+                        {dark ? <Moon className="size-5 text-zinc-400"/> : <Sun className="size-5 text-zinc-500"/>}
+                        <div>
+                          <p className="text-[15px] font-semibold">Dark Appearance</p>
+                          <p className="text-[12px] text-zinc-400 dark:text-zinc-500">Optimizes display contrast</p>
+                        </div>
                       </div>
+                      <button
+                        onClick={toggleAppearance}
+                        style={{ backgroundColor: dark ? IOS_SWITCH_ON : IOS_SWITCH_OFF }}
+                        className="relative h-[31px] w-[51px] shrink-0 rounded-full p-0.5 transition-colors duration-200"
+                      >
+                        <div className={`h-[27px] w-[27px] rounded-full bg-white shadow-sm ring-1 ring-black/[0.04] transition-transform duration-200 ${dark ? 'translate-x-[20px]' : 'translate-x-0'}`} />
+                      </button>
                     </div>
-                    <button
-                      onClick={toggleAppearance}
-                      style={{ backgroundColor: dark ? IOS_SWITCH_ON : IOS_SWITCH_OFF }}
-                      className="relative h-[31px] w-[51px] shrink-0 rounded-full p-0.5 transition-colors duration-200"
-                    >
-                      <div className={`h-[27px] w-[27px] rounded-full bg-white shadow-sm ring-1 ring-black/[0.04] transition-transform duration-200 ${dark ? 'translate-x-[20px]' : 'translate-x-0'}`} />
-                    </button>
                   </div>
                 </section>
 
@@ -691,9 +1088,31 @@ export default function App() {
             onClose={() => setSelectedEvent(null)}
           />
 
+          {/* Alarm Loop Intercept Modal */}
+          {activeAlarmTask && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-md">
+              <div className="w-full max-w-[360px] animate-bounce rounded-3xl bg-zinc-900 border border-red-500/30 p-6 text-center text-white shadow-2xl">
+                <div className="mx-auto flex size-14 items-center justify-center rounded-full bg-red-500/20 text-red-500 mb-4 animate-pulse">
+                  <AlertTriangle className="size-7" />
+                </div>
+                <h2 className="text-[20px] font-black tracking-tight">System Monitor Critical</h2>
+                <p className="mt-1 font-mono text-zinc-400 text-xs">Triggered at {activeAlarmTask.time}</p>
+                <div className="my-4 rounded-2xl bg-white/5 p-4 border border-white/5">
+                  <p className="text-[15px] font-semibold break-words">{activeAlarmTask.taskTitle}</p>
+                </div>
+                <button 
+                  onClick={dismissAlarm}
+                  className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-4 rounded-xl shadow-lg shadow-red-500/20 active:scale-[0.98] transition-all text-[15px]"
+                >
+                  Dismiss Loop Alarm
+                </button>
+              </div>
+            </div>
+          )}
+
           <nav aria-hidden={sheetOpen} className={`fixed inset-x-0 bottom-0 z-10 flex justify-center px-5 pb-3 transition-[filter] duration-200 lg:hidden ${sheetOpen ? 'blur-[1px] pointer-events-none' : ''}`}>
             <div className={`relative flex w-full max-w-[380px] p-1.5 ${GLASS_NAV}`}>
-              <div style={{ width: 'calc((100% - 1.5rem) / 3)' }} className={`absolute inset-y-1.5 left-1.5 rounded-[22px] bg-white/85 shadow-md transition-transform duration-[220ms] dark:bg-white/[0.16] ${NAV_INDICATOR_OFFSETS[activeTabIndex] || NAV_INDICATOR_OFFSETS[0]}`} />
+              <div style={{ width: 'calc((100% - 2rem) / 4)' }} className={`absolute inset-y-1.5 left-1.5 rounded-[22px] bg-white/85 shadow-md transition-transform duration-[220ms] dark:bg-white/[0.16] ${NAV_INDICATOR_OFFSETS[activeTabIndex] || NAV_INDICATOR_OFFSETS[0]}`} />
               {tabs.map(({ id, label, Icon }) => <button key={id} onClick={() => handleTabChange(id)} className={`relative z-10 flex flex-1 flex-col items-center gap-0.5 py-2 ${activeTab === id ? 'text-blue-500' : 'text-zinc-400'}`}><Icon className="size-5"/><span className="text-[10px] font-semibold">{label}</span></button>)}
             </div>
           </nav>
