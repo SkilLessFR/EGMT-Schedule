@@ -548,17 +548,11 @@ export default function DayDetailsModal({ event, dailyRoster, roster, selectedEm
       if (!activeAxisRef.current) {
         if (Math.abs(dx) < AXIS_LOCK_THRESHOLD && Math.abs(dy) < AXIS_LOCK_THRESHOLD) return;
         activeAxisRef.current = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
-        hasMovedRef.current = true;
-        setIsDraggingState(true);
-        if (dragPointerId.current != null && sheetRef.current) {
-          try {
-            sheetRef.current.setPointerCapture(dragPointerId.current);
-            capturedPointerId.current = dragPointerId.current;
-          } catch {}
-        }
       }
 
       if (activeAxisRef.current === 'x') {
+        hasMovedRef.current = true;
+        setIsDraggingState(true);
         if (contentRef.current) {
           const blocked = (dx > 0 && !canGoPrev) || (dx < 0 && !canGoNext);
           const appliedX = blocked ? dx * 0.35 : dx;
@@ -570,12 +564,17 @@ export default function DayDetailsModal({ event, dailyRoster, roster, selectedEm
 
       if (activeAxisRef.current === 'y') {
         const startedAtTop = start.scrollTop <= 0;
-        if (!startedAtTop) return;
+        // If swiping up (dy <= 0) or started scrolled down, allow native smooth scroll
+        if (!startedAtTop || dy <= 0) return;
 
-        if (dy > 0) {
+        // User is at top and deliberately pulling down
+        if (dy > 10) {
           hasMovedRef.current = true;
+          setIsDraggingState(true);
           e.preventDefault();
-          const appliedY = dy;
+
+          // Damped smooth pull (0.85 resistance)
+          const appliedY = dy * 0.85;
           if (sheetRef.current) {
             sheetRef.current.style.transition = 'none';
             sheetRef.current.style.transform = `translateY(${appliedY}px)`;
@@ -584,12 +583,6 @@ export default function DayDetailsModal({ event, dailyRoster, roster, selectedEm
             const progress = Math.max(0, Math.min(1, 1 - appliedY / (window.innerHeight * 0.65)));
             backdropRef.current.style.transition = 'none';
             backdropRef.current.style.opacity = progress.toString();
-          }
-        } else {
-          const appliedY = -Math.pow(Math.abs(dy), 0.65);
-          if (sheetRef.current) {
-            sheetRef.current.style.transition = 'none';
-            sheetRef.current.style.transform = `translateY(${appliedY}px)`;
           }
         }
       }
@@ -631,35 +624,36 @@ export default function DayDetailsModal({ event, dailyRoster, roster, selectedEm
         } else if (currentDx >= SWIPE_COMMIT_THRESHOLD && canGoPrev) {
           commitSwipe('prev');
         } else {
-          contentRef.current.style.transition = 'transform 260ms cubic-bezier(0.32, 0.72, 0, 1)';
+          contentRef.current.style.transition = 'transform 300ms cubic-bezier(0.22, 1, 0.36, 1)';
           contentRef.current.style.transform = 'translateX(0px)';
         }
       }
 
       if (axis === 'y' && sheetRef.current && start) {
         const currentDy = lastPosRef.current.y - start.y;
-        const isFlickDown = velocityY > 0.45 && currentDy > 25;
-        const isDragDownPassed = currentDy > 75;
+        // Requires deliberate downward flick or intentional 120px drag
+        const isFlickDown = velocityY > 0.85 && currentDy > 60;
+        const isDragDownPassed = currentDy > 120;
 
         if (isFlickDown || isDragDownPassed) {
-          // DISMISS WITH FLUID SPRING
+          // Controlled, smooth dismiss
           animatingRef.current = true;
-          sheetRef.current.style.transition = 'transform 260ms cubic-bezier(0.32, 0.72, 0, 1)';
+          sheetRef.current.style.transition = 'transform 380ms cubic-bezier(0.22, 1, 0.36, 1)';
           sheetRef.current.style.transform = 'translateY(100%)';
           if (backdropRef.current) {
-            backdropRef.current.style.transition = 'opacity 220ms ease';
+            backdropRef.current.style.transition = 'opacity 300ms ease';
             backdropRef.current.style.opacity = '0';
           }
           window.setTimeout(() => {
             onClose();
             animatingRef.current = false;
-          }, 220);
+          }, 350);
         } else {
-          // BOUNCE BACK ELASTICALLY
-          sheetRef.current.style.transition = 'transform 320ms cubic-bezier(0.32, 0.72, 0, 1)';
+          // Smooth, cushioned spring back to original position
+          sheetRef.current.style.transition = 'transform 380ms cubic-bezier(0.22, 1, 0.36, 1)';
           sheetRef.current.style.transform = 'translateY(0px)';
           if (backdropRef.current) {
-            backdropRef.current.style.transition = 'opacity 250ms ease';
+            backdropRef.current.style.transition = 'opacity 300ms ease';
             backdropRef.current.style.opacity = '1';
           }
         }
