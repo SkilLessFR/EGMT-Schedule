@@ -6,6 +6,23 @@ const XLSX = require('xlsx');
 const monthNames = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const dateHeaderPattern = /^\s*(\d{1,2})\s*[-\s/]\s*([A-Za-z]{3,})\b/;
 const knownShiftCodes = new Set(['MID', 'OFF', 'M', 'A', 'N', 'H8']);
+const GLOBAL_MID_EMPLOYEES = new Set(['TIR GEORGE CRISTIAN']);
+
+function normalizeEmployeeName(value) {
+  return String(value ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Z0-9\s]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase();
+}
+function shouldForceMidShift(employee) {
+  const normalized = normalizeEmployeeName(employee);
+  return GLOBAL_MID_EMPLOYEES.has(normalized)
+    || normalized.includes('TIRGEORGECRISTIAN')
+    || normalized.includes('TIR GEORGE CRISTIAN');
+}
 
 function toIso(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -104,6 +121,12 @@ function parseWorkbook(workbook) {
       if (value) shifts[isoDate] = value;
     });
 
+    if (shouldForceMidShift(employee)) {
+      dateColumns.forEach(({ isoDate }) => {
+        shifts[isoDate] = 'MID';
+      });
+    }
+
     if (Object.keys(shifts).length) {
       employees.push(employee);
       rows[employee] = shifts;
@@ -135,9 +158,85 @@ if (!input) {
 }
 
 const workbook = XLSX.readFile(input, { cellDates: false });
-const schedule = parseWorkbook(workbook);
-schedule.fileName = path.basename(input);
+const newSchedule = parseWorkbook(workbook);
+const currentFileName = path.basename(input);
+
 const output = path.resolve('public/schedule.json');
 fs.mkdirSync(path.dirname(output), { recursive: true });
-fs.writeFileSync(output, `${JSON.stringify(schedule, null, 2)}\n`);
-console.log(`Wrote ${output}`);
+
+let finalSchedule = {
+  month: newSchedule.month,
+  year: newSchedule.year,
+  employees: [],
+  rows: {},
+  dateColumns: [],
+  fileNames: [] // Track all files merged into this schedule
+};
+
+// 1. If an existing schedule exists, read it first
+if (fs.existsSync(output)) {
+  try {
+    const existingRaw = fs.readFileSync(output, 'utf8');
+    if (existingRaw.trim()) {
+      const existingData = JSON.parse(existingRaw);
+      
+      // Keep structural metadata from the existing file or fallback
+      finalSchedule.month = existingData.month ?? newSchedule.month;
+      finalSchedule.year = existingData.year ?? newSchedule.year;
+      finalSchedule.employees = Array.isArray(existingData.employees) ? existingData.employees : [];
+      finalSchedule.rows = existingData.rows && typeof existingData.rows === 'object' ? existingData.rows : {};
+      finalSchedule.dateColumns = Array.isArray(existingData.dateColumns) ? existingData.dateColumns : [];
+      
+      // Preserve history of files imported
+      if (Array.isArray(existingData.fileNames)) {
+        finalSchedule.fileNames = existingData.fileNames;
+      } else if (existingData.fileName) {
+        finalSchedule.fileNames = [existingData.fileName];
+      }
+    }
+  } catch (e) {
+    console.warn("Could not read or parse existing schedule.json, creating a fresh one:", e.message);
+  }
+}
+
+// 2. Track the new file name if it hasn't been logged yet
+if (!finalSchedule.fileNames.includes(currentFileName)) {
+  finalSchedule.fileNames.push(currentFileName);
+}
+
+// 3. Merge Employees (using Set to prevent duplicate names)
+const employeeSet = new Set([...finalSchedule.employees, ...newSchedule.employees]);
+finalSchedule.employees = Array.from(employeeSet);
+
+// 4. Merge Rows (Shifts per employee)
+for (const [employee, newShifts] of Object.entries(newSchedule.rows)) {
+  if (!finalSchedule.rows[employee]) {
+    // New employee to the dataset, copy all their shifts directly
+    finalSchedule.rows[employee] = { ...newShifts };
+  } else {
+    // Existing employee, merge day-by-day (new file values take precedence on clash)
+    for (const [dateIso, shiftCode] of Object.entries(newShifts)) {
+      finalSchedule.rows[employee][dateIso] = shiftCode;
+    }
+  }
+}
+
+// 5. Merge dateColumns list safely
+const seenDates = new Set(finalSchedule.dateColumns.map(d => d.isoDate));
+newSchedule.dateColumns.forEach(col => {
+  if (!seenDates.has(col.isoDate)) {
+    finalSchedule.dateColumns.push(col);
+    seenDates.add(col.isoDate);
+  }
+});
+
+// Sort date columns so the UI receives them chronologically
+finalSchedule.dateColumns.sort((a, b) => a.isoDate.localeCompare(b.isoDate));
+
+// Clean up old legacy single property if it hung around
+delete finalSchedule.fileName;
+
+// 6. Save the merged schedule
+fs.writeFileSync(output, `${JSON.stringify(finalSchedule, null, 2)}\n`);
+console.log(`Successfully merged ${currentFileName} into ${output}`);
+console.log(`Total active employees now tracked: ${finalSchedule.employees.length}`);

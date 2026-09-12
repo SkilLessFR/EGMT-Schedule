@@ -1,10 +1,23 @@
 // App.tsx
 import type React from 'react';
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, Moon, Search, Settings2, Sun, Users, Wallet, CheckSquare, Plus, Trash2, Bell, AlertTriangle, Edit2, X } from 'lucide-react';
+import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, Moon, Search, Settings2, Sun, Users, Wallet, CheckSquare, Plus, Trash2, Bell, AlertTriangle, Edit2, X, UploadCloud, Loader2, Cloud } from 'lucide-react';
 import type { RosterData, ShiftEvent } from './types';
-import { colorFor, shiftKey, shiftHourValues, buildRosterIndex, eventForIso, GLASS_CARD, GLASS_NAV } from './scheduleUtils';
+import { parseRoster, mergeRosters } from './parser';
+import {
+  colorFor,
+  shiftKey,
+  shiftHourValues,
+  buildRosterIndex,
+  eventForIso,
+  GLASS_CARD,
+  GLASS_NAV,
+  findShiftTransformationPreview,
+  shiftLabel,
+} from './scheduleUtils';
 import DayDetailsModal from './DayDetailsModal';
+import { NotificationSettingsCard, NotificationPromptBanner } from './NotificationManager';
+import { registerServiceWorker, showAppNotification, SHIFT_ALERTS_PREF_KEY } from './notificationService';
 
 const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 const WEEKDAYS_MAP = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -14,6 +27,8 @@ const WEEKDAY_INDEXES = [1, 2, 3, 4, 5, 6, 0];
 const EMPLOYEE_STORAGE_KEY = 'work-schedule-employee';
 const DARK_MODE_STORAGE_KEY = 'work-schedule-dark-mode';
 const SALARY_STORAGE_KEY = 'work-schedule-salaries';
+const ADMIN_PIN_STORAGE_KEY = 'work-schedule-admin-pin';
+const APP_BASE_URL = ((import.meta as ImportMeta & { env?: { BASE_URL?: string } }).env?.BASE_URL ?? '/');
 
 type ScheduleType = 'once' | 'daily' | 'weekly';
 
@@ -84,6 +99,29 @@ function monthDays(month: number, year: number) {
 }
 function iso(date: Date) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; }
 
+function formatSwapDateRange(dateText: string) {
+  const dates = dateText.split(', ').filter(Boolean);
+  if (dates.length <= 1) return dateText;
+  const first = dates[0];
+  const last = dates[dates.length - 1];
+  const firstParts = first.split('-');
+  const lastParts = last.split('-');
+  if (firstParts.length === 3 && lastParts.length === 3 && firstParts[0] === lastParts[0] && firstParts[1] === lastParts[1]) {
+    return `${first} → ${last}`;
+  }
+  return `${first} → ${last}`;
+}
+
+function formatRequiredSwap(swap: ReturnType<typeof findShiftTransformationPreview>['swaps'][number]) {
+  const crossDateParts = swap.isoDate.split(' ↔ ');
+  if (crossDateParts.length === 2) {
+    const giveDate = new Date(`${crossDateParts[0]}T00:00:00`).toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
+    const takeDate = new Date(`${crossDateParts[1]}T00:00:00`).toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
+    return `Give your ${shiftLabel(swap.from)} on ${giveDate}; take ${swap.otherEmployee}'s ${shiftLabel(swap.to)} on ${takeDate}.`;
+  }
+  return `Take ${swap.otherEmployee}'s ${shiftLabel(swap.to)} on ${formatSwapDateRange(swap.isoDate)}.`;
+}
+
 function displayFileName(fileName: string | undefined | null) {
   if (!fileName || !fileName.trim()) return 'Untitled roster';
   const base = fileName.trim().split(/[\\/]/).pop() ?? fileName;
@@ -109,15 +147,15 @@ function hydrateRoster(json: ScheduleJson): RosterData {
     month: json.month,
     year: json.year,
     employees: json.employees,
-    dateColumns: json.dateColumns.map(({ isoDate }, index) => ({ index, isoDate, date: new Date(isoDate) })),
+    dateColumns: json.dateColumns.map(({ isoDate }, index) => ({ index, isoDate, date: new Date(`${isoDate}T00:00:00`) })),
     rows: json.rows,
   };
 }
 
 function eventsForEmployee(roster: RosterData, employee: string): ShiftEvent[] {
   return roster.dateColumns.reduce<ShiftEvent[]>((events, { isoDate }) => {
-    const shift = roster.rows[employee]?.[isoDate] || 'OFF';
-    events.push({ id: `${employee}-${isoDate}`, isoDate, shift, date: new Date(isoDate) });
+    const shift = shiftKey(roster.rows[employee]?.[isoDate] ?? 'OFF');
+    events.push({ id: `${employee}-${isoDate}`, isoDate, shift, date: new Date(`${isoDate}T00:00:00`) });
     return events;
   }, []);
 }
@@ -192,7 +230,7 @@ export default function App() {
   // Hydrate custom tasks baseline structural format on load from local app route assets
   useEffect(() => {
     let isMounted = true;
-    fetch(`${import.meta.env.BASE_URL}tasks.json`, { cache: 'no-store' })
+    fetch(`${APP_BASE_URL}tasks.json`, { cache: 'no-store' })
       .then((res) => {
         if (!res.ok) throw new Error('Could not download initial baseline array schema.');
         return res.json() as Promise<Task[]>;
@@ -203,6 +241,92 @@ export default function App() {
       .catch((err) => console.log("No initial tasks bundle setup found, starting fresh:", err));
       
     return () => { isMounted = false; };
+  }, []);
+
+  // Cloudflare KV Roster Upload & Sync State
+  const [scheduleSource, setScheduleSource] = useState<'kv' | 'static'>('static');
+  const [adminPin, setAdminPin] = useState(() => localStorage.getItem(ADMIN_PIN_STORAGE_KEY) ?? '');
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [parsedPreview, setParsedPreview] = useState<RosterData | null>(null);
+  const [mergeWithExisting, setMergeWithExisting] = useState(true);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadFile(file);
+    setUploadStatus(null);
+    try {
+      const parsed = await parseRoster(file);
+      setParsedPreview(parsed);
+    } catch (err) {
+      setUploadStatus({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Failed to parse Excel schedule.',
+      });
+      setParsedPreview(null);
+    }
+  };
+
+  const handlePublishRoster = async () => {
+    if (!parsedPreview) return;
+    setIsUploading(true);
+    setUploadStatus(null);
+
+    try {
+      const payloadRoster = mergeWithExisting && roster
+        ? mergeRosters(roster, parsedPreview)
+        : parsedPreview;
+
+      if (adminPin.trim()) {
+        localStorage.setItem(ADMIN_PIN_STORAGE_KEY, adminPin.trim());
+      } else {
+        localStorage.removeItem(ADMIN_PIN_STORAGE_KEY);
+      }
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (adminPin.trim()) {
+        headers['X-Admin-Pin'] = adminPin.trim();
+      }
+
+      const res = await fetch('/api/schedule', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payloadRoster),
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || `Server responded with status ${res.status}`);
+      }
+
+      setRoster(payloadRoster);
+      setScheduleSource('kv');
+      setCurrentMonth(parsedPreview.month);
+      setCurrentYear(parsedPreview.year);
+      setUploadStatus({
+        type: 'success',
+        message: `Successfully published ${parsedPreview.fileName} to Cloudflare KV!`,
+      });
+      setUploadFile(null);
+      setParsedPreview(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    } catch (err) {
+      setUploadStatus({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Failed to publish schedule to Cloudflare KV.',
+      });
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  useEffect(() => {
+    registerServiceWorker().catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -218,6 +342,7 @@ export default function App() {
       if (lastCheckedMinute.current === currentHHMM) return;
       lastCheckedMinute.current = currentHHMM;
 
+      // Check recurring task alarms
       tasks.forEach((task) => {
         if (!task.times.includes(currentHHMM)) return;
 
@@ -237,8 +362,34 @@ export default function App() {
             audioRef.current.currentTime = 0;
             audioRef.current.play().catch(err => console.log("Audio deferred configuration:", err));
           }
+          showAppNotification(`⏰ Alarm: ${task.title}`, {
+            body: `Scheduled alarm triggered at ${currentHHMM}`,
+            tag: `alarm-${task.id}`,
+          }).catch(() => {});
         }
       });
+
+      // Check upcoming shift alerts (1 hour before shift starts)
+      const shiftAlertsEnabled = localStorage.getItem(SHIFT_ALERTS_PREF_KEY) !== 'false';
+      if (shiftAlertsEnabled && roster && selectedEmployee) {
+        const todayShift = shiftKey(roster.rows[selectedEmployee]?.[currentIsoDate] ?? 'OFF');
+        if (todayShift === 'M' && currentHHMM === '06:00') {
+          showAppNotification('Shift Reminder: Morning (M)', {
+            body: 'Your Morning shift starts in 1 hour at 07:00.',
+            tag: `shift-${currentIsoDate}`,
+          }).catch(() => {});
+        } else if (todayShift === 'A' && currentHHMM === '14:00') {
+          showAppNotification('Shift Reminder: Afternoon (A)', {
+            body: 'Your Afternoon shift starts in 1 hour at 15:00.',
+            tag: `shift-${currentIsoDate}`,
+          }).catch(() => {});
+        } else if (todayShift === 'N' && currentHHMM === '18:00') {
+          showAppNotification('Shift Reminder: Night (N)', {
+            body: 'Your Night shift starts in 1 hour at 19:00.',
+            tag: `shift-${currentIsoDate}`,
+          }).catch(() => {});
+        }
+      }
     }, 1000);
 
     return () => {
@@ -248,7 +399,7 @@ export default function App() {
         audioRef.current = null;
       }
     };
-  }, [tasks]);
+  }, [tasks, roster, selectedEmployee]);
 
   const dismissAlarm = useCallback(() => {
     if (audioRef.current) {
@@ -357,25 +508,48 @@ export default function App() {
 
   useEffect(() => {
     let mounted = true;
-    fetch(`${import.meta.env.BASE_URL}schedule.json`)
-      .then((res) => {
-        if (!res.ok) throw new Error('Schedule structural asset missing.');
-        return res.json() as Promise<ScheduleJson>;
-      })
-      .then((json) => {
+
+    const fetchSchedule = async () => {
+      // 1. Try Cloudflare Pages Function connected to KV
+      try {
+        const kvRes = await fetch('/api/schedule');
+        if (kvRes.ok) {
+          const json = (await kvRes.json()) as ScheduleJson;
+          if (!mounted) return;
+          const parsed = hydrateRoster(json);
+          setRoster(parsed);
+          setScheduleSource('kv');
+          const savedEmployee = localStorage.getItem(EMPLOYEE_STORAGE_KEY);
+          const initialEmployee = savedEmployee && parsed.employees.includes(savedEmployee) ? savedEmployee : (parsed.employees[0] ?? '');
+          setSelectedEmployee(initialEmployee);
+          setStatus('loaded');
+          return;
+        }
+      } catch {
+        // Fall back below
+      }
+
+      // 2. Fall back to bundled static JSON
+      try {
+        const res = await fetch(`${APP_BASE_URL}schedule.json`);
+        if (!res.ok) throw new Error('Schedule structural asset missing from schedule.json.');
+        const json = (await res.json()) as ScheduleJson;
         if (!mounted) return;
         const parsed = hydrateRoster(json);
         setRoster(parsed);
+        setScheduleSource('static');
         const savedEmployee = localStorage.getItem(EMPLOYEE_STORAGE_KEY);
         const initialEmployee = savedEmployee && parsed.employees.includes(savedEmployee) ? savedEmployee : (parsed.employees[0] ?? '');
         setSelectedEmployee(initialEmployee);
         setStatus('loaded');
-      })
-      .catch((err) => {
+      } catch (err) {
         if (!mounted) return;
         setErrorMessage(err instanceof Error ? err.message : 'Unable to query backend schema.');
         setStatus('error');
-      });
+      }
+    };
+
+    fetchSchedule();
     return () => { mounted = false; };
   }, []);
 
@@ -401,8 +575,11 @@ export default function App() {
     };
   }, [dark]);
 
-  const [activeTab, setActiveTab] = useState<'calendar' | 'reports' | 'tasks' | 'settings'>('calendar');
-  const handleTabChange = useCallback((tab: 'calendar' | 'reports' | 'tasks' | 'settings') => {
+  const [activeTab, setActiveTab] = useState<'calendar' | 'reports' | 'tasks' | 'settings' | 'solver'>('calendar');
+  const [solverTargetShift, setSolverTargetShift] = useState<string>('M');
+  const [solverResult, setSolverResult] = useState<ReturnType<typeof findShiftTransformationPreview> | null>(null);
+  const [solverSimulationVariant, setSolverSimulationVariant] = useState(0);
+  const handleTabChange = useCallback((tab: 'calendar' | 'reports' | 'tasks' | 'settings' | 'solver') => {
     setActiveTab(tab);
     setSelectedEvent(null);
   }, []);
@@ -657,6 +834,7 @@ export default function App() {
   const tabs = [
     { id: 'calendar' as const, label: 'Calendar', Icon: CalendarIcon }, 
     { id: 'reports' as const, label: 'Reports', Icon: BarChart3 }, 
+    { id: 'solver' as const, label: 'Solver', Icon: Search },
     { id: 'tasks' as const, label: 'Tasks', Icon: CheckSquare },
     { id: 'settings' as const, label: 'Settings', Icon: Settings2 }
   ];
@@ -705,6 +883,13 @@ export default function App() {
                       <h1 className="truncate text-[34px] font-bold leading-none tracking-tight">{title}</h1>
                       <p className="mt-1 truncate text-[15px] font-medium text-zinc-400 dark:text-zinc-500">{selectedEmployee}</p>
                     </div>
+                    <button
+                      onClick={() => handleTabChange('settings')}
+                      className="flex size-10 items-center justify-center rounded-2xl bg-zinc-950/5 text-zinc-600 transition-colors hover:bg-zinc-950/10 dark:bg-white/5 dark:text-zinc-300 dark:hover:bg-white/10"
+                      title="Settings & Notifications"
+                    >
+                      <Bell className="size-5" />
+                    </button>
                   </div>
                   <div className="mt-3 flex items-center justify-center gap-1">
                     <button onClick={goToPreviousMonth} className="flex size-8 items-center justify-center rounded-full text-zinc-400"><ChevronLeft className="size-5"/></button>
@@ -727,7 +912,7 @@ export default function App() {
                     <div ref={monthGridRef} onPointerDown={handleMonthPointerDown} style={{ touchAction: 'pan-y' }} className="grid h-full grid-cols-7 grid-rows-6">
                       {calendarDays.map((day) => {
                         const dayIso = iso(day); const inRoster = rosterDateSet.has(dayIso);
-                        const event = eventMap[dayIso] ?? (inRoster ? eventForIso(roster, selectedEmployee, dayIso) : undefined);
+                        const event = eventMap[dayIso] ?? (inRoster && roster ? { id: `${selectedEmployee}-${dayIso}-synthetic`, isoDate: dayIso, date: day, shift: 'OFF' } : undefined);
                         const colors = event ? colorFor(event.shift) : { bg: '', text: '' };
                         const isOff = event && shiftKey(event.shift) === 'OFF'; const isToday = dayIso === todayIso;
                         const isHoliday = isNationalHoliday(dayIso);
@@ -742,6 +927,122 @@ export default function App() {
                     </div>
                   </div>
                 </div>
+              </div>
+            )}
+
+            {activeTab === 'solver' && (
+              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-24 pt-6 lg:px-0 lg:pb-8">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div>
+                    <h1 className="text-[30px] font-bold tracking-tight">Shift transformation</h1>
+                    <p className="text-[13px] text-zinc-400">Build a month-level swap preview for {selectedEmployee}</p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      if (!roster || !selectedEmployee) return;
+                      setSolverSimulationVariant(0);
+                      setSolverResult(findShiftTransformationPreview(roster, selectedEmployee, solverTargetShift, currentMonth, currentYear, 0));
+                    }}
+                    className="rounded-xl bg-blue-500 px-3 py-2 text-[12px] font-bold uppercase tracking-wider text-white"
+                  >
+                    Run solver
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (!roster || !selectedEmployee) return;
+                      const nextVariant = solverSimulationVariant + 1;
+                      setSolverSimulationVariant(nextVariant);
+                      setSolverResult(findShiftTransformationPreview(roster, selectedEmployee, solverTargetShift, currentMonth, currentYear, nextVariant));
+                    }}
+                    disabled={!solverResult}
+                    className="rounded-xl border border-white/15 px-3 py-2 text-[12px] font-bold uppercase tracking-wider text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Resimulate change
+                  </button>
+                </div>
+
+                <div className="mb-4 grid grid-cols-2 gap-3">
+                  <div className={`rounded-2xl border border-white/10 bg-zinc-900/40 p-3 ${GLASS_CARD}`}>
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400">Employee</label>
+                    <div className="mt-2 text-[16px] font-bold">{selectedEmployee}</div>
+                  </div>
+                  <div className={`rounded-2xl border border-white/10 bg-zinc-900/40 p-3 ${GLASS_CARD}`}>
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400">Target shift</label>
+                    <select
+                      value={solverTargetShift}
+                      onChange={(e) => setSolverTargetShift(e.target.value)}
+                      className="mt-2 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-2 py-2 text-[14px] text-zinc-100 outline-none [color-scheme:dark]"
+                    >
+                      {['M', 'A', 'N', 'OFF'].map((shift) => (
+                        <option key={shift} value={shift} className="bg-zinc-900 text-zinc-100">
+                          {shiftLabel(shift)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {solverResult && (
+                  <>
+                    <div className={`mb-4 rounded-2xl border ${solverResult.possible ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-rose-500/30 bg-rose-500/5'} p-3`}>
+                      <div className="font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-300">Result</div>
+                      <div className={`mt-1 text-[15px] font-bold ${solverResult.possible ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {solverResult.possible ? 'Possible' : 'Impossible'}
+                      </div>
+                      <p className="mt-2 text-[12px] leading-relaxed text-zinc-200">{solverResult.summary}</p>
+                      {solverResult.firstAttempt && (
+                        <p className="mt-2 text-[11px] text-cyan-300">First attempted branch: {solverResult.firstAttempt}</p>
+                      )}
+                    </div>
+
+                    <div className="mb-4 rounded-2xl border border-white/10 bg-zinc-900/40 p-3">
+                      <div className="mb-2 font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-400">Required swaps</div>
+                      {solverResult.swaps.length > 0 ? (
+                        <div className="space-y-2">
+                          {solverResult.swaps.map((swap, index) => (
+                            <div key={`${swap.isoDate}-${swap.otherEmployee}-${index}`} className="rounded-xl border border-white/5 bg-white/5 p-2 text-[12px] text-zinc-200">
+                              <div className="font-semibold">{formatRequiredSwap(swap)}</div>
+                              <div className="mt-1 text-zinc-300">{swap.employee} ↔ {swap.otherEmployee}</div>
+                              <div className="mt-1 flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider">
+                                <span className="text-cyan-300">{swap.from} → {swap.to}</span>
+                                {swap.type && <span className={swap.status === 'good' ? 'text-emerald-400' : 'text-amber-300'}>{swap.type === 'WHOLE_BLOCK' ? 'Good' : swap.type === 'PARTIAL_BLOCK' ? 'Under review' : 'Eligible'}</span>}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="text-[12px] text-zinc-300">No swaps were needed for this month preview.</div>
+                      )}
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-zinc-900/40 p-3">
+                      <div className="mb-2 font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-400">Rendered preview</div>
+                      <div className="grid grid-cols-7 gap-1 text-center text-[10px] text-zinc-400">
+                        {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((day, i) => (
+                          <div key={`${day}-${i}`} className="py-1">{day}</div>
+                        ))}
+                        {monthDays(currentMonth, currentYear).map((day) => {
+                          const dayIso = iso(day);
+                          const finalShift = shiftKey(solverResult.finalRoster[selectedEmployee]?.[dayIso] ?? 'OFF');
+                          const sourceSwap = solverResult.swaps.find((swap) => {
+                            const dateParts = swap.isoDate.split(' ↔ ');
+                            const requesterDates = dateParts.length === 2 ? [dateParts[0]] : swap.isoDate.split(', ');
+                            return requesterDates.includes(dayIso);
+                          });
+                          const previewTitle = sourceSwap ? `Taken from ${sourceSwap.otherEmployee}` : undefined;
+                          return (
+                            <div key={dayIso} title={previewTitle} aria-label={previewTitle} className={`rounded-lg border border-white/5 p-1 ${day.getMonth() !== currentMonth ? 'opacity-30' : ''}`}>
+                              <div className="text-[10px] text-zinc-500">{day.getDate()}</div>
+                              <div className={`mt-1 rounded-full px-1 py-0.5 text-[9px] font-bold ${colorFor(finalShift).bg} ${colorFor(finalShift).text}`}>
+                                {finalShift === 'OFF' ? 'OFF' : finalShift}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
             )}
 
@@ -861,7 +1162,11 @@ export default function App() {
               <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-24 pt-6 lg:px-0 lg:pb-8">
                 <div>
                   <h1 className="text-[34px] font-bold tracking-tight">Recurring Tasks</h1>
-                  <p className="mt-1 text-[15px] font-medium text-zinc-400 dark:text-zinc-500">Triggers an automatic file download download upon any modification</p>
+                  <p className="mt-1 text-[15px] font-medium text-zinc-400 dark:text-zinc-500">Triggers an automatic file download upon any modification</p>
+                </div>
+                
+                <div className="mt-4">
+                  <NotificationPromptBanner />
                 </div>
                 
                 <section className="mt-6">
@@ -887,7 +1192,7 @@ export default function App() {
                         type="text"
                         value={newTaskTitle}
                         onChange={(e) => setNewTaskTitle(e.target.value)}
-                        placeholder="Bile Bile Bile Bile Bile multe Bile"
+                        placeholder="e.g. Verify API endpoint updates"
                         className="w-full rounded-xl border border-zinc-950/10 bg-transparent px-3 py-2 text-[15px] outline-none focus:border-blue-500 dark:border-white/10"
                       />
                     </div>
@@ -1061,16 +1366,115 @@ export default function App() {
                       </button>
                     </div>
                   </div>
+
+                  <div>
+                    <h3 className="px-1 text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Notifications</h3>
+                    <div className="mt-2">
+                      <NotificationSettingsCard />
+                    </div>
+                  </div>
                 </section>
 
-                <section className="mt-6 lg:mt-0">
-                  <div className="flex items-center justify-between px-1">
-                    <h3 className="text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Active Roster</h3>
-                    <span className="text-[11px] font-mono text-zinc-400 dark:text-zinc-500 truncate max-w-[180px]">{displayFileName(roster?.fileName)}</span>
+                <section className="mt-6 lg:mt-0 space-y-4">
+                  <div>
+                    <div className="flex items-center justify-between px-1">
+                      <h3 className="text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Cloudflare KV Schedule Sync</h3>
+                      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold ${scheduleSource === 'kv' ? 'bg-lime-500/10 text-lime-500' : 'bg-zinc-500/10 text-zinc-400'}`}>
+                        <Cloud className="size-3" />
+                        {scheduleSource === 'kv' ? 'Live KV' : 'Local Bundle'}
+                      </span>
+                    </div>
+
+                    <div className={`mt-2 p-4 space-y-3 ${GLASS_CARD}`}>
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".xlsx,.xls"
+                        onChange={handleFileSelect}
+                        className="hidden"
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="flex w-full flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-zinc-950/10 p-4 transition-colors hover:border-blue-500/40 hover:bg-blue-500/5 dark:border-white/10 dark:hover:border-blue-400/40 text-center cursor-pointer"
+                      >
+                        <UploadCloud className="size-6 text-blue-500" />
+                        <div>
+                          <p className="text-[14px] font-semibold">{uploadFile ? uploadFile.name : "Upload Boss's Excel (.xlsx)"}</p>
+                          <p className="text-[11px] text-zinc-400 dark:text-zinc-500">Tap to select or drop updated schedule file</p>
+                        </div>
+                      </button>
+
+                      {parsedPreview && (
+                        <div className="rounded-xl bg-zinc-950/5 p-3.5 dark:bg-white/5 space-y-2 border border-zinc-950/5 dark:border-white/5 text-[13px]">
+                          <div className="flex items-center justify-between">
+                            <span className="text-zinc-400">Detected Period:</span>
+                            <span className="font-semibold text-blue-500">
+                              {new Intl.DateTimeFormat('en', { month: 'long', year: 'numeric' }).format(new Date(parsedPreview.year, parsedPreview.month))}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-zinc-400">Employees Found:</span>
+                            <span className="font-mono font-semibold">{parsedPreview.employees.length}</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-zinc-400">Calendar Days:</span>
+                            <span className="font-mono font-semibold">{parsedPreview.dateColumns.length} days</span>
+                          </div>
+
+                          <div className="pt-2 border-t border-zinc-950/5 dark:border-white/5 flex items-center justify-between">
+                            <label className="text-[12px] flex items-center gap-2 cursor-pointer select-none">
+                              <input
+                                type="checkbox"
+                                checked={mergeWithExisting}
+                                onChange={(e) => setMergeWithExisting(e.target.checked)}
+                                className="rounded text-blue-500"
+                              />
+                              Merge with existing months
+                            </label>
+                          </div>
+
+                          <div className="pt-2 border-t border-zinc-950/5 dark:border-white/5">
+                            <input
+                              type="password"
+                              value={adminPin}
+                              onChange={(e) => setAdminPin(e.target.value)}
+                              placeholder="Admin PIN (if configured)"
+                              className="w-full rounded-lg bg-zinc-950/5 dark:bg-white/5 px-3 py-1.5 text-xs outline-none border border-zinc-950/10 dark:border-white/10"
+                            />
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={handlePublishRoster}
+                            disabled={isUploading}
+                            className="w-full mt-2 flex items-center justify-center gap-2 rounded-xl bg-blue-500 hover:bg-blue-600 text-white font-bold py-2.5 px-4 text-[13px] shadow transition-all active:scale-98 disabled:opacity-50 cursor-pointer"
+                          >
+                            {isUploading ? <Loader2 className="size-4 animate-spin" /> : <Cloud className="size-4" />}
+                            {isUploading ? 'Publishing to KV...' : 'Publish to Cloudflare KV'}
+                          </button>
+                        </div>
+                      )}
+
+                      {uploadStatus && (
+                        <div className={`p-3 rounded-xl text-[13px] flex items-center gap-2 ${uploadStatus.type === 'success' ? 'bg-lime-500/10 text-lime-600 dark:text-lime-400 border border-lime-500/20' : 'bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20'}`}>
+                          {uploadStatus.type === 'success' ? <Check className="size-4 shrink-0" /> : <AlertTriangle className="size-4 shrink-0" />}
+                          <p className="leading-snug">{uploadStatus.message}</p>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  <div className={`mt-2 ${GLASS_CARD}`}>
-                    <div className="flex items-center gap-2 px-4 pt-3.5"><Search className="size-4 text-zinc-400"/><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search employee" className="w-full bg-transparent py-2 text-[15px] outline-none"/></div>
-                    <div className="max-h-64 divide-y divide-zinc-950/[0.06] overflow-y-auto dark:divide-white/[0.06]">{filteredEmployees.map((name) => <button key={name} onClick={() => handleSelectEmployee(name)} className="flex w-full items-center justify-between px-4 py-3 text-left"><span className="text-[15px]">{name}</span>{name === selectedEmployee && <Check className="size-4 text-blue-500"/>}</button>)}</div>
+
+                  <div>
+                    <div className="flex items-center justify-between px-1">
+                      <h3 className="text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Active Roster</h3>
+                      <span className="text-[11px] font-mono text-zinc-400 dark:text-zinc-500 truncate max-w-[180px]">{displayFileName(roster?.fileName)}</span>
+                    </div>
+                    <div className={`mt-2 ${GLASS_CARD}`}>
+                      <div className="flex items-center gap-2 px-4 pt-3.5"><Search className="size-4 text-zinc-400"/><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search employee" className="w-full bg-transparent py-2 text-[15px] outline-none"/></div>
+                      <div className="max-h-64 divide-y divide-zinc-950/[0.06] overflow-y-auto dark:divide-white/[0.06]">{filteredEmployees.map((name) => <button key={name} onClick={() => handleSelectEmployee(name)} className="flex w-full items-center justify-between px-4 py-3 text-left"><span className="text-[15px]">{name}</span>{name === selectedEmployee && <Check className="size-4 text-blue-500"/>}</button>)}</div>
+                    </div>
                   </div>
                 </section>
                 </div>
@@ -1082,6 +1486,7 @@ export default function App() {
           <DayDetailsModal
             event={selectedEvent}
             dailyRoster={selectedEvent ? rosterIndex[selectedEvent.isoDate] : undefined}
+            roster={roster}
             selectedEmployee={selectedEmployee}
             canGoPrev={canGoPrevDay} canGoNext={canGoNextDay}
             onPrev={goToPrevDay} onNext={goToNextDay}

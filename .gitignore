@@ -22,3 +22,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local tools and binaries
+node_bin/
+
+# Local data / spreadsheet files
+*.xlsx
+*.xls
+*.csv

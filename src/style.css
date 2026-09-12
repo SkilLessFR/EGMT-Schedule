@@ -4,3 +4,35 @@ body { margin: 0; }
 .animate-in { animation: sheet .22s ease-out; }
 @keyframes sheet { from { transform: translateY(100%); } to { transform: translateY(0); } }
 @media print { button, input, select, label { print-color-adjust: exact; } }
+
+@keyframes liquid-drift-1 {
+  0% { transform: translate(0px, 0px) scale(1) rotate(0deg); }
+  33% { transform: translate(40px, -60px) scale(1.4) rotate(120deg); }
+  66% { transform: translate(-30px, 50px) scale(0.8) rotate(240deg); }
+  100% { transform: translate(0px, 0px) scale(1) rotate(360deg); }
+}
+@keyframes liquid-drift-2 {
+  0% { transform: translate(0px, 0px) scale(1.2) rotate(180deg); }
+  50% { transform: translate(-50px, 40px) scale(0.7) rotate(0deg); }
+  100% { transform: translate(0px, 0px) scale(1.2) rotate(180deg); }
+}
+.liquid-blob-1 {
+  animation: liquid-drift-1 16s ease-in-out infinite;
+  filter: blur(40px);
+  will-change: transform;
+}
+.liquid-blob-2 {
+  animation: liquid-drift-2 12s ease-in-out infinite alternate;
+  filter: blur(50px);
+  will-change: transform;
+}
+.cyber-panel-border {
+  box-shadow: 
+    inset 0 1px 1px rgba(255, 255, 255, 0.3),
+    0 1px 2px rgba(0, 0, 0, 0.4),
+    0 20px 40px -15px rgba(0, 0, 0, 0.7);
+}
+.text-glow {
+  text-shadow: 0 0 12px rgba(255, 255, 255, 0.4);
+}
+

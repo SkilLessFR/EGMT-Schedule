@@ -3,7 +3,15 @@ import type { RosterData, ShiftEvent } from './types';
 
 const monthNames = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const dateHeaderPattern = /^\s*(\d{1,2})\s*[-\s/]\s*([A-Za-z]{3,})\b/;
-const knownShiftCodes = new Set(['MID', 'OFF', 'M', 'A', 'N', 'H8']);
+const knownShiftCodes = new Set(['MID', 'OFF', 'ABS', 'AD', 'M', 'A', 'N', 'H8']);
+const GLOBAL_MID_EMPLOYEES = new Set(['TIR GEORGE CRISTIAN']);
+
+function normalizeEmployeeName(value: string) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().toUpperCase();
+}
+function shouldForceMidShift(employee: string) {
+  return GLOBAL_MID_EMPLOYEES.has(normalizeEmployeeName(employee));
+}
 
 function toIso(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -112,6 +120,12 @@ export async function parseRoster(file: File): Promise<RosterData> {
       if (value) shifts[isoDate] = value;
     });
 
+    if (shouldForceMidShift(employee)) {
+      dateColumns.forEach(({ isoDate }) => {
+        shifts[isoDate] = 'MID';
+      });
+    }
+
     if (Object.keys(shifts).length) {
       employees.push(employee);
       parsedRows[employee] = shifts;
@@ -135,3 +149,42 @@ export function eventsForEmployee(roster: RosterData, employee: string): ShiftEv
     .filter(({ isoDate }) => shifts[isoDate])
     .map(({ date, isoDate }) => ({ id: `${employee}-${isoDate}`, date, isoDate, shift: shifts[isoDate] }));
 }
+
+export function mergeRosters(existing: RosterData, incoming: RosterData): RosterData {
+  const employeeSet = new Set<string>([...existing.employees, ...incoming.employees]);
+  const employees = Array.from(employeeSet);
+
+  const dateMap = new Map<string, RosterData['dateColumns'][number]>();
+  for (const col of existing.dateColumns) {
+    dateMap.set(col.isoDate, col);
+  }
+  for (const col of incoming.dateColumns) {
+    dateMap.set(col.isoDate, col);
+  }
+
+  const dateColumns = Array.from(dateMap.values())
+    .sort((a, b) => a.isoDate.localeCompare(b.isoDate))
+    .map((col, index) => ({ ...col, index }));
+
+  const rows: Record<string, Record<string, string>> = {};
+  for (const emp of employees) {
+    rows[emp] = {
+      ...(existing.rows[emp] ?? {}),
+      ...(incoming.rows[emp] ?? {}),
+    };
+  }
+
+  const fileName = existing.fileName && !existing.fileName.includes(incoming.fileName)
+    ? `${existing.fileName}, ${incoming.fileName}`
+    : incoming.fileName;
+
+  return {
+    fileName,
+    month: incoming.month,
+    year: incoming.year,
+    employees,
+    dateColumns,
+    rows,
+  };
+}
+
