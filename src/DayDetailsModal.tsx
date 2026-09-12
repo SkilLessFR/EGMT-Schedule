@@ -584,6 +584,9 @@ export default function DayDetailsModal({ event, dailyRoster, roster, selectedEm
         }
       } else if (final.axis === 'y' && final.y > DISMISS_COMMIT_THRESHOLD) {
         suppressNextClickRef.current = true;
+        window.setTimeout(() => {
+          suppressNextClickRef.current = false;
+        }, 100);
         setDragBoth({ x: 0, y: 0, axis: null });
         onClose();
       } else {
@@ -604,7 +607,14 @@ export default function DayDetailsModal({ event, dailyRoster, roster, selectedEm
   }, [isDragging, canGoPrev, canGoNext, onClose, commitSwipe, setDragBoth]);
 
   useEffect(() => {
-    if (!open) { setDragBoth({ x: 0, y: 0, axis: null }); setIsDragging(false); }
+    if (!open) {
+      setDragBoth({ x: 0, y: 0, axis: null });
+      setIsDragging(false);
+      const timer = window.setTimeout(() => {
+        suppressNextClickRef.current = false;
+      }, 50);
+      return () => window.clearTimeout(timer);
+    }
   }, [open, setDragBoth]);
 
   useEffect(() => {
