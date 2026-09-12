@@ -24,11 +24,8 @@ import {
 
 const AXIS_LOCK_THRESHOLD = 8;
 const SWIPE_COMMIT_THRESHOLD = 70;
-const DISMISS_COMMIT_THRESHOLD = 90;
 const SWIPE_EXIT_DURATION = 200;
 const WHEEL_DELTA_THRESHOLD = 24;
-
-type DragState = { x: number; y: number; axis: 'x' | 'y' | null };
 
 // ---------------------------------------------------------------------------
 // Presentational subcomponents
@@ -477,14 +474,18 @@ export default function DayDetailsModal({ event, dailyRoster, roster, selectedEm
     return () => mq.removeEventListener('change', handleChange);
   }, []);
 
-  const [drag, setDrag] = useState<DragState>({ x: 0, y: 0, axis: null });
-  const [isDragging, setIsDragging] = useState(false);
-  const [noTransition, setNoTransition] = useState(false);
-  const dragStart = useRef<{ x: number; y: number; scrollTop: number } | null>(null);
-  const dragRef = useRef<DragState>({ x: 0, y: 0, axis: null });
-  const animatingRef = useRef(false);
-  const contentRef = useRef<HTMLDivElement>(null);
+  const [isDraggingState, setIsDraggingState] = useState(false);
+  const backdropRef = useRef<HTMLDivElement>(null);
   const sheetRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  const dragStartRef = useRef<{ x: number; y: number; scrollTop: number } | null>(null);
+  const lastPosRef = useRef<{ x: number; y: number; time: number }>({ x: 0, y: 0, time: 0 });
+  const velocityYRef = useRef(0);
+  const activeAxisRef = useRef<'x' | 'y' | null>(null);
+  const hasMovedRef = useRef(false);
+  const isDraggingRef = useRef(false);
+  const animatingRef = useRef(false);
   const dragPointerId = useRef<number | null>(null);
   const capturedPointerId = useRef<number | null>(null);
   const suppressNextClickRef = useRef(false);
@@ -500,100 +501,169 @@ export default function DayDetailsModal({ event, dailyRoster, roster, selectedEm
     return () => window.removeEventListener('click', swallowGhostClick, true);
   }, []);
 
-  const setDragBoth = useCallback((next: DragState) => {
-    dragRef.current = next;
-    setDrag(next);
-  }, []);
-
   const commitSwipe = useCallback((direction: 'next' | 'prev') => {
-    if (animatingRef.current) return;
+    if (animatingRef.current || !contentRef.current) return;
     animatingRef.current = true;
-    setDragBoth({ x: direction === 'next' ? -window.innerWidth : window.innerWidth, y: 0, axis: 'x' });
+    contentRef.current.style.transition = 'transform 200ms cubic-bezier(0.32, 0.72, 0, 1)';
+    contentRef.current.style.transform = `translateX(${direction === 'next' ? -window.innerWidth : window.innerWidth}px)`;
     window.setTimeout(() => {
       if (direction === 'next') onNext(); else onPrev();
-      setNoTransition(true);
-      setDragBoth({ x: 0, y: 0, axis: null });
-      requestAnimationFrame(() => requestAnimationFrame(() => setNoTransition(false)));
+      if (contentRef.current) {
+        contentRef.current.style.transition = 'none';
+        contentRef.current.style.transform = 'translateX(0px)';
+      }
       animatingRef.current = false;
     }, SWIPE_EXIT_DURATION);
-  }, [onNext, onPrev, setDragBoth]);
+  }, [onNext, onPrev]);
 
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
     if (animatingRef.current || isDesktop) return;
-    dragStart.current = { x: e.clientX, y: e.clientY, scrollTop: contentRef.current?.scrollTop ?? 0 };
+    dragStartRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      scrollTop: contentRef.current?.scrollTop ?? 0,
+    };
+    lastPosRef.current = { x: e.clientX, y: e.clientY, time: performance.now() };
+    velocityYRef.current = 0;
+    activeAxisRef.current = null;
+    hasMovedRef.current = false;
+    isDraggingRef.current = true;
     dragPointerId.current = e.pointerId;
-    setIsDragging(true);
   }, [isDesktop]);
 
   useEffect(() => {
-    if (!isDragging) return;
-
     const handleMove = (e: PointerEvent) => {
-      const start = dragStart.current;
-      if (!start) return;
+      if (!isDraggingRef.current || !dragStartRef.current) return;
+      const start = dragStartRef.current;
       const dx = e.clientX - start.x;
       const dy = e.clientY - start.y;
-      const current = dragRef.current;
 
-      let axis = current.axis;
-      if (!axis) {
+      const now = performance.now();
+      const dt = now - lastPosRef.current.time;
+      if (dt > 0) {
+        velocityYRef.current = (e.clientY - lastPosRef.current.y) / dt;
+      }
+      lastPosRef.current = { x: e.clientX, y: e.clientY, time: now };
+
+      if (!activeAxisRef.current) {
         if (Math.abs(dx) < AXIS_LOCK_THRESHOLD && Math.abs(dy) < AXIS_LOCK_THRESHOLD) return;
-        axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+        activeAxisRef.current = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+        hasMovedRef.current = true;
+        setIsDraggingState(true);
         if (dragPointerId.current != null && sheetRef.current) {
           try {
             sheetRef.current.setPointerCapture(dragPointerId.current);
             capturedPointerId.current = dragPointerId.current;
-          } catch {
-            // Safe fallback
-          }
+          } catch {}
         }
       }
 
-      if (axis === 'x') {
-        const blocked = (dx > 0 && !canGoPrev) || (dx < 0 && !canGoNext);
-        e.preventDefault();
-        setDragBoth({ x: blocked ? dx / 3 : dx, y: 0, axis });
+      if (activeAxisRef.current === 'x') {
+        if (contentRef.current) {
+          const blocked = (dx > 0 && !canGoPrev) || (dx < 0 && !canGoNext);
+          const appliedX = blocked ? dx * 0.35 : dx;
+          contentRef.current.style.transition = 'none';
+          contentRef.current.style.transform = `translateX(${appliedX}px)`;
+        }
         return;
       }
 
-      const startedAtTop = start.scrollTop <= 0;
-      if (dy > 0 && startedAtTop) {
-        e.preventDefault();
-        setDragBoth({ x: 0, y: dy, axis });
-      } else if (!current.axis) {
-        setDragBoth({ x: 0, y: 0, axis: null });
+      if (activeAxisRef.current === 'y') {
+        const startedAtTop = start.scrollTop <= 0;
+        if (!startedAtTop) return;
+
+        if (dy > 0) {
+          hasMovedRef.current = true;
+          e.preventDefault();
+          const appliedY = dy;
+          if (sheetRef.current) {
+            sheetRef.current.style.transition = 'none';
+            sheetRef.current.style.transform = `translateY(${appliedY}px)`;
+          }
+          if (backdropRef.current) {
+            const progress = Math.max(0, Math.min(1, 1 - appliedY / (window.innerHeight * 0.65)));
+            backdropRef.current.style.transition = 'none';
+            backdropRef.current.style.opacity = progress.toString();
+          }
+        } else {
+          const appliedY = -Math.pow(Math.abs(dy), 0.65);
+          if (sheetRef.current) {
+            sheetRef.current.style.transition = 'none';
+            sheetRef.current.style.transform = `translateY(${appliedY}px)`;
+          }
+        }
       }
     };
 
     const handleUp = () => {
-      setIsDragging(false);
+      if (!isDraggingRef.current) return;
+      isDraggingRef.current = false;
+      setIsDraggingState(false);
+
       if (capturedPointerId.current != null && sheetRef.current?.hasPointerCapture(capturedPointerId.current)) {
-        sheetRef.current.releasePointerCapture(capturedPointerId.current);
+        try {
+          sheetRef.current.releasePointerCapture(capturedPointerId.current);
+        } catch {}
       }
       capturedPointerId.current = null;
       dragPointerId.current = null;
-      const final = dragRef.current;
 
-      if (final.axis === 'x') {
-        if (final.x <= -SWIPE_COMMIT_THRESHOLD && canGoNext) {
-          commitSwipe('next');
-        } else if (final.x >= SWIPE_COMMIT_THRESHOLD && canGoPrev) {
-          commitSwipe('prev');
-        } else {
-          setDragBoth({ x: 0, y: 0, axis: null });
-        }
-      } else if (final.axis === 'y' && final.y > DISMISS_COMMIT_THRESHOLD) {
+      const start = dragStartRef.current;
+      const axis = activeAxisRef.current;
+      const hasMoved = hasMovedRef.current;
+      const velocityY = velocityYRef.current;
+
+      dragStartRef.current = null;
+      activeAxisRef.current = null;
+
+      // Suppress accidental button click if finger moved more than threshold
+      if (hasMoved) {
         suppressNextClickRef.current = true;
         window.setTimeout(() => {
           suppressNextClickRef.current = false;
-        }, 100);
-        setDragBoth({ x: 0, y: 0, axis: null });
-        onClose();
-      } else {
-        setDragBoth({ x: 0, y: 0, axis: null });
+        }, 80);
       }
 
-      dragStart.current = null;
+      if (axis === 'x' && contentRef.current && start) {
+        const currentDx = lastPosRef.current.x - start.x;
+        if (currentDx <= -SWIPE_COMMIT_THRESHOLD && canGoNext) {
+          commitSwipe('next');
+        } else if (currentDx >= SWIPE_COMMIT_THRESHOLD && canGoPrev) {
+          commitSwipe('prev');
+        } else {
+          contentRef.current.style.transition = 'transform 260ms cubic-bezier(0.32, 0.72, 0, 1)';
+          contentRef.current.style.transform = 'translateX(0px)';
+        }
+      }
+
+      if (axis === 'y' && sheetRef.current && start) {
+        const currentDy = lastPosRef.current.y - start.y;
+        const isFlickDown = velocityY > 0.45 && currentDy > 25;
+        const isDragDownPassed = currentDy > 75;
+
+        if (isFlickDown || isDragDownPassed) {
+          // DISMISS WITH FLUID SPRING
+          animatingRef.current = true;
+          sheetRef.current.style.transition = 'transform 260ms cubic-bezier(0.32, 0.72, 0, 1)';
+          sheetRef.current.style.transform = 'translateY(100%)';
+          if (backdropRef.current) {
+            backdropRef.current.style.transition = 'opacity 220ms ease';
+            backdropRef.current.style.opacity = '0';
+          }
+          window.setTimeout(() => {
+            onClose();
+            animatingRef.current = false;
+          }, 220);
+        } else {
+          // BOUNCE BACK ELASTICALLY
+          sheetRef.current.style.transition = 'transform 320ms cubic-bezier(0.32, 0.72, 0, 1)';
+          sheetRef.current.style.transform = 'translateY(0px)';
+          if (backdropRef.current) {
+            backdropRef.current.style.transition = 'opacity 250ms ease';
+            backdropRef.current.style.opacity = '1';
+          }
+        }
+      }
     };
 
     window.addEventListener('pointermove', handleMove, { passive: false });
@@ -604,18 +674,33 @@ export default function DayDetailsModal({ event, dailyRoster, roster, selectedEm
       window.removeEventListener('pointerup', handleUp);
       window.removeEventListener('pointercancel', handleUp);
     };
-  }, [isDragging, canGoPrev, canGoNext, onClose, commitSwipe, setDragBoth]);
+  }, [canGoPrev, canGoNext, commitSwipe, onClose]);
 
   useEffect(() => {
-    if (!open) {
-      setDragBoth({ x: 0, y: 0, axis: null });
-      setIsDragging(false);
+    if (open) {
+      if (sheetRef.current && !isDesktop) {
+        sheetRef.current.style.transition = 'transform 350ms cubic-bezier(0.32, 0.72, 0, 1)';
+        sheetRef.current.style.transform = 'translateY(0px)';
+      }
+      if (backdropRef.current) {
+        backdropRef.current.style.transition = 'opacity 300ms ease';
+        backdropRef.current.style.opacity = '1';
+      }
+    } else {
+      if (sheetRef.current && !isDesktop) {
+        sheetRef.current.style.transition = 'transform 300ms cubic-bezier(0.32, 0.72, 0, 1)';
+        sheetRef.current.style.transform = 'translateY(100%)';
+      }
+      if (backdropRef.current) {
+        backdropRef.current.style.transition = 'opacity 250ms ease';
+        backdropRef.current.style.opacity = '0';
+      }
       const timer = window.setTimeout(() => {
         suppressNextClickRef.current = false;
       }, 50);
       return () => window.clearTimeout(timer);
     }
-  }, [open, setDragBoth]);
+  }, [open, isDesktop]);
 
   useEffect(() => {
     if (!open) return;
@@ -637,12 +722,12 @@ export default function DayDetailsModal({ event, dailyRoster, roster, selectedEm
 
   const toggleAllShiftsExpanded = useCallback(() => setAllShiftsExpanded((v) => !v), []);
   const toggleSwapExpanded = useCallback(() => setSwapExpanded((v) => !v), []);
-  const noTransitionOrDragging = isDragging || noTransition;
 
   return (
     <>
       {/* Absolute Dark Deep Backdrop Overlay */}
       <div
+        ref={backdropRef}
         onClick={onClose}
         className={`fixed inset-0 z-40 bg-zinc-950/70 backdrop-blur-md transition-opacity duration-300 ${
           open ? 'opacity-100' : 'pointer-events-none opacity-0'
@@ -659,15 +744,15 @@ export default function DayDetailsModal({ event, dailyRoster, roster, selectedEm
         style={{
           transform: isDesktop
             ? `translate(-50%, -50%) scale(${open ? 1 : 0.95})`
-            : (open ? `translateY(${drag.axis === 'y' ? drag.y : 0}px)` : 'translateY(100%)'),
+            : (open ? 'translateY(0px)' : 'translateY(100%)'),
           opacity: isDesktop ? (open ? 1 : 0) : undefined,
-          transition: noTransitionOrDragging
-            ? 'none'
-            : (isDesktop ? 'transform 300ms cubic-bezier(0.16, 1, 0.3, 1), opacity 250ms ease' : 'transform 400ms cubic-bezier(0.16, 1, 0.3, 1)'),
+          transition: isDesktop
+            ? 'transform 300ms cubic-bezier(0.16, 1, 0.3, 1), opacity 250ms ease'
+            : 'transform 350ms cubic-bezier(0.32, 0.72, 0, 1)',
         }}
         className={`fixed inset-x-0 bottom-0 z-50 mx-auto flex max-h-[92vh] w-full max-w-[430px] flex-col overflow-hidden rounded-t-[36px] border-t border-x border-white/20 bg-zinc-950/80 text-white shadow-[0_-20px_60px_rgba(0,0,0,0.8)] backdrop-blur-3xl lg:inset-x-auto lg:bottom-auto lg:left-1/2 lg:top-1/2 lg:max-h-[85vh] lg:max-w-2xl lg:rounded-[28px] lg:border lg:shadow-[0_20px_80px_rgba(0,0,0,0.7)] ${
           open ? '' : 'pointer-events-none'
-        } ${isDragging ? 'select-none' : ''}`}
+        } ${isDraggingState ? 'select-none' : ''}`}
       >
         
         {/* PHYSICAL LIQUID ENGINE: Moving organic elements trapped beneath the sheet */}
@@ -715,9 +800,9 @@ export default function DayDetailsModal({ event, dailyRoster, roster, selectedEm
               ref={contentRef}
               onWheel={handleWheel}
               style={{
-                transform: `translateX(${drag.axis === 'x' ? drag.x : 0}px)`,
-                transition: noTransitionOrDragging ? 'none' : 'transform 260ms cubic-bezier(0.16, 1, 0.3, 1)',
-                touchAction: drag.axis ? 'none' : 'pan-y',
+                overscrollBehaviorY: 'contain',
+                WebkitOverflowScrolling: 'touch',
+                touchAction: 'pan-y',
                 paddingBottom: 'max(2rem, env(safe-area-inset-bottom))',
               }}
               className="overflow-y-auto px-5 pt-3"
