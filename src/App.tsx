@@ -81,12 +81,6 @@ const APP_LIGHT_BG = '#f4f4f5';
 const MONTH_AXIS_LOCK_THRESHOLD = 8;
 const MONTH_SWIPE_COMMIT_THRESHOLD = 70;
 const MONTH_SWIPE_DURATION = 260;
-const NAV_INDICATOR_OFFSETS = [
-  'translate-x-0', 
-  'translate-x-[calc(100%+0.375rem)]', 
-  'translate-x-[calc(200%+0.75rem)]',
-  'translate-x-[calc(300%+1.125rem)]'
-];
 
 const IOS_SWITCH_ON = '#34c759';
 const IOS_SWITCH_OFF = '#e5e5ea';
@@ -1515,10 +1509,41 @@ export default function App() {
             </div>
           )}
 
-          <nav aria-hidden={sheetOpen} className={`fixed inset-x-0 bottom-0 z-10 flex justify-center px-5 pb-3 transition-[filter] duration-200 lg:hidden ${sheetOpen ? 'blur-[1px] pointer-events-none' : ''}`}>
-            <div className={`relative flex w-full max-w-[380px] p-1.5 ${GLASS_NAV}`}>
-              <div style={{ width: 'calc((100% - 2rem) / 4)' }} className={`absolute inset-y-1.5 left-1.5 rounded-[22px] bg-white/85 shadow-md transition-transform duration-[220ms] dark:bg-white/[0.16] ${NAV_INDICATOR_OFFSETS[activeTabIndex] || NAV_INDICATOR_OFFSETS[0]}`} />
-              {tabs.map(({ id, label, Icon }) => <button key={id} onClick={() => handleTabChange(id)} className={`relative z-10 flex flex-1 flex-col items-center gap-0.5 py-2 ${activeTab === id ? 'text-blue-500' : 'text-zinc-400'}`}><Icon className="size-5"/><span className="text-[10px] font-semibold">{label}</span></button>)}
+          <nav
+            aria-hidden={sheetOpen}
+            style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}
+            className={`fixed inset-x-0 bottom-0 z-10 flex justify-center px-3 sm:px-5 transition-[filter] duration-200 lg:hidden ${
+              sheetOpen ? 'blur-[1px] pointer-events-none' : ''
+            }`}
+          >
+            <div className={`relative flex w-full max-w-[400px] p-1.5 ${GLASS_NAV}`}>
+              {/* Dynamic Liquid Glass Active Indicator */}
+              <div
+                style={{
+                  width: `calc((100% - 0.75rem) / ${tabs.length})`,
+                  transform: `translateX(${activeTabIndex * 100}%)`,
+                }}
+                className="absolute inset-y-1.5 left-1.5 rounded-[22px] bg-white/90 shadow-sm transition-transform duration-[220ms] ease-out dark:bg-white/[0.16] pointer-events-none"
+              />
+              {tabs.map(({ id, label, Icon }) => {
+                const isActive = activeTab === id;
+                return (
+                  <button
+                    key={id}
+                    onClick={() => handleTabChange(id)}
+                    className={`relative z-10 flex flex-1 flex-col items-center justify-center py-1.5 gap-0.5 transition-colors duration-150 select-none ${
+                      isActive
+                        ? 'text-blue-600 dark:text-blue-400 font-semibold'
+                        : 'text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300'
+                    }`}
+                  >
+                    <Icon className={`size-[18px] transition-transform duration-150 ${isActive ? 'scale-105' : ''}`} />
+                    <span className="text-[10px] tracking-tight truncate max-w-full leading-tight">
+                      {label}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           </nav>
           </div>
