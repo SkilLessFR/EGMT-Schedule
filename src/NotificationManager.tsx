@@ -7,6 +7,7 @@ import {
   requestNotificationPermission,
   showAppNotification,
   getPushSubscription,
+  triggerRemoteTestPush,
   type IosPwaStatus,
   NOTIFICATION_PREF_KEY,
   SHIFT_ALERTS_PREF_KEY,
@@ -64,6 +65,8 @@ export function useNotifications(authenticatedEmployee?: string | null) {
     return result;
   }, [authenticatedEmployee]);
 
+  const [backgroundPushScheduled, setBackgroundPushScheduled] = useState<boolean>(false);
+
   const handleSendTestNotification = useCallback(async () => {
     const title = authenticatedEmployee ? `Alert for ${authenticatedEmployee} 🔔` : 'EGMT Schedule Notification 🔔';
     const body = authenticatedEmployee
@@ -82,7 +85,12 @@ export function useNotifications(authenticatedEmployee?: string | null) {
         try {
           const sub = await getPushSubscription();
           if (sub) {
-            syncPushSubscriptionToKv(authenticatedEmployee, sub.toJSON()).catch(() => {});
+            await syncPushSubscriptionToKv(authenticatedEmployee, sub.toJSON());
+            const bgRes = await triggerRemoteTestPush(authenticatedEmployee, 4);
+            if (bgRes.success) {
+              setBackgroundPushScheduled(true);
+              setTimeout(() => setBackgroundPushScheduled(false), 7000);
+            }
           }
         } catch {
           // Non-blocking
@@ -114,6 +122,7 @@ export function useNotifications(authenticatedEmployee?: string | null) {
     taskAlertsEnabled,
     shiftAlertsEnabled,
     testSent,
+    backgroundPushScheduled,
     handleEnableNotifications,
     handleSendTestNotification,
     toggleTaskAlerts,
@@ -128,6 +137,7 @@ export function NotificationSettingsCard({ authenticatedEmployee }: { authentica
     taskAlertsEnabled,
     shiftAlertsEnabled,
     testSent,
+    backgroundPushScheduled,
     handleEnableNotifications,
     handleSendTestNotification,
     toggleTaskAlerts,
@@ -217,6 +227,20 @@ export function NotificationSettingsCard({ authenticatedEmployee }: { authentica
             {testSent ? <CheckCircle2 className="size-4" /> : <Send className="size-4" />}
             {testSent ? 'Test Notification Dispatched!' : 'Send Test Notification'}
           </button>
+
+          {backgroundPushScheduled && (
+            <div className="rounded-2xl border border-cyan-500/30 bg-cyan-500/10 p-3 text-left text-cyan-600 dark:text-cyan-400 animate-fadeIn">
+              <div className="flex items-start gap-2.5">
+                <Smartphone className="mt-0.5 size-4 shrink-0 text-cyan-500" />
+                <div className="space-y-1 text-[12px]">
+                  <p className="font-bold">Background Push Scheduled (4s)</p>
+                  <p className="text-[11px] opacity-90 leading-relaxed">
+                    Close the PWA or lock your iPhone right now! Cloudflare is sending the Web Push notification directly to your device.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Configuration Toggles */}
           <div className="space-y-2 border-t border-zinc-950/5 pt-3 dark:border-white/5">

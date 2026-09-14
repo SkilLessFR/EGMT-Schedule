@@ -1,3 +1,5 @@
+import { dispatchWebPush } from './_webPush';
+
 interface KVNamespaceLike {
   get(key: string, type: 'text'): Promise<string | null>;
   put(key: string, value: string): Promise<void>;
@@ -130,18 +132,38 @@ export async function onRequestPost(context: PagesContext) {
     const trimmedInbox = filteredInbox.slice(0, 30);
     await kv.put(`inbox:${toEmployee}`, JSON.stringify(trimmedInbox));
 
-    // 2. Check if the recipient has a Web Push subscription saved in KV
+    // 2. Dispatch real Web Push notification if recipient has an active subscription in KV
     const rawSub = await kv.get(`sub:${toEmployee}`, 'text');
-    const hasPushSubscription = Boolean(rawSub);
+    let pushDispatched = false;
+    let pushError: string | undefined;
+
+    if (rawSub) {
+      const pushRes = await dispatchWebPush(rawSub, {
+        title: `🔄 Shift Swap Request from ${fromEmployee}`,
+        body: `${fromEmployee} requested to swap shifts with you for ${date} (${payload.requesterShift || 'OFF'} ↔ ${payload.candidateShift || 'OFF'}).`,
+        icon: '/logo.png',
+        badge: '/logo.png',
+        tag: `swap-req-${newRequest.id}`,
+        data: { url: '/', id: newRequest.id },
+      });
+      pushDispatched = pushRes.success;
+      if (!pushRes.success) {
+        pushError = pushRes.error;
+      }
+    }
 
     return new Response(JSON.stringify({
       success: true,
       requestId: newRequest.id,
       toEmployee,
-      hasPushSubscription,
-      message: hasPushSubscription
-        ? `Notification dispatched to ${toEmployee}'s device!`
-        : `Swap request queued in ${toEmployee}'s inbox.`,
+      hasPushSubscription: Boolean(rawSub),
+      pushDispatched,
+      pushError,
+      message: pushDispatched
+        ? `Notification delivered directly to ${toEmployee}'s phone!`
+        : Boolean(rawSub)
+          ? `Swap request queued (push delivery attempted).`
+          : `Swap request queued in ${toEmployee}'s inbox.`,
     }), {
       status: 200,
       headers: jsonHeaders,

@@ -3,6 +3,8 @@
  * Comprehensive iOS & modern Web Push notification manager for EGMT Schedule PWA.
  */
 
+import { VAPID_PUBLIC_KEY, urlBase64ToUint8Array } from './vapidConfig';
+
 export interface IosPwaStatus {
   isIos: boolean;
   isStandalone: boolean;
@@ -168,7 +170,8 @@ export async function showAppNotification(title: string, options?: NotificationO
 }
 
 /**
- * Inspect or generate a Push Subscription (for server-sent Web Push if desired).
+ * Inspect or generate a Push Subscription using VAPID keys.
+ * This is the critical step that enables notifications to arrive when the PWA is closed.
  */
 export async function getPushSubscription(applicationServerKey?: string): Promise<PushSubscription | null> {
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return null;
@@ -178,15 +181,51 @@ export async function getPushSubscription(applicationServerKey?: string): Promis
     if (!reg.pushManager) return null;
 
     let sub = await reg.pushManager.getSubscription();
-    if (!sub && applicationServerKey) {
+    if (!sub) {
+      const keyString = applicationServerKey || VAPID_PUBLIC_KEY;
+      const keyBytes = urlBase64ToUint8Array(keyString);
       sub = await reg.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey,
+        applicationServerKey: keyBytes,
       });
     }
     return sub;
   } catch (err) {
     console.warn('Push subscription retrieval failed:', err);
     return null;
+  }
+}
+
+/**
+ * Request the Cloudflare backend to send a real Web Push notification after a brief delay.
+ * Allows the user to test that notifications arrive even after they close the PWA and lock their phone.
+ */
+export async function triggerRemoteTestPush(
+  employee: string,
+  delaySeconds = 4
+): Promise<{ success: boolean; message: string }> {
+  try {
+    const res = await fetch('/api/test-push', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ employee, delaySeconds }),
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      return {
+        success: true,
+        message: data.message || `Push notification scheduled in ${delaySeconds}s!`,
+      };
+    }
+    return {
+      success: false,
+      message: data.error || 'Failed to schedule test push.',
+    };
+  } catch (err) {
+    return {
+      success: false,
+      message: String(err),
+    };
   }
 }
