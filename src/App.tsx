@@ -1111,7 +1111,7 @@ export default function App() {
             )}
 
             {activeTab === 'solver' && (
-              <div className="flex min-h-0 w-full max-w-full flex-1 flex-col overflow-y-auto overflow-x-hidden px-4 pb-24 pt-6 sm:px-5 lg:px-0 lg:pb-8">
+              <div className="flex min-h-0 w-full max-w-full flex-1 flex-col overflow-y-auto px-4 pb-44 pt-6 sm:px-5 lg:px-0 lg:pb-8">
                 <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
                     <h1 className="text-[22px] font-bold tracking-tight sm:text-[30px]">Shift transformation</h1>
@@ -1197,30 +1197,71 @@ export default function App() {
                       )}
                     </div>
 
-                    <div className="rounded-2xl border border-white/10 bg-zinc-900/40 p-2.5 sm:p-3 min-w-0 overflow-hidden">
-                      <div className="mb-2 font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-400">Rendered preview</div>
-                      <div className="grid grid-cols-7 gap-0.5 sm:gap-1 text-center text-[10px] text-zinc-400 min-w-0 w-full">
-                        {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((day, i) => (
-                          <div key={`${day}-${i}`} className="py-1 text-[10px] font-semibold">{day}</div>
-                        ))}
-                        {monthDays(currentMonth, currentYear).map((day) => {
-                          const dayIso = iso(day);
-                          const finalShift = shiftKey(solverResult.finalRoster[selectedEmployee]?.[dayIso] ?? 'OFF');
-                          const sourceSwap = solverResult.swaps.find((swap) => {
-                            const dateParts = swap.isoDate.split(' ↔ ');
-                            const requesterDates = dateParts.length === 2 ? [dateParts[0]] : swap.isoDate.split(', ');
-                            return requesterDates.includes(dayIso);
-                          });
-                          const previewTitle = sourceSwap ? `Taken from ${sourceSwap.otherEmployee}` : undefined;
-                          return (
-                            <div key={dayIso} title={previewTitle} aria-label={previewTitle} className={`min-w-0 rounded-lg border border-white/5 p-0.5 sm:p-1 ${day.getMonth() !== currentMonth ? 'opacity-30' : ''}`}>
-                              <div className="text-[9px] sm:text-[10px] text-zinc-500">{day.getDate()}</div>
-                              <div className={`mt-0.5 sm:mt-1 truncate rounded-full px-0.5 sm:px-1 py-0.5 text-[8px] sm:text-[9px] font-bold ${colorFor(finalShift).bg} ${colorFor(finalShift).text}`}>
-                                {finalShift === 'OFF' ? 'OFF' : finalShift}
-                              </div>
-                            </div>
-                          );
-                        })}
+                    <div className="rounded-2xl border border-white/10 bg-zinc-900/40 overflow-hidden min-w-0">
+                      <div className="flex items-center justify-between border-b border-white/5 px-3.5 py-2.5">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+                            Rendered preview
+                          </span>
+                          <span className="text-[11px] font-medium text-zinc-500">· {title}</span>
+                        </div>
+                        <span className="font-mono text-[10px] font-semibold text-zinc-400 truncate max-w-[120px] sm:max-w-none">
+                          {selectedEmployee}
+                        </span>
+                      </div>
+
+                      <div className="w-full overflow-x-auto">
+                        <div className="w-full min-w-[310px]">
+                          <div className="grid grid-cols-7 border-b border-white/5 bg-white/[0.02] text-center text-[10px] font-semibold text-zinc-400">
+                            {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((day, i) => (
+                              <div key={`${day}-${i}`} className="py-2">{day}</div>
+                            ))}
+                          </div>
+                          <div className="grid grid-cols-7 divide-x divide-y divide-white/5 text-center">
+                            {monthDays(currentMonth, currentYear).map((day) => {
+                              const dayIso = iso(day);
+                              const finalShift = shiftKey(solverResult.finalRoster[selectedEmployee]?.[dayIso] ?? 'OFF');
+                              const sourceSwap = solverResult.swaps.find((swap) => {
+                                const dateParts = swap.isoDate.split(' ↔ ');
+                                const requesterDates = dateParts.length === 2 ? [dateParts[0]] : swap.isoDate.split(', ');
+                                return requesterDates.includes(dayIso);
+                              });
+                              const previewTitle = sourceSwap ? `Taken from ${sourceSwap.otherEmployee}` : undefined;
+                              const isCurrentMonth = day.getMonth() === currentMonth;
+                              const isOff = finalShift === 'OFF';
+                              const colors = colorFor(finalShift);
+
+                              return (
+                                <div
+                                  key={dayIso}
+                                  title={previewTitle}
+                                  className={`flex flex-col items-center justify-center p-1 sm:p-2 min-h-[46px] sm:min-h-[52px] transition-colors ${
+                                    !isCurrentMonth
+                                      ? 'opacity-25 bg-black/20'
+                                      : sourceSwap
+                                      ? 'bg-blue-500/10'
+                                      : ''
+                                  }`}
+                                >
+                                  <span className={`text-[11px] font-medium ${isCurrentMonth ? 'text-zinc-300' : 'text-zinc-600'}`}>
+                                    {day.getDate()}
+                                  </span>
+                                  {isOff ? (
+                                    <span className="mt-1 size-1.5 rounded-full bg-zinc-600" />
+                                  ) : (
+                                    <span
+                                      className={`mt-1 inline-flex items-center justify-center rounded-full px-1.5 py-0.5 text-[9px] font-bold leading-none ${colors.bg} ${colors.text} ${
+                                        sourceSwap ? 'ring-1 ring-blue-400/50' : ''
+                                      }`}
+                                    >
+                                      {finalShift}
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
                       </div>
                     </div>
                   </>
