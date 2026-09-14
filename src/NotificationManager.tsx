@@ -6,16 +6,18 @@ import {
   getNotificationPermission,
   requestNotificationPermission,
   showAppNotification,
+  getPushSubscription,
   type IosPwaStatus,
   NOTIFICATION_PREF_KEY,
   SHIFT_ALERTS_PREF_KEY,
 } from './notificationService';
+import { syncPushSubscriptionToKv } from './authConfig';
 import { GLASS_CARD } from './scheduleUtils';
 
 const IOS_SWITCH_ON = '#34c759';
 const IOS_SWITCH_OFF = 'rgba(120, 120, 128, 0.16)';
 
-export function useNotifications() {
+export function useNotifications(authenticatedEmployee?: string | null) {
   const [permission, setPermission] = useState<NotificationPermission | 'unsupported'>('default');
   const [iosStatus, setIosStatus] = useState<IosPwaStatus>({
     isIos: false,
@@ -46,21 +48,49 @@ export function useNotifications() {
     if (result === 'granted') {
       setTaskAlertsEnabled(true);
       localStorage.setItem(NOTIFICATION_PREF_KEY, 'true');
+
+      // Sync Web Push subscription to Cloudflare KV for this employee
+      if (authenticatedEmployee) {
+        try {
+          const sub = await getPushSubscription();
+          if (sub) {
+            syncPushSubscriptionToKv(authenticatedEmployee, sub.toJSON()).catch(() => {});
+          }
+        } catch {
+          // Non-blocking
+        }
+      }
     }
     return result;
-  }, []);
+  }, [authenticatedEmployee]);
 
   const handleSendTestNotification = useCallback(async () => {
-    const sent = await showAppNotification('EGMT Schedule Notification 🔔', {
-      body: 'Push notifications are fully working on this device!',
+    const title = authenticatedEmployee ? `Alert for ${authenticatedEmployee} 🔔` : 'EGMT Schedule Notification 🔔';
+    const body = authenticatedEmployee
+      ? `Push notifications are active for ${authenticatedEmployee}! Shift alerts and alarms will be delivered to this device.`
+      : 'Push notifications are fully working on this device!';
+
+    const sent = await showAppNotification(title, {
+      body,
       tag: 'test-notification-' + Date.now(),
     });
     if (sent) {
       setTestSent(true);
       setTimeout(() => setTestSent(false), 3500);
+
+      if (authenticatedEmployee) {
+        try {
+          const sub = await getPushSubscription();
+          if (sub) {
+            syncPushSubscriptionToKv(authenticatedEmployee, sub.toJSON()).catch(() => {});
+          }
+        } catch {
+          // Non-blocking
+        }
+      }
     }
     return sent;
-  }, []);
+  }, [authenticatedEmployee]);
 
   const toggleTaskAlerts = useCallback(() => {
     setTaskAlertsEnabled((prev) => {
@@ -91,7 +121,7 @@ export function useNotifications() {
   };
 }
 
-export function NotificationSettingsCard() {
+export function NotificationSettingsCard({ authenticatedEmployee }: { authenticatedEmployee?: string | null }) {
   const {
     permission,
     iosStatus,
@@ -102,7 +132,7 @@ export function NotificationSettingsCard() {
     handleSendTestNotification,
     toggleTaskAlerts,
     toggleShiftAlerts,
-  } = useNotifications();
+  } = useNotifications(authenticatedEmployee);
 
   return (
     <div className={`p-4 ${GLASS_CARD} space-y-4`}>
@@ -113,7 +143,9 @@ export function NotificationSettingsCard() {
           </div>
           <div>
             <h3 className="text-[15px] font-bold">Push Notifications</h3>
-            <p className="text-[12px] text-zinc-400 dark:text-zinc-500">iOS PWA & Desktop Web Alerts</p>
+            <p className="text-[12px] text-zinc-400 dark:text-zinc-500">
+              {authenticatedEmployee ? `Linked to ${authenticatedEmployee}` : 'iOS PWA & Desktop Web Alerts'}
+            </p>
           </div>
         </div>
 

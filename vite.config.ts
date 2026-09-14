@@ -6,7 +6,24 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     watch: {
-      ignored: ['**/*.xlsx', '**/*.xls', '**/*.xlsm', '**/*.csv', '**/node_bin/**', '**/*.tmp'],
+      ignored: [
+        '**/*.xlsx',
+        '**/*.xls',
+        '**/*.xlsm',
+        '**/*.csv',
+        '**/*.png',
+        '**/*.jpg',
+        '**/*.jpeg',
+        '**/*.gif',
+        '**/*.webp',
+        '**/*.pdf',
+        '**/*.tmp',
+        '**/*.crdownload',
+        '**/*.part',
+        '**/node_bin/**',
+        '**/.git/**',
+        '**/dist/**',
+      ],
     },
   },
 });

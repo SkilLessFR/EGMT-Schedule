@@ -1,7 +1,8 @@
 import type React from 'react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronLeft, ChevronRight, Activity, Users, ShieldAlert, Layers, ArrowLeftRight, Check, Copy, AlertCircle, XCircle, CalendarDays } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, Activity, Users, ShieldAlert, Layers, ArrowLeftRight, Check, Copy, AlertCircle, XCircle, CalendarDays, Send, Loader2 } from 'lucide-react';
 import type { RosterData, ShiftEvent } from './types';
+import { sendSwapNotificationRequest } from './swapNotificationService';
 import {
   type AllShiftsGroup,
   type DailyRoster,
@@ -133,14 +134,16 @@ const SwapCandidateRow = memo(function SwapCandidateRow({
   candidate,
   expanded,
   onToggle,
-  onCopy,
-  copied,
+  onSend,
+  isSending,
+  isSent,
 }: {
   candidate: EnhancedSwapCandidate;
   expanded: boolean;
   onToggle: () => void;
-  onCopy: () => void;
-  copied: boolean;
+  onSend: () => void;
+  isSending: boolean;
+  isSent: boolean;
 }) {
   const { label, text, ring, Icon } = SEVERITY_STYLES[candidate.severity];
   const blockStyle = SEVERITY_STYLES[candidate.blockResult.severity];
@@ -212,13 +215,44 @@ const SwapCandidateRow = memo(function SwapCandidateRow({
               <li key={i} className="font-mono text-[11px] leading-snug text-zinc-400">– {reason}</li>
             ))}
           </ul>
-          <button
-            onClick={onCopy}
-            className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-300 transition-colors hover:bg-white/10"
-          >
-            {copied ? <Check className="size-3 text-lime-400" /> : <Copy className="size-3" />}
-            {copied ? 'Copied' : 'Copy request'}
-          </button>
+
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              onClick={onSend}
+              disabled={isSending}
+              className={`flex items-center gap-2 rounded-xl px-3.5 py-2 font-mono text-[11px] font-black uppercase tracking-wider transition-all active:scale-95 cursor-pointer ${
+                isSent
+                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                  : 'bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-500/20'
+              }`}
+            >
+              {isSending ? (
+                <>
+                  <Loader2 className="size-3.5 animate-spin" />
+                  <span>Sending...</span>
+                </>
+              ) : isSent ? (
+                <>
+                  <Check className="size-3.5 text-emerald-400" />
+                  <span>Request Sent!</span>
+                </>
+              ) : (
+                <>
+                  <Send className="size-3.5" />
+                  <span>Send Request</span>
+                </>
+              )}
+            </button>
+            {isSent ? (
+              <span className="font-mono text-[10px] text-emerald-400 animate-fadeIn">
+                ✓ Sent to {candidate.employee}'s phone
+              </span>
+            ) : (
+              <span className="font-mono text-[10px] text-zinc-500">
+                Notifies {candidate.employee}
+              </span>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -239,16 +273,19 @@ const SwapFinderSection = memo(function SwapFinderSection({
   onToggle: () => void;
 }) {
   const [expandedEmployee, setExpandedEmployee] = useState<string | null>(null);
-  const [copiedEmployee, setCopiedEmployee] = useState<string | null>(null);
+  const [sendingEmployee, setSendingEmployee] = useState<string | null>(null);
+  const [sentEmployees, setSentEmployees] = useState<Set<string>>(new Set());
+  const [notificationToast, setNotificationToast] = useState<string | null>(null);
   const [hasEverExpanded, setHasEverExpanded] = useState(expanded);
 
   useEffect(() => {
     if (expanded) setHasEverExpanded(true);
   }, [expanded]);
 
-  const handleCopy = useCallback((candidate: EnhancedSwapCandidate) => {
+  const handleSend = useCallback(async (candidate: EnhancedSwapCandidate) => {
     if (!requesterMessageParts) return;
     const { requester, requesterShift, requesterDate } = requesterMessageParts;
+    setSendingEmployee(candidate.employee);
 
     const message = buildEnhancedSwapRequestMessage(
       requester,
@@ -266,10 +303,25 @@ const SwapFinderSection = memo(function SwapFinderSection({
       },
     );
 
-    navigator.clipboard?.writeText(message).then(() => {
-      setCopiedEmployee(candidate.employee);
-      window.setTimeout(() => setCopiedEmployee((current) => (current === candidate.employee ? null : current)), 1800);
-    }).catch(() => {});
+    try {
+      const res = await sendSwapNotificationRequest({
+        fromEmployee: requester,
+        toEmployee: candidate.employee,
+        date: requesterDate,
+        requesterShift,
+        candidateShift: candidate.shift,
+        message,
+      });
+
+      setSentEmployees((prev) => new Set(prev).add(candidate.employee));
+      setNotificationToast(`Notification sent to ${candidate.employee}'s phone!`);
+      setTimeout(() => setNotificationToast(null), 4000);
+    } catch {
+      setNotificationToast(`Failed to send request.`);
+      setTimeout(() => setNotificationToast(null), 3000);
+    } finally {
+      setSendingEmployee(null);
+    }
   }, [requesterMessageParts]);
 
   const groups = useMemo(() => {
@@ -344,6 +396,13 @@ const SwapFinderSection = memo(function SwapFinderSection({
         <div className="overflow-hidden">
           {hasEverExpanded && (
             <div className="space-y-4 px-4 pb-4 pt-2 border-t border-white/5">
+              {notificationToast && (
+                <div className="flex items-center gap-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 p-2.5 font-mono text-[11px] text-emerald-400 animate-fadeIn">
+                  <Check className="size-4 shrink-0 text-emerald-400" />
+                  <span>{notificationToast}</span>
+                </div>
+              )}
+
               {groups.some((group) => group.items.length > 0) ? (
                 groups.map((group) => (
                   <div key={group.key} className="space-y-2">
@@ -364,8 +423,9 @@ const SwapFinderSection = memo(function SwapFinderSection({
                             candidate={candidate}
                             expanded={expandedEmployee === `${group.key}-${candidate.employee}`}
                             onToggle={() => setExpandedEmployee((current) => (current === `${group.key}-${candidate.employee}` ? null : `${group.key}-${candidate.employee}`))}
-                            onCopy={() => handleCopy(candidate)}
-                            copied={copiedEmployee === candidate.employee}
+                            onSend={() => handleSend(candidate)}
+                            isSending={sendingEmployee === candidate.employee}
+                            isSent={sentEmployees.has(candidate.employee)}
                           />
                         ))}
                       </div>

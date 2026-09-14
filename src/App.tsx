@@ -1,7 +1,7 @@
 // App.tsx
 import type React from 'react';
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, Moon, Search, Settings2, Sun, Users, Wallet, CheckSquare, Plus, Trash2, Bell, AlertTriangle, Edit2, X, UploadCloud, Loader2, Cloud } from 'lucide-react';
+import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, Moon, Search, Settings2, Sun, Users, Wallet, CheckSquare, Plus, Trash2, Bell, AlertTriangle, Edit2, X, UploadCloud, Loader2, Cloud, ShieldCheck, LogOut, Lock, ArrowLeftRight, Save } from 'lucide-react';
 import type { RosterData, ShiftEvent } from './types';
 import { parseRoster, mergeRosters } from './parser';
 import {
@@ -16,8 +16,21 @@ import {
   shiftLabel,
 } from './scheduleUtils';
 import DayDetailsModal from './DayDetailsModal';
+import AuthPinModal from './AuthPinModal';
+import { AUTH_STORAGE_KEY } from './authConfig';
 import { NotificationSettingsCard, NotificationPromptBanner } from './NotificationManager';
 import { registerServiceWorker, showAppNotification, SHIFT_ALERTS_PREF_KEY } from './notificationService';
+import { getIncomingSwapRequests, dismissIncomingSwapRequest, type SwapRequestItem } from './swapNotificationService';
+import {
+  type Task,
+  type ScheduleType,
+  type TimeSelection,
+  loadInitialTasks,
+  fetchTasksFromCloud,
+  saveTasksToCloud,
+  exportTasksAsJsonFile,
+  TASKS_UPDATED_AT_KEY,
+} from './taskService';
 
 const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 const WEEKDAYS_MAP = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -29,22 +42,6 @@ const DARK_MODE_STORAGE_KEY = 'work-schedule-dark-mode';
 const SALARY_STORAGE_KEY = 'work-schedule-salaries';
 const ADMIN_PIN_STORAGE_KEY = 'work-schedule-admin-pin';
 const APP_BASE_URL = ((import.meta as ImportMeta & { env?: { BASE_URL?: string } }).env?.BASE_URL ?? '/');
-
-type ScheduleType = 'once' | 'daily' | 'weekly';
-
-interface Task {
-  id: string;
-  title: string;
-  times: string[]; 
-  scheduleType: ScheduleType;
-  daysOfWeek?: number[]; 
-  dateCreated: string; 
-}
-
-interface TimeSelection {
-  hour: string;
-  minute: string;
-}
 
 const ROMANIAN_HOLIDAYS_2026 = new Set<string>([
   '2026-01-01', '2026-01-02', '2026-01-06', '2026-01-07', '2026-01-24',
@@ -154,26 +151,6 @@ function eventsForEmployee(roster: RosterData, employee: string): ShiftEvent[] {
   }, []);
 }
 
-// Helper utility to programmatically bundle state data and initiate a localized application download
-const triggerTasksJsonDownload = (tasksData: Task[]) => {
-  try {
-    const jsonString = JSON.stringify(tasksData, null, 2);
-    const blob = new Blob([jsonString], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    
-    const tempLink = document.createElement('a');
-    tempLink.href = url;
-    tempLink.download = 'tasks.json';
-    document.body.appendChild(tempLink);
-    tempLink.click();
-    
-    document.body.removeChild(tempLink);
-    URL.revokeObjectURL(url);
-  } catch (error) {
-    console.error("Failed handling client-side task payload download compile:", error);
-  }
-};
-
 export default function App() {
   const [dark, setDark] = useState(() => {
     const saved = localStorage.getItem(DARK_MODE_STORAGE_KEY);
@@ -183,6 +160,10 @@ export default function App() {
   const [roster, setRoster] = useState<RosterData | null>(null);
   const [errorMessage, setErrorMessage] = useState('');
   const [selectedEmployee, setSelectedEmployee] = useState('');
+  const [authenticatedEmployee, setAuthenticatedEmployee] = useState<string | null>(() => localStorage.getItem(AUTH_STORAGE_KEY));
+  const [authModalTarget, setAuthModalTarget] = useState<string | null>(null);
+  const [incomingSwapRequests, setIncomingSwapRequests] = useState<SwapRequestItem[]>([]);
+  const seenSwapIdsRef = useRef<Set<string>>(new Set());
   const [query, setQuery] = useState('');
   const [currentMonth, setCurrentMonth] = useState(new Date().getMonth());
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
@@ -196,10 +177,15 @@ export default function App() {
     }
   });
 
-  // Load baseline values locally on launch from the bundle file, then rely on interactive updates
-  const [tasks, setTasks] = useState<Task[]>([]);
+  // Persistent Site Storage for Recurring Tasks (Cloudflare KV + Local Cache)
+  const [tasks, setTasks] = useState<Task[]>(() => loadInitialTasks() || []);
+  const [isSyncingTasks, setIsSyncingTasks] = useState(false);
+  const [tasksLastUpdated, setTasksLastUpdated] = useState<string>(() => localStorage.getItem(TASKS_UPDATED_AT_KEY) || '');
   
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const editingTaskIdRef = useRef<string | null>(null);
+  editingTaskIdRef.current = editingTaskId;
+
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [scheduleType, setScheduleType] = useState<ScheduleType>('daily');
   const [selectedDays, setSelectedDays] = useState<number[]>([]);
@@ -221,20 +207,50 @@ export default function App() {
     });
   }, []);
 
-  // Hydrate custom tasks baseline structural format on load from local app route assets
+  // Hydrate and sync recurring tasks with Cloudflare KV site storage
   useEffect(() => {
     let isMounted = true;
-    fetch(`${APP_BASE_URL}tasks.json`, { cache: 'no-store' })
-      .then((res) => {
-        if (!res.ok) throw new Error('Could not download initial baseline array schema.');
-        return res.json() as Promise<Task[]>;
-      })
-      .then((data) => {
-        if (isMounted) setTasks(data);
-      })
-      .catch((err) => console.log("No initial tasks bundle setup found, starting fresh:", err));
-      
-    return () => { isMounted = false; };
+
+    const syncTasks = async (isBackground = false) => {
+      if (!isBackground) setIsSyncingTasks(true);
+      try {
+        const res = await fetchTasksFromCloud();
+        if (!isMounted) return;
+        if (res.tasks && res.tasks.length > 0) {
+          // Do not overwrite form if user is actively in the middle of editing a task
+          if (!editingTaskIdRef.current) {
+            setTasks(res.tasks);
+            if (res.updatedAt) setTasksLastUpdated(res.updatedAt);
+          }
+        }
+      } finally {
+        if (isMounted && !isBackground) setIsSyncingTasks(false);
+      }
+    };
+
+    // Initial load from Cloudflare KV
+    syncTasks(false);
+
+    // Periodic real-time background sync every 15 seconds so changes on any device appear immediately
+    const interval = setInterval(() => {
+      syncTasks(true);
+    }, 15000);
+
+    // Sync when returning to tab/app (e.g. mobile unlock or tab switch)
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        syncTasks(true);
+      }
+    };
+    window.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleVisibility);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+      window.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleVisibility);
+    };
   }, []);
 
   // Cloudflare KV Roster Upload & Sync State
@@ -323,6 +339,38 @@ export default function App() {
     registerServiceWorker().catch(() => {});
   }, []);
 
+  // Poll Cloudflare KV for incoming shift swap requests directed to this employee
+  useEffect(() => {
+    if (!authenticatedEmployee) {
+      setIncomingSwapRequests([]);
+      return;
+    }
+
+    const checkIncomingSwaps = async () => {
+      try {
+        const requests = await getIncomingSwapRequests(authenticatedEmployee);
+        setIncomingSwapRequests(requests);
+
+        // Notify user about newly arrived pending swap requests
+        for (const req of requests) {
+          if (req.status === 'pending' && !seenSwapIdsRef.current.has(req.id)) {
+            seenSwapIdsRef.current.add(req.id);
+            showAppNotification(`🔄 Shift Swap Request from ${req.fromEmployee}`, {
+              body: `${req.fromEmployee} requested to swap shifts with you for ${req.date}.`,
+              tag: `swap-notification-${req.id}`,
+            }).catch(() => {});
+          }
+        }
+      } catch {
+        // Non-blocking
+      }
+    };
+
+    checkIncomingSwaps();
+    const timer = setInterval(checkIncomingSwaps, 12000);
+    return () => clearInterval(timer);
+  }, [authenticatedEmployee]);
+
   useEffect(() => {
     audioRef.current = new Audio('/alarm.mp3');
     audioRef.current.loop = true;
@@ -404,13 +452,13 @@ export default function App() {
     if (activeAlarmTask && activeAlarmTask.type === 'once') {
       const nextStore = tasks.filter((t) => t.id !== activeAlarmTask.id);
       setTasks(nextStore);
-      triggerTasksJsonDownload(nextStore); // Auto-download upon clean runtime expiration triggers
+      saveTasksToCloud(nextStore, authenticatedEmployee || selectedEmployee).catch(() => {});
     }
     
     setActiveAlarmTask(null);
-  }, [activeAlarmTask, tasks]);
+  }, [activeAlarmTask, tasks, authenticatedEmployee, selectedEmployee]);
 
-  const handleSaveTask = (e: React.FormEvent) => {
+  const handleSaveTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTaskTitle.trim()) return;
     if (scheduleType === 'weekly' && selectedDays.length === 0) return;
@@ -445,15 +493,27 @@ export default function App() {
     }
 
     setTasks(nextStore);
-    triggerTasksJsonDownload(nextStore); // Instantly compile and down-stream file on save action
     resetForm();
+    setIsSyncingTasks(true);
+    try {
+      const res = await saveTasksToCloud(nextStore, authenticatedEmployee || selectedEmployee);
+      if (res.updatedAt) setTasksLastUpdated(res.updatedAt);
+    } finally {
+      setIsSyncingTasks(false);
+    }
   };
 
-  const handleRemoveTask = (id: string) => {
+  const handleRemoveTask = async (id: string) => {
     const nextStore = tasks.filter((t) => t.id !== id);
     setTasks(nextStore);
-    triggerTasksJsonDownload(nextStore); // Instantly compile and down-stream file on removal action
     if (editingTaskId === id) resetForm();
+    setIsSyncingTasks(true);
+    try {
+      const res = await saveTasksToCloud(nextStore, authenticatedEmployee || selectedEmployee);
+      if (res.updatedAt) setTasksLastUpdated(res.updatedAt);
+    } finally {
+      setIsSyncingTasks(false);
+    }
   };
 
   const startEditingTask = (task: Task) => {
@@ -513,9 +573,17 @@ export default function App() {
           const parsed = hydrateRoster(json);
           setRoster(parsed);
           setScheduleSource('kv');
+          const savedAuth = localStorage.getItem(AUTH_STORAGE_KEY);
           const savedEmployee = localStorage.getItem(EMPLOYEE_STORAGE_KEY);
-          const initialEmployee = savedEmployee && parsed.employees.includes(savedEmployee) ? savedEmployee : (parsed.employees[0] ?? '');
+          const initialEmployee = savedAuth && parsed.employees.includes(savedAuth)
+            ? savedAuth
+            : savedEmployee && parsed.employees.includes(savedEmployee)
+              ? savedEmployee
+              : (parsed.employees[0] ?? '');
           setSelectedEmployee(initialEmployee);
+          if (savedAuth && parsed.employees.includes(savedAuth)) {
+            setAuthenticatedEmployee(savedAuth);
+          }
           setStatus('loaded');
           return;
         }
@@ -532,9 +600,17 @@ export default function App() {
         const parsed = hydrateRoster(json);
         setRoster(parsed);
         setScheduleSource('static');
+        const savedAuth = localStorage.getItem(AUTH_STORAGE_KEY);
         const savedEmployee = localStorage.getItem(EMPLOYEE_STORAGE_KEY);
-        const initialEmployee = savedEmployee && parsed.employees.includes(savedEmployee) ? savedEmployee : (parsed.employees[0] ?? '');
+        const initialEmployee = savedAuth && parsed.employees.includes(savedAuth)
+          ? savedAuth
+          : savedEmployee && parsed.employees.includes(savedEmployee)
+            ? savedEmployee
+            : (parsed.employees[0] ?? '');
         setSelectedEmployee(initialEmployee);
+        if (savedAuth && parsed.employees.includes(savedAuth)) {
+          setAuthenticatedEmployee(savedAuth);
+        }
         setStatus('loaded');
       } catch (err) {
         if (!mounted) return;
@@ -812,8 +888,24 @@ export default function App() {
   }, [commitMonthSwipe, setMonthTransform]);
 
   const handleSelectEmployee = useCallback((name: string) => {
-    setSelectedEmployee(name);
-    localStorage.setItem(EMPLOYEE_STORAGE_KEY, name);
+    if (authenticatedEmployee === name) {
+      setSelectedEmployee(name);
+      localStorage.setItem(EMPLOYEE_STORAGE_KEY, name);
+      return;
+    }
+    setAuthModalTarget(name);
+  }, [authenticatedEmployee]);
+
+  const handleAuthSuccess = useCallback((employee: string) => {
+    setAuthenticatedEmployee(employee);
+    setSelectedEmployee(employee);
+    localStorage.setItem(AUTH_STORAGE_KEY, employee);
+    localStorage.setItem(EMPLOYEE_STORAGE_KEY, employee);
+  }, []);
+
+  const handleLogOut = useCallback(() => {
+    setAuthenticatedEmployee(null);
+    localStorage.removeItem(AUTH_STORAGE_KEY);
   }, []);
 
   if (status === 'loading') {
@@ -869,6 +961,58 @@ export default function App() {
           <div className="flex min-h-0 flex-1 flex-col lg:overflow-y-auto">
           <div className={`flex min-h-0 flex-1 flex-col transition-[filter] duration-200 ${sheetOpen ? 'pointer-events-none select-none blur-[1px]' : ''}`} aria-hidden={sheetOpen}>
             <div className="mx-auto flex min-h-0 w-full flex-1 flex-col lg:max-w-4xl lg:px-10 lg:py-8">
+            {incomingSwapRequests.length > 0 && (
+              <div className="mx-4 lg:mx-0 mb-3 space-y-2">
+                {incomingSwapRequests.map((req) => (
+                  <div
+                    key={req.id}
+                    className="flex items-center justify-between gap-3 rounded-2xl border border-cyan-500/30 bg-cyan-500/10 p-3 text-cyan-600 dark:text-cyan-400 backdrop-blur-md animate-fadeIn"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-xl bg-cyan-500/20">
+                        <ArrowLeftRight className="size-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-[13px] font-bold truncate">
+                          Swap Request from {req.fromEmployee}
+                        </p>
+                        <p className="text-[11px] opacity-90 truncate">
+                          Date: <strong>{req.date}</strong> ({shiftLabel(req.requesterShift)} ↔ {shiftLabel(req.candidateShift)})
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (roster && selectedEmployee) {
+                            const ev = eventForIso(roster, selectedEmployee, req.date);
+                            setSelectedEvent(ev);
+                          }
+                        }}
+                        className="rounded-xl bg-cyan-600 px-2.5 py-1.5 text-[11px] font-bold text-white shadow-sm hover:bg-cyan-500 transition-all active:scale-95 cursor-pointer"
+                      >
+                        View Day
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (authenticatedEmployee) {
+                            await dismissIncomingSwapRequest(authenticatedEmployee, req.id);
+                            setIncomingSwapRequests((prev) => prev.filter((r) => r.id !== req.id));
+                          }
+                        }}
+                        className="rounded-xl bg-zinc-950/5 p-1.5 text-zinc-400 hover:text-zinc-600 dark:bg-white/5 dark:hover:text-zinc-200 transition-all cursor-pointer"
+                        title="Dismiss request"
+                      >
+                        <X className="size-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {activeTab === 'calendar' && (
               <div className="flex min-h-0 flex-1 flex-col">
                 <header className="shrink-0 px-5 pb-3 pt-6 lg:hidden">
@@ -1154,9 +1298,34 @@ export default function App() {
 
             {activeTab === 'tasks' && (
               <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-24 pt-6 lg:px-0 lg:pb-8">
-                <div>
-                  <h1 className="text-[34px] font-bold tracking-tight">Recurring Tasks</h1>
-                  <p className="mt-1 text-[15px] font-medium text-zinc-400 dark:text-zinc-500">Triggers an automatic file download upon any modification</p>
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div>
+                    <h1 className="text-[34px] font-bold tracking-tight">Recurring Tasks</h1>
+                    <p className="mt-1 text-[15px] font-medium text-zinc-400 dark:text-zinc-500">
+                      Persistent site storage · Synced in real-time across all devices
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 self-start sm:self-auto shrink-0">
+                    {isSyncingTasks ? (
+                      <span className="flex items-center gap-1.5 rounded-full bg-cyan-500/10 px-3 py-1.5 text-[11px] font-semibold text-cyan-500 border border-cyan-500/20">
+                        <Loader2 className="size-3.5 animate-spin" />
+                        <span>Syncing...</span>
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1.5 text-[11px] font-semibold text-emerald-500 border border-emerald-500/20">
+                        <Cloud className="size-3.5" />
+                        <span>Cloud Synced</span>
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => exportTasksAsJsonFile(tasks)}
+                      className="rounded-full bg-zinc-950/5 dark:bg-white/5 px-3 py-1.5 text-[11px] font-semibold text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
+                      title="Download backup tasks.json file"
+                    >
+                      Export JSON
+                    </button>
+                  </div>
                 </div>
                 
                 <div className="mt-4">
@@ -1262,7 +1431,7 @@ export default function App() {
                         </div>
                       ))}
                       <button 
-                        type="button"
+                        type="button" 
                         onClick={addTimeInputField}
                         className="flex items-center gap-1.5 text-[13px] font-bold text-blue-500 mt-1 hover:underline"
                       >
@@ -1273,15 +1442,24 @@ export default function App() {
                     <button 
                       type="submit"
                       disabled={scheduleType === 'weekly' && selectedDays.length === 0}
-                      className="w-full flex items-center justify-center gap-2 bg-blue-500 hover:bg-blue-600 disabled:opacity-40 disabled:hover:bg-blue-500 text-white font-semibold py-2.5 px-4 rounded-xl transition-colors"
+                      className="w-full flex items-center justify-center gap-2 bg-blue-500 hover:bg-blue-600 disabled:opacity-40 disabled:hover:bg-blue-500 text-white font-semibold py-2.5 px-4 rounded-xl transition-colors cursor-pointer"
                     >
-                      <Bell className="size-4" /> {editingTaskId ? 'Save and Export JSON' : 'Save and Export JSON'}
+                      <Save className="size-4" /> {editingTaskId ? 'Update Task' : 'Save Task'}
                     </button>
                   </form>
                 </section>
 
                 <section className="mt-6">
-                  <h3 className="px-1 text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500 mb-2">Active Monitor Configuration</h3>
+                  <div className="flex items-center justify-between px-1 mb-2">
+                    <h3 className="text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
+                      Active Monitor Configuration ({tasks.length})
+                    </h3>
+                    {tasksLastUpdated && (
+                      <span className="text-[10px] font-mono text-zinc-400 dark:text-zinc-500">
+                        Synced {new Date(tasksLastUpdated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    )}
+                  </div>
                   <div className="space-y-2">
                     {tasks.length === 0 ? (
                       <p className="text-xs italic text-zinc-400 px-1">No custom metrics monitored. Create a task above.</p>
@@ -1364,7 +1542,7 @@ export default function App() {
                   <div>
                     <h3 className="px-1 text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Notifications</h3>
                     <div className="mt-2">
-                      <NotificationSettingsCard />
+                      <NotificationSettingsCard authenticatedEmployee={authenticatedEmployee} />
                     </div>
                   </div>
                 </section>
@@ -1462,12 +1640,81 @@ export default function App() {
 
                   <div>
                     <div className="flex items-center justify-between px-1">
-                      <h3 className="text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Active Roster</h3>
+                      <h3 className="text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Employee Identity & Authentication</h3>
                       <span className="text-[11px] font-mono text-zinc-400 dark:text-zinc-500 truncate max-w-[180px]">{displayFileName(roster?.fileName)}</span>
                     </div>
+
+                    {/* Authenticated Identity Status Banner */}
+                    {authenticatedEmployee ? (
+                      <div className="mt-2 mb-3 flex items-center justify-between rounded-2xl bg-emerald-500/10 p-3.5 border border-emerald-500/20">
+                        <div className="flex items-center gap-2.5">
+                          <div className="flex size-8 items-center justify-center rounded-xl bg-emerald-500/20 text-emerald-600 dark:text-emerald-400">
+                            <ShieldCheck className="size-5" />
+                          </div>
+                          <div>
+                            <p className="text-[14px] font-bold text-emerald-600 dark:text-emerald-400">
+                              {authenticatedEmployee}
+                            </p>
+                            <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                              Authenticated Identity · Notifications Linked
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleLogOut}
+                          className="flex items-center gap-1 rounded-xl bg-zinc-950/5 px-2.5 py-1.5 text-[12px] font-medium text-zinc-500 hover:bg-zinc-950/10 dark:bg-white/5 dark:text-zinc-400 dark:hover:bg-white/10 transition-colors"
+                          title="Switch user or log out"
+                        >
+                          <LogOut className="size-3.5" />
+                          <span>Switch</span>
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="mt-2 mb-3 flex items-center gap-2.5 rounded-2xl bg-amber-500/10 p-3.5 border border-amber-500/20 text-amber-600 dark:text-amber-400">
+                        <Lock className="size-5 shrink-0" />
+                        <div>
+                          <p className="text-[13px] font-semibold">Select your profile to authenticate</p>
+                          <p className="text-[11px] opacity-85">Tap your name below and enter your secret code to log in.</p>
+                        </div>
+                      </div>
+                    )}
+
                     <div className={`mt-2 ${GLASS_CARD}`}>
-                      <div className="flex items-center gap-2 px-4 pt-3.5"><Search className="size-4 text-zinc-400"/><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search employee" className="w-full bg-transparent py-2 text-[15px] outline-none"/></div>
-                      <div className="max-h-64 divide-y divide-zinc-950/[0.06] overflow-y-auto dark:divide-white/[0.06]">{filteredEmployees.map((name) => <button key={name} onClick={() => handleSelectEmployee(name)} className="flex w-full items-center justify-between px-4 py-3 text-left"><span className="text-[15px]">{name}</span>{name === selectedEmployee && <Check className="size-4 text-blue-500"/>}</button>)}</div>
+                      <div className="flex items-center gap-2 px-4 pt-3.5">
+                        <Search className="size-4 text-zinc-400"/>
+                        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search employee" className="w-full bg-transparent py-2 text-[15px] outline-none"/>
+                      </div>
+                      <div className="max-h-64 divide-y divide-zinc-950/[0.06] overflow-y-auto dark:divide-white/[0.06]">
+                        {filteredEmployees.map((name) => {
+                          const isAuth = name === authenticatedEmployee;
+                          const isSelected = name === selectedEmployee;
+                          return (
+                            <button
+                              key={name}
+                              onClick={() => handleSelectEmployee(name)}
+                              className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-zinc-950/[0.02] dark:hover:bg-white/[0.02] transition-colors"
+                            >
+                              <div className="flex items-center gap-2.5">
+                                {isAuth ? (
+                                  <ShieldCheck className="size-4 text-emerald-500" />
+                                ) : (
+                                  <Lock className="size-3.5 text-zinc-400 opacity-60" />
+                                )}
+                                <span className={`text-[15px] ${isAuth ? 'font-bold text-emerald-600 dark:text-emerald-400' : ''}`}>{name}</span>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                {isAuth && (
+                                  <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-500">
+                                    Verified
+                                  </span>
+                                )}
+                                {isSelected && <Check className="size-4 text-blue-500" />}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
                 </section>
@@ -1485,6 +1732,13 @@ export default function App() {
             canGoPrev={canGoPrevDay} canGoNext={canGoNextDay}
             onPrev={goToPrevDay} onNext={goToNextDay}
             onClose={() => setSelectedEvent(null)}
+          />
+
+          <AuthPinModal
+            isOpen={Boolean(authModalTarget)}
+            targetEmployee={authModalTarget}
+            onClose={() => setAuthModalTarget(null)}
+            onAuthenticated={handleAuthSuccess}
           />
 
           {/* Alarm Loop Intercept Modal */}
