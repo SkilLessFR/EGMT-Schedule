@@ -1,6 +1,6 @@
 import type React from 'react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronLeft, ChevronRight, Activity, Users, ShieldAlert, Layers, ArrowLeftRight, Check, Copy, AlertCircle, XCircle, CalendarDays, Send, Loader2 } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, Activity, Users, ShieldAlert, Layers, ArrowLeftRight, Check, AlertCircle, XCircle, CalendarDays, Send, Loader2 } from 'lucide-react';
 import type { RosterData, ShiftEvent } from './types';
 import { sendSwapNotificationRequest } from './swapNotificationService';
 import {
@@ -304,7 +304,7 @@ const SwapFinderSection = memo(function SwapFinderSection({
     );
 
     try {
-      const res = await sendSwapNotificationRequest({
+      await sendSwapNotificationRequest({
         fromEmployee: requester,
         toEmployee: candidate.employee,
         date: requesterDate,

@@ -1,6 +1,6 @@
 // src/AuthPinModal.tsx
 import React, { useState, useEffect, useRef } from 'react';
-import { ShieldCheck, Lock, X, AlertCircle, Loader2, CheckCircle2 } from 'lucide-react';
+import { ShieldCheck, X, AlertCircle, Loader2, CheckCircle2 } from 'lucide-react';
 import { verifyEmployeeCode, syncPushSubscriptionToKv, AUTH_STORAGE_KEY } from './authConfig';
 import { getPushSubscription } from './notificationService';
 
