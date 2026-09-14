@@ -6,6 +6,7 @@
  */
 
 export type ScheduleType = 'once' | 'daily' | 'weekly';
+export type TargetShiftFilter = 'ALL_ACTIVE' | 'M' | 'A' | 'N' | 'MID';
 
 export interface Task {
   id: string;
@@ -14,6 +15,7 @@ export interface Task {
   scheduleType: ScheduleType;
   daysOfWeek?: number[];
   dateCreated?: string;
+  targetShift?: TargetShiftFilter;
 }
 
 export interface TimeSelection {
@@ -159,3 +161,35 @@ export function exportTasksAsJsonFile(tasks: Task[]): void {
     console.error('Failed to export tasks backup file:', error);
   }
 }
+
+/**
+ * Dispatches a push notification specifically to colleagues who are on shift.
+ */
+export async function triggerTaskPushToShift(
+  task: Task,
+  time?: string
+): Promise<{
+  success: boolean;
+  eligibleCount?: number;
+  delivered?: string[];
+  skippedOffShift?: { name: string; reason: string }[];
+  error?: string;
+}> {
+  try {
+    const res = await fetch('/api/send-task-push', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        taskId: task.id,
+        taskTitle: task.title,
+        targetShift: task.targetShift || 'ALL_ACTIVE',
+        time: time || (task.times && task.times[0]),
+      }),
+    });
+    const data = await res.json();
+    return data;
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+}
+

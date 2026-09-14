@@ -21,6 +21,7 @@ export interface TaskItem {
   scheduleType: 'once' | 'daily' | 'weekly';
   daysOfWeek?: number[];
   dateCreated?: string;
+  targetShift?: 'ALL_ACTIVE' | 'M' | 'A' | 'N' | 'MID';
 }
 
 export interface StoredTasksPayload {
@@ -190,6 +191,9 @@ export async function onRequestPost(context: PagesContext) {
       scheduleType: t.scheduleType || 'daily',
       daysOfWeek: Array.isArray(t.daysOfWeek) ? [...t.daysOfWeek].sort() : undefined,
       dateCreated: t.dateCreated || new Date().toISOString().slice(0, 10),
+      targetShift: (t.targetShift && ['ALL_ACTIVE', 'M', 'A', 'N', 'MID'].includes(t.targetShift))
+        ? t.targetShift
+        : 'ALL_ACTIVE',
     }));
 
     const payload: StoredTasksPayload = {

@@ -114,6 +114,108 @@ export function groupForShift(shift: string, daily: DailyRoster | undefined, sel
 }
 
 // ---------------------------------------------------------------------------
+// Shift presence & task filtering — checks who is actively on shift right now
+// ---------------------------------------------------------------------------
+
+export const ONLY_ON_SHIFT_NOTIFS_KEY = 'egmt_only_on_shift_notifications';
+
+function formatIso(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+export interface EmployeeShiftStatus {
+  onShift: boolean;
+  currentShift?: string;
+  shiftDate?: string;
+}
+
+export function isEmployeeOnShift(
+  roster: RosterData | null,
+  employee: string,
+  now: Date = new Date()
+): EmployeeShiftStatus {
+  if (!roster || !employee) return { onShift: false };
+
+  const currentHHMM = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const currentIsoDate = formatIso(now);
+
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayIsoDate = formatIso(yesterday);
+
+  // Early morning hours: 00:00 - 05:59
+  // Night shift (N: 22:00 - 06:00) from yesterday is working right now
+  if (currentHHMM < '06:00') {
+    const yesterdayShift = shiftKey(roster.rows[employee]?.[yesterdayIsoDate] ?? 'OFF');
+    if (yesterdayShift === 'N') {
+      return { onShift: true, currentShift: 'N', shiftDate: yesterdayIsoDate };
+    }
+    return { onShift: false };
+  }
+
+  // Morning hours: 06:00 - 13:59
+  if (currentHHMM >= '06:00' && currentHHMM < '14:00') {
+    const todayShift = shiftKey(roster.rows[employee]?.[currentIsoDate] ?? 'OFF');
+    if (todayShift === 'M') {
+      return { onShift: true, currentShift: 'M', shiftDate: currentIsoDate };
+    }
+    if (todayShift === 'MID' && currentHHMM >= '09:00') {
+      return { onShift: true, currentShift: 'MID', shiftDate: currentIsoDate };
+    }
+    return { onShift: false };
+  }
+
+  // Afternoon hours: 14:00 - 21:59
+  if (currentHHMM >= '14:00' && currentHHMM < '22:00') {
+    const todayShift = shiftKey(roster.rows[employee]?.[currentIsoDate] ?? 'OFF');
+    if (todayShift === 'A') {
+      return { onShift: true, currentShift: 'A', shiftDate: currentIsoDate };
+    }
+    if (todayShift === 'MID' && currentHHMM < '17:00') {
+      return { onShift: true, currentShift: 'MID', shiftDate: currentIsoDate };
+    }
+    return { onShift: false };
+  }
+
+  // Late night hours: 22:00 - 23:59
+  if (currentHHMM >= '22:00') {
+    const todayShift = shiftKey(roster.rows[employee]?.[currentIsoDate] ?? 'OFF');
+    if (todayShift === 'N') {
+      return { onShift: true, currentShift: 'N', shiftDate: currentIsoDate };
+    }
+    return { onShift: false };
+  }
+
+  return { onShift: false };
+}
+
+export function getEmployeesOnShift(
+  roster: RosterData | null,
+  now: Date = new Date()
+): string[] {
+  if (!roster) return [];
+  return roster.employees.filter((emp) => isEmployeeOnShift(roster, emp, now).onShift);
+}
+
+export function getActiveShiftsAtTime(timeHHMM: string): string[] {
+  const shifts: string[] = [];
+  if (timeHHMM < '06:00' || timeHHMM >= '22:00') {
+    shifts.push('N');
+  }
+  if (timeHHMM >= '06:00' && timeHHMM < '14:00') {
+    shifts.push('M');
+  }
+  if (timeHHMM >= '14:00' && timeHHMM < '22:00') {
+    shifts.push('A');
+  }
+  if (timeHHMM >= '09:00' && timeHHMM < '17:00') {
+    shifts.push('MID');
+  }
+  return shifts;
+}
+
+
+// ---------------------------------------------------------------------------
 // "Show all shifts" — every employee on this day, grouped by shift
 // ---------------------------------------------------------------------------
 

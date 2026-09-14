@@ -14,16 +14,19 @@ import {
   GLASS_NAV,
   findShiftTransformationPreview,
   shiftLabel,
+  isEmployeeOnShift,
+  ONLY_ON_SHIFT_NOTIFS_KEY,
 } from './scheduleUtils';
 import DayDetailsModal from './DayDetailsModal';
 import AuthPinModal from './AuthPinModal';
 import { AUTH_STORAGE_KEY } from './authConfig';
 import { NotificationSettingsCard, NotificationPromptBanner } from './NotificationManager';
-import { registerServiceWorker, showAppNotification, SHIFT_ALERTS_PREF_KEY } from './notificationService';
+import { registerServiceWorker, showAppNotification, NOTIFICATION_PREF_KEY, SHIFT_ALERTS_PREF_KEY } from './notificationService';
 import { getIncomingSwapRequests, dismissIncomingSwapRequest, type SwapRequestItem } from './swapNotificationService';
 import {
   type Task,
   type ScheduleType,
+  type TargetShiftFilter,
   type TimeSelection,
   loadInitialTasks,
   fetchTasksFromCloud,
@@ -188,6 +191,7 @@ export default function App() {
 
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [scheduleType, setScheduleType] = useState<ScheduleType>('daily');
+  const [targetShift, setTargetShift] = useState<TargetShiftFilter>('ALL_ACTIVE');
   const [selectedDays, setSelectedDays] = useState<number[]>([]);
   const [newTaskTimes, setNewTaskTimes] = useState<TimeSelection[]>([{ hour: '00', minute: '00' }]);
   
@@ -384,21 +388,40 @@ export default function App() {
       if (lastCheckedMinute.current === currentHHMM) return;
       lastCheckedMinute.current = currentHHMM;
 
+      const activeEmployee = authenticatedEmployee || selectedEmployee;
+      const taskAlertsEnabled = localStorage.getItem(NOTIFICATION_PREF_KEY) !== 'false';
+      const onlyOnShiftEnabled = localStorage.getItem(ONLY_ON_SHIFT_NOTIFS_KEY) !== 'false';
+
       // Check recurring task alarms
-      tasks.forEach((task) => {
-        if (!task.times.includes(currentHHMM)) return;
+      if (taskAlertsEnabled) {
+        tasks.forEach((task) => {
+          if (!task.times.includes(currentHHMM)) return;
 
-        let shouldTrigger = false;
+          let shouldTrigger = false;
 
-        if (task.scheduleType === 'daily') {
-          shouldTrigger = true;
-        } else if (task.scheduleType === 'once' && task.dateCreated === currentIsoDate) {
-          shouldTrigger = true;
-        } else if (task.scheduleType === 'weekly' && task.daysOfWeek?.includes(currentDayOfWeek)) {
-          shouldTrigger = true;
-        }
+          if (task.scheduleType === 'daily') {
+            shouldTrigger = true;
+          } else if (task.scheduleType === 'once' && task.dateCreated === currentIsoDate) {
+            shouldTrigger = true;
+          } else if (task.scheduleType === 'weekly' && task.daysOfWeek?.includes(currentDayOfWeek)) {
+            shouldTrigger = true;
+          }
 
-        if (shouldTrigger) {
+          if (!shouldTrigger) return;
+
+          // Shift filtering: Only notify colleagues who are actively on shift
+          if (onlyOnShiftEnabled && roster && activeEmployee) {
+            const shiftStatus = isEmployeeOnShift(roster, activeEmployee, now);
+            // If employee is scheduled OFF, H8, or outside shift hours, suppress alert
+            if (!shiftStatus.onShift) {
+              return;
+            }
+            // If task is targeted to a specific shift and colleague is working a different shift, suppress alert
+            if (task.targetShift && task.targetShift !== 'ALL_ACTIVE' && shiftStatus.currentShift !== task.targetShift) {
+              return;
+            }
+          }
+
           setActiveAlarmTask({ id: task.id, taskTitle: task.title, time: currentHHMM, type: task.scheduleType });
           if (audioRef.current) {
             audioRef.current.currentTime = 0;
@@ -408,27 +431,32 @@ export default function App() {
             body: `Scheduled alarm triggered at ${currentHHMM}`,
             tag: `alarm-${task.id}`,
           }).catch(() => {});
-        }
-      });
+        });
+      }
 
-      // Check upcoming shift alerts (1 hour before shift starts)
+      // Check upcoming shift alerts (1 hour before shift starts: M at 06:00, MID at 09:00, A at 14:00, N at 22:00)
       const shiftAlertsEnabled = localStorage.getItem(SHIFT_ALERTS_PREF_KEY) !== 'false';
-      if (shiftAlertsEnabled && roster && selectedEmployee) {
-        const todayShift = shiftKey(roster.rows[selectedEmployee]?.[currentIsoDate] ?? 'OFF');
-        if (todayShift === 'M' && currentHHMM === '06:00') {
+      if (shiftAlertsEnabled && roster && activeEmployee) {
+        const todayShift = shiftKey(roster.rows[activeEmployee]?.[currentIsoDate] ?? 'OFF');
+        if (todayShift === 'M' && currentHHMM === '05:00') {
           showAppNotification('Shift Reminder: Morning (M)', {
-            body: 'Your Morning shift starts in 1 hour at 07:00.',
-            tag: `shift-${currentIsoDate}`,
+            body: 'Your Morning shift starts in 1 hour at 06:00.',
+            tag: `shift-${currentIsoDate}-M`,
           }).catch(() => {});
-        } else if (todayShift === 'A' && currentHHMM === '14:00') {
+        } else if (todayShift === 'MID' && currentHHMM === '08:00') {
+          showAppNotification('Shift Reminder: Mid (MID)', {
+            body: 'Your Mid shift starts in 1 hour at 09:00.',
+            tag: `shift-${currentIsoDate}-MID`,
+          }).catch(() => {});
+        } else if (todayShift === 'A' && currentHHMM === '13:00') {
           showAppNotification('Shift Reminder: Afternoon (A)', {
-            body: 'Your Afternoon shift starts in 1 hour at 15:00.',
-            tag: `shift-${currentIsoDate}`,
+            body: 'Your Afternoon shift starts in 1 hour at 14:00.',
+            tag: `shift-${currentIsoDate}-A`,
           }).catch(() => {});
-        } else if (todayShift === 'N' && currentHHMM === '18:00') {
+        } else if (todayShift === 'N' && currentHHMM === '21:00') {
           showAppNotification('Shift Reminder: Night (N)', {
-            body: 'Your Night shift starts in 1 hour at 19:00.',
-            tag: `shift-${currentIsoDate}`,
+            body: 'Your Night shift starts in 1 hour at 22:00.',
+            tag: `shift-${currentIsoDate}-N`,
           }).catch(() => {});
         }
       }
@@ -441,7 +469,7 @@ export default function App() {
         audioRef.current = null;
       }
     };
-  }, [tasks, roster, selectedEmployee]);
+  }, [tasks, roster, selectedEmployee, authenticatedEmployee]);
 
   const dismissAlarm = useCallback(() => {
     if (audioRef.current) {
@@ -476,7 +504,8 @@ export default function App() {
               title: newTaskTitle.trim(), 
               times: finalTimes, 
               scheduleType, 
-              daysOfWeek: scheduleType === 'weekly' ? [...selectedDays].sort() : undefined 
+              daysOfWeek: scheduleType === 'weekly' ? [...selectedDays].sort() : undefined,
+              targetShift,
             }
           : t
       );
@@ -488,6 +517,7 @@ export default function App() {
         scheduleType,
         daysOfWeek: scheduleType === 'weekly' ? [...selectedDays].sort() : undefined,
         dateCreated: iso(new Date()),
+        targetShift,
       };
       nextStore = [...tasks, newTask];
     }
@@ -520,6 +550,7 @@ export default function App() {
     setEditingTaskId(task.id);
     setNewTaskTitle(task.title);
     setScheduleType(task.scheduleType);
+    setTargetShift(task.targetShift || 'ALL_ACTIVE');
     setSelectedDays(task.daysOfWeek || []);
     
     const splitTimes = task.times.map(t => {
@@ -533,6 +564,7 @@ export default function App() {
     setEditingTaskId(null);
     setNewTaskTitle('');
     setScheduleType('daily');
+    setTargetShift('ALL_ACTIVE');
     setSelectedDays([]);
     setNewTaskTimes([{ hour: '00', minute: '00' }]);
   };
@@ -1376,6 +1408,37 @@ export default function App() {
                       </div>
                     </div>
 
+                    <div>
+                      <label className="block text-[12px] font-semibold text-zinc-400 mb-1.5">Target Shift</label>
+                      <div className="grid grid-cols-5 gap-1 rounded-xl bg-zinc-950/5 p-1 dark:bg-white/5">
+                        {[
+                          { key: 'ALL_ACTIVE', label: 'All Shifts' },
+                          { key: 'M', label: 'M (06-14)' },
+                          { key: 'A', label: 'A (14-22)' },
+                          { key: 'N', label: 'N (22-06)' },
+                          { key: 'MID', label: 'MID (09-17)' },
+                        ].map((item) => (
+                          <button
+                            key={item.key}
+                            type="button"
+                            onClick={() => setTargetShift(item.key as TargetShiftFilter)}
+                            className={`rounded-lg py-1.5 text-center text-[11px] font-semibold transition-all ${
+                              targetShift === item.key
+                                ? 'bg-white shadow-sm dark:bg-zinc-800 text-blue-500'
+                                : 'text-zinc-400'
+                            }`}
+                          >
+                            {item.label}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="mt-1 px-0.5 text-[11px] text-zinc-400">
+                        {targetShift === 'ALL_ACTIVE'
+                          ? 'Alerts whoever is actively on shift at the time (off-shift colleagues are silenced)'
+                          : `Alerts only colleagues working Shift ${targetShift} (all others are silenced)`}
+                      </p>
+                    </div>
+
                     {scheduleType === 'weekly' && (
                       <div className="animate-fadeIn">
                         <label className="block text-[12px] font-semibold text-zinc-400 mb-1.5">Active Days</label>
@@ -1467,11 +1530,20 @@ export default function App() {
                       tasks.map((task) => (
                         <div key={task.id} className={`flex items-center justify-between p-4 ${GLASS_CARD} ${editingTaskId === task.id ? 'ring-2 ring-blue-500/50 bg-blue-500/[0.02]' : ''}`}>
                           <div className="min-w-0 flex-1 pr-4">
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
                               <p className="font-semibold text-[15px] truncate">{task.title}</p>
                               <span className={`rounded-full px-2 py-0.5 text-[9px] font-extrabold tracking-wide uppercase ${task.scheduleType === 'once' ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20' : task.scheduleType === 'weekly' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'bg-green-500/10 text-green-400 border border-green-500/20'}`}>
                                 {task.scheduleType === 'once' ? 'One Time' : task.scheduleType}
                               </span>
+                              {task.targetShift && task.targetShift !== 'ALL_ACTIVE' ? (
+                                <span className="rounded-full px-2 py-0.5 text-[9px] font-extrabold tracking-wide uppercase bg-blue-500/10 text-blue-500 dark:text-blue-400 border border-blue-500/20">
+                                  Shift {task.targetShift}
+                                </span>
+                              ) : (
+                                <span className="rounded-full px-2 py-0.5 text-[9px] font-medium text-zinc-400 border border-zinc-500/20">
+                                  On-Shift Only
+                                </span>
+                              )}
                             </div>
                             
                             {task.scheduleType === 'weekly' && task.daysOfWeek && (
@@ -1487,6 +1559,34 @@ export default function App() {
                                 </span>
                               ))}
                             </div>
+
+                            {/* Personal shift status badge for current user */}
+                            {(() => {
+                              const emp = authenticatedEmployee || selectedEmployee;
+                              if (!roster || !emp) return null;
+                              const status = isEmployeeOnShift(roster, emp, new Date());
+                              if (!status.onShift) {
+                                return (
+                                  <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500 flex items-center gap-1">
+                                    <span>💤</span> Silent for you (You are off shift)
+                                  </p>
+                                );
+                              }
+                              const matchesShift = !task.targetShift || task.targetShift === 'ALL_ACTIVE' || task.targetShift === status.currentShift;
+                              if (matchesShift) {
+                                return (
+                                  <p className="mt-1 text-[11px] text-emerald-500 font-medium flex items-center gap-1.5">
+                                    <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                    Active for you (Shift {status.currentShift})
+                                  </p>
+                                );
+                              }
+                              return (
+                                <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500 flex items-center gap-1">
+                                  <span>💤</span> Silent for you (You are on shift {status.currentShift})
+                                </p>
+                              );
+                            })()}
                           </div>
                           
                           <div className="flex items-center gap-1 shrink-0">

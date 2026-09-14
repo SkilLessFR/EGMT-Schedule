@@ -13,7 +13,7 @@ import {
   SHIFT_ALERTS_PREF_KEY,
 } from './notificationService';
 import { syncPushSubscriptionToKv } from './authConfig';
-import { GLASS_CARD } from './scheduleUtils';
+import { GLASS_CARD, ONLY_ON_SHIFT_NOTIFS_KEY } from './scheduleUtils';
 
 const IOS_SWITCH_ON = '#34c759';
 const IOS_SWITCH_OFF = 'rgba(120, 120, 128, 0.16)';
@@ -32,6 +32,10 @@ export function useNotifications(authenticatedEmployee?: string | null) {
   });
   const [shiftAlertsEnabled, setShiftAlertsEnabled] = useState<boolean>(() => {
     const saved = localStorage.getItem(SHIFT_ALERTS_PREF_KEY);
+    return saved !== null ? saved === 'true' : true;
+  });
+  const [onlyOnShiftEnabled, setOnlyOnShiftEnabled] = useState<boolean>(() => {
+    const saved = localStorage.getItem(ONLY_ON_SHIFT_NOTIFS_KEY);
     return saved !== null ? saved === 'true' : true;
   });
   const [testSent, setTestSent] = useState(false);
@@ -116,17 +120,27 @@ export function useNotifications(authenticatedEmployee?: string | null) {
     });
   }, []);
 
+  const toggleOnlyOnShift = useCallback(() => {
+    setOnlyOnShiftEnabled((prev) => {
+      const next = !prev;
+      localStorage.setItem(ONLY_ON_SHIFT_NOTIFS_KEY, String(next));
+      return next;
+    });
+  }, []);
+
   return {
     permission,
     iosStatus,
     taskAlertsEnabled,
     shiftAlertsEnabled,
+    onlyOnShiftEnabled,
     testSent,
     backgroundPushScheduled,
     handleEnableNotifications,
     handleSendTestNotification,
     toggleTaskAlerts,
     toggleShiftAlerts,
+    toggleOnlyOnShift,
   };
 }
 
@@ -136,12 +150,14 @@ export function NotificationSettingsCard({ authenticatedEmployee }: { authentica
     iosStatus,
     taskAlertsEnabled,
     shiftAlertsEnabled,
+    onlyOnShiftEnabled,
     testSent,
     backgroundPushScheduled,
     handleEnableNotifications,
     handleSendTestNotification,
     toggleTaskAlerts,
     toggleShiftAlerts,
+    toggleOnlyOnShift,
   } = useNotifications(authenticatedEmployee);
 
   return (
@@ -277,6 +293,25 @@ export function NotificationSettingsCard({ authenticatedEmployee }: { authentica
                 <div
                   className={`h-[23px] w-[23px] rounded-full bg-white shadow-sm transition-transform duration-200 ${
                     shiftAlertsEnabled ? 'translate-x-[18px]' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-[14px] font-semibold">Only Alert When On Shift</p>
+                <p className="text-[11px] text-zinc-400">Silence task alarms when off shift or on another shift</p>
+              </div>
+              <button
+                type="button"
+                onClick={toggleOnlyOnShift}
+                style={{ backgroundColor: onlyOnShiftEnabled ? IOS_SWITCH_ON : IOS_SWITCH_OFF }}
+                className="relative h-[27px] w-[45px] shrink-0 rounded-full p-0.5 transition-colors duration-200"
+              >
+                <div
+                  className={`h-[23px] w-[23px] rounded-full bg-white shadow-sm transition-transform duration-200 ${
+                    onlyOnShiftEnabled ? 'translate-x-[18px]' : 'translate-x-0'
                   }`}
                 />
               </button>

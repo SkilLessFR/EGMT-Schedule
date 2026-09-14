@@ -1,6 +1,6 @@
 import type React from 'react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronLeft, ChevronRight, Activity, Users, ShieldAlert, Layers, ArrowLeftRight, Check, AlertCircle, XCircle, CalendarDays, Send, Loader2 } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, Activity, Users, ShieldAlert, Layers, ArrowLeftRight, Check, AlertCircle, XCircle, Send, Loader2 } from 'lucide-react';
 import type { RosterData, ShiftEvent } from './types';
 import { sendSwapNotificationRequest } from './swapNotificationService';
 import {
@@ -146,7 +146,12 @@ const SwapCandidateRow = memo(function SwapCandidateRow({
   isSent: boolean;
 }) {
   const { label, text, ring, Icon } = SEVERITY_STYLES[candidate.severity];
-  const blockStyle = SEVERITY_STYLES[candidate.blockResult.severity];
+  const isReview = candidate.severity === 'warning';
+
+  // Get the most specific, helpful note
+  const note = candidate.partialBlockNote
+    || candidate.blockDebt?.debtReason
+    || (candidate.reasons.length > 0 ? candidate.reasons[0] : null);
 
   return (
     <div className={`rounded-xl border border-white/5 bg-zinc-950/50 ring-1 ${ring} transition-colors`}>
@@ -163,60 +168,24 @@ const SwapCandidateRow = memo(function SwapCandidateRow({
         </div>
       </button>
       {expanded && (
-        <div className="space-y-3 border-t border-white/5 px-3 pb-3 pt-2">
-          <div className="rounded-lg bg-white/5 p-2.5 space-y-1.5">
-            <div className="flex items-center gap-1.5 text-zinc-300">
-              <CalendarDays className="size-3.5 text-cyan-400" />
-              <span className="font-mono text-[10px] font-bold uppercase tracking-wider">Overview</span>
-            </div>
-
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="text-zinc-400">Your block</span>
-              <span className="font-mono font-semibold text-zinc-200">
-                {shiftLabel(candidate.requesterBlock.shift)} {candidate.requesterBlock.startDate.slice(5)} → {candidate.requesterBlock.endDate.slice(5)}
-              </span>
-            </div>
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="text-zinc-400">Their block</span>
-              <span className="font-mono font-semibold text-zinc-200">
-                {shiftLabel(candidate.candidateBlock.shift)} {candidate.candidateBlock.startDate.slice(5)} → {candidate.candidateBlock.endDate.slice(5)}
-              </span>
-            </div>
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="text-zinc-400">Overlap</span>
-              <span className="font-mono font-semibold text-cyan-400">
-                {candidate.overlapDates.length} day{candidate.overlapDates.length === 1 ? '' : 's'}
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5 pt-1">
-              <blockStyle.Icon className={`size-3 ${blockStyle.text}`} />
-              <span className={`font-mono text-[10px] font-black uppercase tracking-wider ${blockStyle.text}`}>
-                Block swap: {blockStyle.label}
-              </span>
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-lime-500/20 bg-lime-500/5 p-2.5">
-            <p className="font-mono text-[10px] font-bold uppercase tracking-wider text-lime-400">Whole-block outcome</p>
-            <p className="mt-1 text-[12px] leading-relaxed text-zinc-200">
-              {candidate.blockDebt?.debtReason ?? 'If you take the whole block, this is the block-level trade outcome.'}
-            </p>
-          </div>
-
-          {candidate.partialBlockNote && (
-            <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-2.5">
-              <p className="font-mono text-[10px] font-bold uppercase tracking-wider text-amber-400">Note</p>
-              <p className="mt-1 text-[12px] leading-relaxed text-zinc-200">{candidate.partialBlockNote}</p>
+        <div className="space-y-3 border-t border-white/5 px-3 pb-3 pt-2.5">
+          {isReview ? (
+            note && (
+              <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-2.5">
+                <p className="font-mono text-[10px] font-bold uppercase tracking-wider text-amber-400">Note</p>
+                <p className="mt-1 text-[12px] leading-relaxed text-zinc-200">{note}</p>
+              </div>
+            )
+          ) : (
+            <div className="rounded-xl border border-lime-500/20 bg-lime-500/10 p-2.5">
+              <p className="font-mono text-[10px] font-bold uppercase tracking-wider text-lime-400">Direct Swap</p>
+              <p className="mt-1 text-[12px] leading-relaxed text-zinc-200">
+                {note ?? 'Direct 1:1 shift swap with no schedule conflicts.'}
+              </p>
             </div>
           )}
 
-          <ul className="space-y-1">
-            {candidate.reasons.map((reason: string, i: number) => (
-              <li key={i} className="font-mono text-[11px] leading-snug text-zinc-400">– {reason}</li>
-            ))}
-          </ul>
-
-          <div className="flex items-center gap-2 pt-1">
+          <div className="flex items-center gap-2 pt-0.5">
             <button
               onClick={onSend}
               disabled={isSending}
@@ -362,11 +331,11 @@ const SwapFinderSection = memo(function SwapFinderSection({
     });
 
     return [
-      { key: 'whole-block', label: 'Whole block change', items: wholeBlock },
-      { key: 'remaining-block', label: 'Swap remaining of the block', items: remainingBlock },
-      { key: 'partial-block', label: 'Partial block change', items: partialBlock },
-      { key: 'day-only', label: 'Day only change', items: dayOnly },
-      { key: 'off-day', label: 'Off day change', items: offDay },
+      { key: 'whole-block', label: 'Whole Block', items: wholeBlock },
+      { key: 'remaining-block', label: 'Remaining Block', items: remainingBlock },
+      { key: 'partial-block', label: 'Partial Block', items: partialBlock },
+      { key: 'day-only', label: 'Single Day', items: dayOnly },
+      { key: 'off-day', label: 'Off Day', items: offDay },
     ];
   }, [candidates, requesterMessageParts, roster]);
 
@@ -404,18 +373,19 @@ const SwapFinderSection = memo(function SwapFinderSection({
               )}
 
               {groups.some((group) => group.items.length > 0) ? (
-                groups.map((group) => (
-                  <div key={group.key} className="space-y-2">
-                    <div className="flex items-center justify-between border-b border-white/5 pb-1">
-                      <span className="font-mono text-[10px] font-black uppercase tracking-wider text-zinc-300">
-                        {group.label}
-                      </span>
-                      <span className="font-mono text-[9px] uppercase tracking-wider text-zinc-500">
-                        {group.items.length}
-                      </span>
-                    </div>
+                groups
+                  .filter((group) => group.items.length > 0)
+                  .map((group) => (
+                    <div key={group.key} className="space-y-2">
+                      <div className="flex items-center justify-between border-b border-white/5 pb-1">
+                        <span className="font-mono text-[10px] font-black uppercase tracking-wider text-zinc-300">
+                          {group.label}
+                        </span>
+                        <span className="font-mono text-[9px] uppercase tracking-wider text-zinc-500">
+                          {group.items.length}
+                        </span>
+                      </div>
 
-                    {group.items.length > 0 ? (
                       <div className="space-y-1.5">
                         {group.items.map((candidate) => (
                           <SwapCandidateRow
@@ -429,11 +399,8 @@ const SwapFinderSection = memo(function SwapFinderSection({
                           />
                         ))}
                       </div>
-                    ) : (
-                      <p className="font-mono text-[10px] italic text-zinc-500">No option in this category.</p>
-                    )}
-                  </div>
-                ))
+                    </div>
+                  ))
               ) : (
                 <p className="font-mono text-xs text-zinc-400 italic py-1">No swap candidates available for this day.</p>
               )}
