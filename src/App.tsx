@@ -700,6 +700,15 @@ export default function App() {
   const rosterIndex = useMemo(() => buildRosterIndex(roster), [roster]);
   const rosterDateSet = useMemo(() => new Set(roster?.dateColumns.map((d) => d.isoDate) ?? []), [roster]);
   const filteredEmployees = useMemo(() => roster?.employees.filter((name) => name.toLowerCase().includes(query.toLowerCase())) ?? [], [query, roster]);
+  const isAlexandruStoian = useMemo(() => {
+    const current = authenticatedEmployee || selectedEmployee;
+    if (!current) return false;
+    return (
+      current === 'Stoian Alexandru-Gabriel' ||
+      current === 'Alexandru Stoian' ||
+      (/stoian/i.test(current) && /alexandru/i.test(current))
+    );
+  }, [authenticatedEmployee, selectedEmployee]);
   const calendarDays = useMemo(() => monthDays(currentMonth, currentYear), [currentMonth, currentYear]);
   const title = useMemo(() => new Intl.DateTimeFormat('en', { month: 'long', year: 'numeric' }).format(new Date(currentYear, currentMonth)), [currentMonth, currentYear]);
   const todayIso = useMemo(() => iso(new Date()), []);
@@ -1643,95 +1652,97 @@ export default function App() {
                 </section>
 
                 <section className="mt-6 lg:mt-0 space-y-4">
-                  <div>
-                    <div className="flex items-center justify-between px-1">
-                      <h3 className="text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Cloudflare KV Schedule Sync</h3>
-                      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold ${scheduleSource === 'kv' ? 'bg-lime-500/10 text-lime-500' : 'bg-zinc-500/10 text-zinc-400'}`}>
-                        <Cloud className="size-3" />
-                        {scheduleSource === 'kv' ? 'Live KV' : 'Local Bundle'}
-                      </span>
-                    </div>
+                  {isAlexandruStoian && (
+                    <div className="hidden lg:block">
+                      <div className="flex items-center justify-between px-1">
+                        <h3 className="text-[13px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Cloudflare KV Schedule Sync</h3>
+                        <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold ${scheduleSource === 'kv' ? 'bg-lime-500/10 text-lime-500' : 'bg-zinc-500/10 text-zinc-400'}`}>
+                          <Cloud className="size-3" />
+                          {scheduleSource === 'kv' ? 'Live KV' : 'Local Bundle'}
+                        </span>
+                      </div>
 
-                    <div className={`mt-2 p-4 space-y-3 ${GLASS_CARD}`}>
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        accept=".xlsx,.xls"
-                        onChange={handleFileSelect}
-                        className="hidden"
-                      />
+                      <div className={`mt-2 p-4 space-y-3 ${GLASS_CARD}`}>
+                        <input
+                          ref={fileInputRef}
+                          type="file"
+                          accept=".xlsx,.xls"
+                          onChange={handleFileSelect}
+                          className="hidden"
+                        />
 
-                      <button
-                        type="button"
-                        onClick={() => fileInputRef.current?.click()}
-                        className="flex w-full flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-zinc-950/10 p-4 transition-colors hover:border-blue-500/40 hover:bg-blue-500/5 dark:border-white/10 dark:hover:border-blue-400/40 text-center cursor-pointer"
-                      >
-                        <UploadCloud className="size-6 text-blue-500" />
-                        <div>
-                          <p className="text-[14px] font-semibold">{uploadFile ? uploadFile.name : "Upload Boss's Excel (.xlsx)"}</p>
-                          <p className="text-[11px] text-zinc-400 dark:text-zinc-500">Tap to select or drop updated schedule file</p>
-                        </div>
-                      </button>
-
-                      {parsedPreview && (
-                        <div className="rounded-xl bg-zinc-950/5 p-3.5 dark:bg-white/5 space-y-2 border border-zinc-950/5 dark:border-white/5 text-[13px]">
-                          <div className="flex items-center justify-between">
-                            <span className="text-zinc-400">Detected Period:</span>
-                            <span className="font-semibold text-blue-500">
-                              {new Intl.DateTimeFormat('en', { month: 'long', year: 'numeric' }).format(new Date(parsedPreview.year, parsedPreview.month))}
-                            </span>
+                        <button
+                          type="button"
+                          onClick={() => fileInputRef.current?.click()}
+                          className="flex w-full flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-zinc-950/10 p-4 transition-colors hover:border-blue-500/40 hover:bg-blue-500/5 dark:border-white/10 dark:hover:border-blue-400/40 text-center cursor-pointer"
+                        >
+                          <UploadCloud className="size-6 text-blue-500" />
+                          <div>
+                            <p className="text-[14px] font-semibold">{uploadFile ? uploadFile.name : "Upload Boss's Excel (.xlsx)"}</p>
+                            <p className="text-[11px] text-zinc-400 dark:text-zinc-500">Tap to select or drop updated schedule file</p>
                           </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-zinc-400">Employees Found:</span>
-                            <span className="font-mono font-semibold">{parsedPreview.employees.length}</span>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-zinc-400">Calendar Days:</span>
-                            <span className="font-mono font-semibold">{parsedPreview.dateColumns.length} days</span>
-                          </div>
+                        </button>
 
-                          <div className="pt-2 border-t border-zinc-950/5 dark:border-white/5 flex items-center justify-between">
-                            <label className="text-[12px] flex items-center gap-2 cursor-pointer select-none">
+                        {parsedPreview && (
+                          <div className="rounded-xl bg-zinc-950/5 p-3.5 dark:bg-white/5 space-y-2 border border-zinc-950/5 dark:border-white/5 text-[13px]">
+                            <div className="flex items-center justify-between">
+                              <span className="text-zinc-400">Detected Period:</span>
+                              <span className="font-semibold text-blue-500">
+                                {new Intl.DateTimeFormat('en', { month: 'long', year: 'numeric' }).format(new Date(parsedPreview.year, parsedPreview.month))}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span className="text-zinc-400">Employees Found:</span>
+                              <span className="font-mono font-semibold">{parsedPreview.employees.length}</span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span className="text-zinc-400">Calendar Days:</span>
+                              <span className="font-mono font-semibold">{parsedPreview.dateColumns.length} days</span>
+                            </div>
+
+                            <div className="pt-2 border-t border-zinc-950/5 dark:border-white/5 flex items-center justify-between">
+                              <label className="text-[12px] flex items-center gap-2 cursor-pointer select-none">
+                                <input
+                                  type="checkbox"
+                                  checked={mergeWithExisting}
+                                  onChange={(e) => setMergeWithExisting(e.target.checked)}
+                                  className="rounded text-blue-500"
+                                />
+                                Merge with existing months
+                              </label>
+                            </div>
+
+                            <div className="pt-2 border-t border-zinc-950/5 dark:border-white/5">
                               <input
-                                type="checkbox"
-                                checked={mergeWithExisting}
-                                onChange={(e) => setMergeWithExisting(e.target.checked)}
-                                className="rounded text-blue-500"
+                                type="password"
+                                value={adminPin}
+                                onChange={(e) => setAdminPin(e.target.value)}
+                                placeholder="Admin PIN (if configured)"
+                                className="w-full rounded-lg bg-zinc-950/5 dark:bg-white/5 px-3 py-1.5 text-xs outline-none border border-zinc-950/10 dark:border-white/10"
                               />
-                              Merge with existing months
-                            </label>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={handlePublishRoster}
+                              disabled={isUploading}
+                              className="w-full mt-2 flex items-center justify-center gap-2 rounded-xl bg-blue-500 hover:bg-blue-600 text-white font-bold py-2.5 px-4 text-[13px] shadow transition-all active:scale-98 disabled:opacity-50 cursor-pointer"
+                            >
+                              {isUploading ? <Loader2 className="size-4 animate-spin" /> : <Cloud className="size-4" />}
+                              {isUploading ? 'Publishing to KV...' : 'Publish to Cloudflare KV'}
+                            </button>
                           </div>
+                        )}
 
-                          <div className="pt-2 border-t border-zinc-950/5 dark:border-white/5">
-                            <input
-                              type="password"
-                              value={adminPin}
-                              onChange={(e) => setAdminPin(e.target.value)}
-                              placeholder="Admin PIN (if configured)"
-                              className="w-full rounded-lg bg-zinc-950/5 dark:bg-white/5 px-3 py-1.5 text-xs outline-none border border-zinc-950/10 dark:border-white/10"
-                            />
+                        {uploadStatus && (
+                          <div className={`p-3 rounded-xl text-[13px] flex items-center gap-2 ${uploadStatus.type === 'success' ? 'bg-lime-500/10 text-lime-600 dark:text-lime-400 border border-lime-500/20' : 'bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20'}`}>
+                            {uploadStatus.type === 'success' ? <Check className="size-4 shrink-0" /> : <AlertTriangle className="size-4 shrink-0" />}
+                            <p className="leading-snug">{uploadStatus.message}</p>
                           </div>
-
-                          <button
-                            type="button"
-                            onClick={handlePublishRoster}
-                            disabled={isUploading}
-                            className="w-full mt-2 flex items-center justify-center gap-2 rounded-xl bg-blue-500 hover:bg-blue-600 text-white font-bold py-2.5 px-4 text-[13px] shadow transition-all active:scale-98 disabled:opacity-50 cursor-pointer"
-                          >
-                            {isUploading ? <Loader2 className="size-4 animate-spin" /> : <Cloud className="size-4" />}
-                            {isUploading ? 'Publishing to KV...' : 'Publish to Cloudflare KV'}
-                          </button>
-                        </div>
-                      )}
-
-                      {uploadStatus && (
-                        <div className={`p-3 rounded-xl text-[13px] flex items-center gap-2 ${uploadStatus.type === 'success' ? 'bg-lime-500/10 text-lime-600 dark:text-lime-400 border border-lime-500/20' : 'bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20'}`}>
-                          {uploadStatus.type === 'success' ? <Check className="size-4 shrink-0" /> : <AlertTriangle className="size-4 shrink-0" />}
-                          <p className="leading-snug">{uploadStatus.message}</p>
-                        </div>
-                      )}
+                        )}
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   <div>
                     <div className="flex items-center justify-between px-1">
