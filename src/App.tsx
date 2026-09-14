@@ -1882,8 +1882,7 @@ export default function App() {
                       value={query}
                       onChange={(e) => setQuery(e.target.value)}
                       placeholder="Search employee name..."
-                      autoFocus
-                      className="w-full bg-transparent text-[14px] outline-none placeholder:text-zinc-400"
+                      className="w-full bg-transparent text-[16px] outline-none placeholder:text-zinc-400"
                     />
                     {query && (
                       <button
