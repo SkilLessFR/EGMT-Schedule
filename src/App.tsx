@@ -1618,7 +1618,7 @@ export default function App() {
             )}
 
             {activeTab === 'settings' && (
-              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-24 pt-6 lg:px-0 lg:pb-8">
+              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-44 pt-6 lg:px-0 lg:pb-8">
                 <h1 className="text-[34px] font-bold tracking-tight lg:hidden">Settings</h1>
 
                 <div className="lg:grid lg:grid-cols-2 lg:items-start lg:gap-4">
