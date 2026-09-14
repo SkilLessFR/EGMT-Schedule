@@ -1,7 +1,7 @@
 // App.tsx
 import type React from 'react';
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, Moon, Search, Settings2, Sun, Users, Wallet, CheckSquare, Plus, Trash2, Bell, AlertTriangle, Edit2, X, UploadCloud, Loader2, Cloud, ShieldCheck, LogOut, Lock, ArrowLeftRight, Save } from 'lucide-react';
+import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, ChevronDown, Moon, Search, Settings2, Sun, Users, Wallet, CheckSquare, Plus, Trash2, Bell, AlertTriangle, Edit2, X, UploadCloud, Loader2, Cloud, ShieldCheck, LogOut, Lock, ArrowLeftRight, Save } from 'lucide-react';
 import type { RosterData, ShiftEvent } from './types';
 import { parseRoster, mergeRosters } from './parser';
 import {
@@ -14,6 +14,7 @@ import {
   GLASS_NAV,
   findShiftTransformationPreview,
   shiftLabel,
+  initials,
   isEmployeeOnShift,
   ONLY_ON_SHIFT_NOTIFS_KEY,
 } from './scheduleUtils';
@@ -31,7 +32,6 @@ import {
   loadInitialTasks,
   fetchTasksFromCloud,
   saveTasksToCloud,
-  exportTasksAsJsonFile,
   TASKS_UPDATED_AT_KEY,
 } from './taskService';
 
@@ -165,6 +165,7 @@ export default function App() {
   const [selectedEmployee, setSelectedEmployee] = useState('');
   const [authenticatedEmployee, setAuthenticatedEmployee] = useState<string | null>(() => localStorage.getItem(AUTH_STORAGE_KEY));
   const [authModalTarget, setAuthModalTarget] = useState<string | null>(null);
+  const [isEmployeeDialogOpen, setIsEmployeeDialogOpen] = useState(false);
   const [incomingSwapRequests, setIncomingSwapRequests] = useState<SwapRequestItem[]>([]);
   const seenSwapIdsRef = useRef<Set<string>>(new Set());
   const [query, setQuery] = useState('');
@@ -1101,47 +1102,49 @@ export default function App() {
             )}
 
             {activeTab === 'solver' && (
-              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-24 pt-6 lg:px-0 lg:pb-8">
-                <div className="mb-4 flex items-center justify-between gap-3">
-                  <div>
-                    <h1 className="text-[30px] font-bold tracking-tight">Shift transformation</h1>
-                    <p className="text-[13px] text-zinc-400">Build a month-level swap preview for {selectedEmployee}</p>
+              <div className="flex min-h-0 w-full max-w-full flex-1 flex-col overflow-y-auto overflow-x-hidden px-4 pb-24 pt-6 sm:px-5 lg:px-0 lg:pb-8">
+                <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <h1 className="text-[22px] font-bold tracking-tight sm:text-[30px]">Shift transformation</h1>
+                    <p className="text-[12px] text-zinc-400 sm:text-[13px] truncate">Build a month-level swap preview for {selectedEmployee}</p>
                   </div>
-                  <button
-                    onClick={() => {
-                      if (!roster || !selectedEmployee) return;
-                      setSolverSimulationVariant(0);
-                      setSolverResult(findShiftTransformationPreview(roster, selectedEmployee, solverTargetShift, currentMonth, currentYear, 0));
-                    }}
-                    className="rounded-xl bg-blue-500 px-3 py-2 text-[12px] font-bold uppercase tracking-wider text-white"
-                  >
-                    Run solver
-                  </button>
-                  <button
-                    onClick={() => {
-                      if (!roster || !selectedEmployee) return;
-                      const nextVariant = solverSimulationVariant + 1;
-                      setSolverSimulationVariant(nextVariant);
-                      setSolverResult(findShiftTransformationPreview(roster, selectedEmployee, solverTargetShift, currentMonth, currentYear, nextVariant));
-                    }}
-                    disabled={!solverResult}
-                    className="rounded-xl border border-white/15 px-3 py-2 text-[12px] font-bold uppercase tracking-wider text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    Resimulate change
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={() => {
+                        if (!roster || !selectedEmployee) return;
+                        setSolverSimulationVariant(0);
+                        setSolverResult(findShiftTransformationPreview(roster, selectedEmployee, solverTargetShift, currentMonth, currentYear, 0));
+                      }}
+                      className="flex-1 sm:flex-none rounded-xl bg-blue-500 px-3 py-2 text-[12px] font-bold uppercase tracking-wider text-white text-center transition-all active:scale-95 cursor-pointer"
+                    >
+                      Run solver
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!roster || !selectedEmployee) return;
+                        const nextVariant = solverSimulationVariant + 1;
+                        setSolverSimulationVariant(nextVariant);
+                        setSolverResult(findShiftTransformationPreview(roster, selectedEmployee, solverTargetShift, currentMonth, currentYear, nextVariant));
+                      }}
+                      disabled={!solverResult}
+                      className="flex-1 sm:flex-none rounded-xl border border-white/15 px-3 py-2 text-[12px] font-bold uppercase tracking-wider text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40 text-center transition-all active:scale-95 cursor-pointer"
+                    >
+                      Resimulate change
+                    </button>
+                  </div>
                 </div>
 
-                <div className="mb-4 grid grid-cols-2 gap-3">
-                  <div className={`rounded-2xl border border-white/10 bg-zinc-900/40 p-3 ${GLASS_CARD}`}>
+                <div className="mb-4 grid grid-cols-2 gap-2.5 sm:gap-3 min-w-0">
+                  <div className={`min-w-0 rounded-2xl border border-white/10 bg-zinc-900/40 p-3 ${GLASS_CARD}`}>
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400">Employee</label>
-                    <div className="mt-2 text-[16px] font-bold">{selectedEmployee}</div>
+                    <div className="mt-2 text-[14px] sm:text-[16px] font-bold truncate" title={selectedEmployee}>{selectedEmployee}</div>
                   </div>
-                  <div className={`rounded-2xl border border-white/10 bg-zinc-900/40 p-3 ${GLASS_CARD}`}>
+                  <div className={`min-w-0 rounded-2xl border border-white/10 bg-zinc-900/40 p-3 ${GLASS_CARD}`}>
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400">Target shift</label>
                     <select
                       value={solverTargetShift}
                       onChange={(e) => setSolverTargetShift(e.target.value)}
-                      className="mt-2 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-2 py-2 text-[14px] text-zinc-100 outline-none [color-scheme:dark]"
+                      className="mt-2 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-2 py-2 text-[13px] sm:text-[14px] text-zinc-100 outline-none [color-scheme:dark]"
                     >
                       {['M', 'A', 'N', 'OFF'].map((shift) => (
                         <option key={shift} value={shift} className="bg-zinc-900 text-zinc-100">
@@ -1154,26 +1157,26 @@ export default function App() {
 
                 {solverResult && (
                   <>
-                    <div className={`mb-4 rounded-2xl border ${solverResult.possible ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-rose-500/30 bg-rose-500/5'} p-3`}>
+                    <div className={`mb-4 rounded-2xl border ${solverResult.possible ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-rose-500/30 bg-rose-500/5'} p-3 min-w-0`}>
                       <div className="font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-300">Result</div>
                       <div className={`mt-1 text-[15px] font-bold ${solverResult.possible ? 'text-emerald-400' : 'text-rose-400'}`}>
                         {solverResult.possible ? 'Possible' : 'Impossible'}
                       </div>
-                      <p className="mt-2 text-[12px] leading-relaxed text-zinc-200">{solverResult.summary}</p>
+                      <p className="mt-2 text-[12px] leading-relaxed text-zinc-200 break-words">{solverResult.summary}</p>
                       {solverResult.firstAttempt && (
-                        <p className="mt-2 text-[11px] text-cyan-300">First attempted branch: {solverResult.firstAttempt}</p>
+                        <p className="mt-2 text-[11px] text-cyan-300 break-words">First attempted branch: {solverResult.firstAttempt}</p>
                       )}
                     </div>
 
-                    <div className="mb-4 rounded-2xl border border-white/10 bg-zinc-900/40 p-3">
+                    <div className="mb-4 rounded-2xl border border-white/10 bg-zinc-900/40 p-3 min-w-0 overflow-hidden">
                       <div className="mb-2 font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-400">Required swaps</div>
                       {solverResult.swaps.length > 0 ? (
-                        <div className="space-y-2">
+                        <div className="space-y-2 min-w-0">
                           {solverResult.swaps.map((swap, index) => (
-                            <div key={`${swap.isoDate}-${swap.otherEmployee}-${index}`} className="rounded-xl border border-white/5 bg-white/5 p-2 text-[12px] text-zinc-200">
-                              <div className="font-semibold">{formatRequiredSwap(swap)}</div>
-                              <div className="mt-1 text-zinc-300">{swap.employee} ↔ {swap.otherEmployee}</div>
-                              <div className="mt-1 flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider">
+                            <div key={`${swap.isoDate}-${swap.otherEmployee}-${index}`} className="rounded-xl border border-white/5 bg-white/5 p-2.5 text-[12px] text-zinc-200 min-w-0 break-words">
+                              <div className="font-semibold break-words">{formatRequiredSwap(swap)}</div>
+                              <div className="mt-1 text-zinc-300 break-words">{swap.employee} ↔ {swap.otherEmployee}</div>
+                              <div className="mt-1 flex flex-wrap items-center gap-2 font-mono text-[10px] uppercase tracking-wider">
                                 <span className="text-cyan-300">{swap.from} → {swap.to}</span>
                                 {swap.type && <span className={swap.status === 'good' ? 'text-emerald-400' : 'text-amber-300'}>{swap.type === 'WHOLE_BLOCK' ? 'Good' : swap.type === 'PARTIAL_BLOCK' ? 'Under review' : 'Eligible'}</span>}
                               </div>
@@ -1185,11 +1188,11 @@ export default function App() {
                       )}
                     </div>
 
-                    <div className="rounded-2xl border border-white/10 bg-zinc-900/40 p-3">
+                    <div className="rounded-2xl border border-white/10 bg-zinc-900/40 p-2.5 sm:p-3 min-w-0 overflow-hidden">
                       <div className="mb-2 font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-400">Rendered preview</div>
-                      <div className="grid grid-cols-7 gap-1 text-center text-[10px] text-zinc-400">
+                      <div className="grid grid-cols-7 gap-0.5 sm:gap-1 text-center text-[10px] text-zinc-400 min-w-0 w-full">
                         {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((day, i) => (
-                          <div key={`${day}-${i}`} className="py-1">{day}</div>
+                          <div key={`${day}-${i}`} className="py-1 text-[10px] font-semibold">{day}</div>
                         ))}
                         {monthDays(currentMonth, currentYear).map((day) => {
                           const dayIso = iso(day);
@@ -1201,9 +1204,9 @@ export default function App() {
                           });
                           const previewTitle = sourceSwap ? `Taken from ${sourceSwap.otherEmployee}` : undefined;
                           return (
-                            <div key={dayIso} title={previewTitle} aria-label={previewTitle} className={`rounded-lg border border-white/5 p-1 ${day.getMonth() !== currentMonth ? 'opacity-30' : ''}`}>
-                              <div className="text-[10px] text-zinc-500">{day.getDate()}</div>
-                              <div className={`mt-1 rounded-full px-1 py-0.5 text-[9px] font-bold ${colorFor(finalShift).bg} ${colorFor(finalShift).text}`}>
+                            <div key={dayIso} title={previewTitle} aria-label={previewTitle} className={`min-w-0 rounded-lg border border-white/5 p-0.5 sm:p-1 ${day.getMonth() !== currentMonth ? 'opacity-30' : ''}`}>
+                              <div className="text-[9px] sm:text-[10px] text-zinc-500">{day.getDate()}</div>
+                              <div className={`mt-0.5 sm:mt-1 truncate rounded-full px-0.5 sm:px-1 py-0.5 text-[8px] sm:text-[9px] font-bold ${colorFor(finalShift).bg} ${colorFor(finalShift).text}`}>
                                 {finalShift === 'OFF' ? 'OFF' : finalShift}
                               </div>
                             </div>
@@ -1349,14 +1352,6 @@ export default function App() {
                         <span>Cloud Synced</span>
                       </span>
                     )}
-                    <button
-                      type="button"
-                      onClick={() => exportTasksAsJsonFile(tasks)}
-                      className="rounded-full bg-zinc-950/5 dark:bg-white/5 px-3 py-1.5 text-[11px] font-semibold text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
-                      title="Download backup tasks.json file"
-                    >
-                      Export JSON
-                    </button>
                   </div>
                 </div>
                 
@@ -1780,41 +1775,35 @@ export default function App() {
                       </div>
                     )}
 
-                    <div className={`mt-2 ${GLASS_CARD}`}>
-                      <div className="flex items-center gap-2 px-4 pt-3.5">
-                        <Search className="size-4 text-zinc-400"/>
-                        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search employee" className="w-full bg-transparent py-2 text-[15px] outline-none"/>
-                      </div>
-                      <div className="max-h-64 divide-y divide-zinc-950/[0.06] overflow-y-auto dark:divide-white/[0.06]">
-                        {filteredEmployees.map((name) => {
-                          const isAuth = name === authenticatedEmployee;
-                          const isSelected = name === selectedEmployee;
-                          return (
-                            <button
-                              key={name}
-                              onClick={() => handleSelectEmployee(name)}
-                              className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-zinc-950/[0.02] dark:hover:bg-white/[0.02] transition-colors"
-                            >
-                              <div className="flex items-center gap-2.5">
-                                {isAuth ? (
-                                  <ShieldCheck className="size-4 text-emerald-500" />
-                                ) : (
-                                  <Lock className="size-3.5 text-zinc-400 opacity-60" />
-                                )}
-                                <span className={`text-[15px] ${isAuth ? 'font-bold text-emerald-600 dark:text-emerald-400' : ''}`}>{name}</span>
-                              </div>
-                              <div className="flex items-center gap-1.5">
-                                {isAuth && (
-                                  <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-500">
-                                    Verified
-                                  </span>
-                                )}
-                                {isSelected && <Check className="size-4 text-blue-500" />}
-                              </div>
-                            </button>
-                          );
-                        })}
-                      </div>
+                    <div className="mt-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setQuery('');
+                          setIsEmployeeDialogOpen(true);
+                        }}
+                        className={`flex w-full items-center justify-between p-4 ${GLASS_CARD} text-left transition-all hover:bg-zinc-950/[0.03] dark:hover:bg-white/[0.03] active:scale-[0.99] cursor-pointer`}
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-blue-500/10 text-blue-500">
+                            <Users className="size-5" />
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
+                              Active Profile
+                            </p>
+                            <p className="text-[15px] font-bold truncate text-zinc-900 dark:text-zinc-100">
+                              {selectedEmployee || 'Select Employee'}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="rounded-xl bg-blue-500 px-3 py-1.5 text-[12px] font-bold text-white shadow-sm hover:bg-blue-600 transition-colors">
+                            Select Employee
+                          </span>
+                          <ChevronDown className="size-4 text-zinc-400" />
+                        </div>
+                      </button>
                     </div>
                   </div>
                 </section>
@@ -1840,6 +1829,127 @@ export default function App() {
             onClose={() => setAuthModalTarget(null)}
             onAuthenticated={handleAuthSuccess}
           />
+
+          {/* Employee Selection Dialog Modal */}
+          {isEmployeeDialogOpen && (
+            <div
+              className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 p-0 sm:p-4 backdrop-blur-sm animate-fadeIn"
+              onClick={() => setIsEmployeeDialogOpen(false)}
+            >
+              <div
+                className="relative flex flex-col w-full max-w-lg rounded-t-3xl sm:rounded-3xl border border-zinc-950/10 bg-white/95 dark:border-white/10 dark:bg-zinc-900/95 shadow-2xl backdrop-blur-xl text-zinc-950 dark:text-white max-h-[85vh] sm:max-h-[75vh] overflow-hidden"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {/* Mobile drag handle */}
+                <div className="flex sm:hidden justify-center pt-3 pb-1">
+                  <div className="h-1 w-10 rounded-full bg-zinc-300 dark:bg-zinc-700" />
+                </div>
+
+                {/* Dialog Header */}
+                <div className="flex items-center justify-between px-5 pt-3 pb-3 border-b border-zinc-950/5 dark:border-white/5">
+                  <div>
+                    <h3 className="text-[18px] font-bold tracking-tight">Select Employee</h3>
+                    <p className="text-[12px] text-zinc-500 dark:text-zinc-400">
+                      Choose an employee to view their schedule and shifts
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsEmployeeDialogOpen(false)}
+                    className="flex size-8 items-center justify-center rounded-full text-zinc-400 hover:bg-zinc-950/5 dark:hover:bg-white/10 transition-colors cursor-pointer"
+                  >
+                    <X className="size-4" />
+                  </button>
+                </div>
+
+                {/* Search Input */}
+                <div className="px-5 py-3 border-b border-zinc-950/5 dark:border-white/5">
+                  <div className="flex items-center gap-2.5 rounded-2xl bg-zinc-950/5 dark:bg-white/5 px-3.5 py-2">
+                    <Search className="size-4 shrink-0 text-zinc-400" />
+                    <input
+                      type="text"
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                      placeholder="Search employee name..."
+                      autoFocus
+                      className="w-full bg-transparent text-[14px] outline-none placeholder:text-zinc-400"
+                    />
+                    {query && (
+                      <button
+                        type="button"
+                        onClick={() => setQuery('')}
+                        className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 p-0.5 cursor-pointer"
+                      >
+                        <X className="size-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Employee List with isolated, smooth scrolling */}
+                <div className="flex-1 overflow-y-auto overscroll-contain divide-y divide-zinc-950/5 dark:divide-white/5 px-2 py-1">
+                  {filteredEmployees.length === 0 ? (
+                    <div className="py-12 text-center">
+                      <p className="text-[14px] font-medium text-zinc-400">No employees found</p>
+                      <p className="text-[12px] text-zinc-500 mt-1">Try a different search term</p>
+                    </div>
+                  ) : (
+                    filteredEmployees.map((name) => {
+                      const isAuth = name === authenticatedEmployee;
+                      const isSelected = name === selectedEmployee;
+                      return (
+                        <button
+                          key={name}
+                          type="button"
+                          onClick={() => {
+                            handleSelectEmployee(name);
+                            setIsEmployeeDialogOpen(false);
+                          }}
+                          className={`flex w-full items-center justify-between rounded-xl px-4 py-3 text-left transition-colors cursor-pointer ${
+                            isSelected
+                              ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-semibold'
+                              : 'hover:bg-zinc-950/5 dark:hover:bg-white/5'
+                          }`}
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className={`flex size-8 shrink-0 items-center justify-center rounded-xl font-mono text-[11px] font-bold ${
+                              isSelected
+                                ? 'bg-blue-500 text-white'
+                                : isAuth
+                                ? 'bg-emerald-500/20 text-emerald-500'
+                                : 'bg-zinc-950/5 dark:bg-white/10 text-zinc-500 dark:text-zinc-400'
+                            }`}>
+                              {initials(name)}
+                            </div>
+                            <div className="min-w-0">
+                              <span className={`block truncate text-[14px] ${isSelected || isAuth ? 'font-bold' : 'font-medium'}`}>
+                                {name}
+                              </span>
+                              {isAuth && (
+                                <span className="text-[11px] text-emerald-500 font-semibold">
+                                  Authenticated Profile
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            {isAuth ? (
+                              <span className="flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-500 border border-emerald-500/20">
+                                <ShieldCheck className="size-3" /> Verified
+                              </span>
+                            ) : (
+                              <Lock className="size-3.5 text-zinc-400 opacity-50" />
+                            )}
+                            {isSelected && <Check className="size-4 text-blue-500" />}
+                          </div>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Alarm Loop Intercept Modal */}
           {activeAlarmTask && (
