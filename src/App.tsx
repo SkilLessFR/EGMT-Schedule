@@ -1,7 +1,7 @@
 // App.tsx
 import type React from 'react';
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, ChevronDown, Moon, Search, Settings2, Sun, Users, Wallet, CheckSquare, Plus, Trash2, Bell, AlertTriangle, Edit2, X, UploadCloud, Loader2, Cloud, ShieldCheck, LogOut, Lock, ArrowLeftRight, Save } from 'lucide-react';
+import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, ChevronDown, Moon, Search, Settings2, Sun, Users, Wallet, CheckSquare, Plus, Trash2, Bell, AlertTriangle, Edit2, X, UploadCloud, Loader2, Cloud, ShieldCheck, LogOut, Lock, ArrowLeftRight, Save, Sparkles, RotateCcw, CheckCircle2, AlertCircle } from 'lucide-react';
 import type { RosterData, ShiftEvent } from './types';
 import { parseRoster, mergeRosters } from './parser';
 import {
@@ -849,11 +849,21 @@ export default function App() {
 
   const goToPreviousMonth = useCallback(() => {
     setCurrentMonth((m) => { const d = new Date(currentYear, m - 1); setCurrentYear(d.getFullYear()); return d.getMonth(); });
+    setSolverResult(null);
   }, [currentYear]);
 
   const goToNextMonth = useCallback(() => {
     setCurrentMonth((m) => { const d = new Date(currentYear, m + 1); setCurrentYear(d.getFullYear()); return d.getMonth(); });
+    setSolverResult(null);
   }, [currentYear]);
+
+  const hasRosterForCurrentMonth = useMemo(() => {
+    if (!roster) return false;
+    return roster.dateColumns.some((col) => {
+      const d = new Date(`${col.isoDate}T00:00:00`);
+      return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+    });
+  }, [roster, currentMonth, currentYear]);
 
   const monthGridRef = useRef<HTMLDivElement>(null);
   const monthDragStart = useRef<{ x: number; y: number } | null>(null);
@@ -1000,9 +1010,9 @@ export default function App() {
             </div>
           </nav>
 
-          <div className="flex min-h-0 flex-1 flex-col lg:overflow-y-auto">
+          <div className={`flex min-h-0 flex-1 flex-col ${activeTab === 'calendar' ? 'overflow-hidden' : 'overflow-y-auto overscroll-contain'}`}>
           <div className={`flex min-h-0 flex-1 flex-col transition-[filter] duration-200 ${sheetOpen ? 'pointer-events-none select-none blur-[1px]' : ''}`} aria-hidden={sheetOpen}>
-            <div className="mx-auto flex min-h-0 w-full flex-1 flex-col lg:max-w-4xl lg:px-10 lg:py-8">
+            <div className={`mx-auto flex w-full flex-col lg:max-w-4xl lg:px-10 lg:py-8 ${activeTab === 'calendar' ? 'min-h-0 flex-1' : ''}`}>
             {incomingSwapRequests.length > 0 && (
               <div className="mx-4 lg:mx-0 mb-3 space-y-2">
                 {incomingSwapRequests.map((req) => (
@@ -1111,152 +1121,246 @@ export default function App() {
             )}
 
             {activeTab === 'solver' && (
-              <div className="flex min-h-0 w-full max-w-full flex-1 flex-col overflow-y-auto px-4 pb-72 pt-6 sm:px-5 lg:px-0 lg:pb-8">
-                <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="flex items-center justify-between sm:justify-start gap-3 min-w-0">
-                    <div className="min-w-0">
-                      <h1 className="text-[22px] font-bold tracking-tight sm:text-[30px]">Shift transformation</h1>
-                      <p className="text-[12px] text-zinc-400 sm:text-[13px] truncate">{selectedEmployee} · {title}</p>
+              <div className="w-full px-4 pb-48 pt-4 sm:px-5 lg:px-0 lg:pb-8">
+                {/* Header & Month Navigator */}
+                <div className="mb-4 flex flex-col gap-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h1 className="text-[26px] font-bold tracking-tight sm:text-[30px]">Shift Solver</h1>
+                      <p className="text-[12px] text-zinc-500 dark:text-zinc-400 sm:text-[13px]">
+                        Automated schedule rebalancing
+                      </p>
                     </div>
-                    <div className="flex items-center gap-1 shrink-0 sm:hidden">
-                      <button
-                        type="button"
-                        onClick={goToPreviousMonth}
-                        className="flex size-8 items-center justify-center rounded-full bg-zinc-950/5 text-zinc-600 dark:bg-white/5 dark:text-zinc-300 active:scale-90 transition-transform cursor-pointer"
-                        title="Previous month"
-                      >
-                        <ChevronLeft className="size-4" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={goToNextMonth}
-                        className="flex size-8 items-center justify-center rounded-full bg-zinc-950/5 text-zinc-600 dark:bg-white/5 dark:text-zinc-300 active:scale-90 transition-transform cursor-pointer"
-                        title="Next month"
-                      >
-                        <ChevronRight className="size-4" />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <div className="hidden sm:flex items-center gap-1 mr-1">
-                      <button
-                        type="button"
-                        onClick={goToPreviousMonth}
-                        className="flex size-8 items-center justify-center rounded-full bg-zinc-950/5 text-zinc-600 dark:bg-white/5 dark:text-zinc-300 hover:bg-zinc-950/10 dark:hover:bg-white/10 transition-colors cursor-pointer"
-                        title="Previous month"
-                      >
-                        <ChevronLeft className="size-4" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={goToNextMonth}
-                        className="flex size-8 items-center justify-center rounded-full bg-zinc-950/5 text-zinc-600 dark:bg-white/5 dark:text-zinc-300 hover:bg-zinc-950/10 dark:hover:bg-white/10 transition-colors cursor-pointer"
-                        title="Next month"
-                      >
-                        <ChevronRight className="size-4" />
-                      </button>
-                    </div>
-                    <button
-                      onClick={() => {
-                        if (!roster || !selectedEmployee) return;
-                        setSolverSimulationVariant(0);
-                        setSolverResult(findShiftTransformationPreview(roster, selectedEmployee, solverTargetShift, currentMonth, currentYear, 0));
-                      }}
-                      className="flex-1 sm:flex-none rounded-xl bg-blue-500 px-3.5 py-2 text-[12px] font-bold uppercase tracking-wider text-white text-center transition-all active:scale-95 cursor-pointer shadow-sm"
-                    >
-                      Run solver
-                    </button>
-                    <button
-                      onClick={() => {
-                        if (!roster || !selectedEmployee) return;
-                        const nextVariant = solverSimulationVariant + 1;
-                        setSolverSimulationVariant(nextVariant);
-                        setSolverResult(findShiftTransformationPreview(roster, selectedEmployee, solverTargetShift, currentMonth, currentYear, nextVariant));
-                      }}
-                      disabled={!solverResult}
-                      className="flex-1 sm:flex-none rounded-xl border border-zinc-950/10 dark:border-white/15 px-3.5 py-2 text-[12px] font-bold uppercase tracking-wider text-zinc-800 dark:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40 text-center transition-all active:scale-95 cursor-pointer"
-                    >
-                      Resimulate change
-                    </button>
-                  </div>
-                </div>
 
-                <div className="mb-4 grid grid-cols-2 gap-2.5 sm:gap-3 min-w-0">
-                  <div className={`min-w-0 p-3 ${GLASS_CARD}`}>
-                    <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400">Employee</label>
-                    <div className="mt-1 text-[14px] sm:text-[16px] font-bold truncate text-zinc-900 dark:text-zinc-100" title={selectedEmployee}>{selectedEmployee}</div>
+                    {/* Month Navigator Pill */}
+                    <div className="flex items-center gap-1 rounded-2xl border border-zinc-950/5 dark:border-white/10 bg-zinc-950/5 dark:bg-white/5 p-1">
+                      <button
+                        type="button"
+                        onClick={goToPreviousMonth}
+                        className="flex size-8 items-center justify-center rounded-xl text-zinc-600 dark:text-zinc-300 hover:bg-zinc-950/5 dark:hover:bg-white/10 active:scale-95 transition-all cursor-pointer"
+                        title="Previous month"
+                      >
+                        <ChevronLeft className="size-4" />
+                      </button>
+                      <span className="px-2 text-[12px] font-semibold text-zinc-700 dark:text-zinc-200 whitespace-nowrap">
+                        {new Intl.DateTimeFormat('en', { month: 'short', year: 'numeric' }).format(new Date(currentYear, currentMonth))}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={goToNextMonth}
+                        className="flex size-8 items-center justify-center rounded-xl text-zinc-600 dark:text-zinc-300 hover:bg-zinc-950/5 dark:hover:bg-white/10 active:scale-95 transition-all cursor-pointer"
+                        title="Next month"
+                      >
+                        <ChevronRight className="size-4" />
+                      </button>
+                    </div>
                   </div>
-                  <div className={`min-w-0 p-3 ${GLASS_CARD}`}>
-                    <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400">Target shift</label>
-                    <select
-                      value={solverTargetShift}
-                      onChange={(e) => setSolverTargetShift(e.target.value)}
-                      className="mt-1 w-full rounded-xl border border-zinc-950/10 dark:border-zinc-700 bg-white dark:bg-zinc-950 px-2 py-1.5 text-[13px] sm:text-[14px] text-zinc-900 dark:text-zinc-100 outline-none"
-                    >
-                      {['M', 'A', 'N', 'OFF'].map((shift) => (
-                        <option key={shift} value={shift} className="bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100">
-                          {shiftLabel(shift)}
-                        </option>
-                      ))}
-                    </select>
+
+                  {!hasRosterForCurrentMonth && (
+                    <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3 text-[12px] text-amber-600 dark:text-amber-400 flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <AlertCircle className="size-4 shrink-0" />
+                        <span className="truncate">No roster for {title}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (roster && roster.dateColumns.length > 0) {
+                            const lastCol = roster.dateColumns[roster.dateColumns.length - 1];
+                            const d = new Date(`${lastCol.isoDate}T00:00:00`);
+                            setCurrentMonth(d.getMonth());
+                            setCurrentYear(d.getFullYear());
+                            setSolverResult(null);
+                          }
+                        }}
+                        className="shrink-0 rounded-xl bg-amber-500/20 px-2.5 py-1 text-[11px] font-bold text-amber-600 dark:text-amber-300 hover:bg-amber-500/30 transition-colors cursor-pointer"
+                      >
+                        Jump to Active Month
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Configuration Card: Employee & Target Shift */}
+                  <div className={`p-4 ${GLASS_CARD} space-y-3.5`}>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-blue-500/10 text-blue-600 dark:text-blue-400 font-mono text-[13px] font-bold">
+                          {initials(selectedEmployee)}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Employee Profile</p>
+                          <p className="text-[15px] font-bold text-zinc-900 dark:text-zinc-100 truncate" title={selectedEmployee}>
+                            {selectedEmployee}
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setQuery('');
+                          setIsEmployeeDialogOpen(true);
+                        }}
+                        className="shrink-0 rounded-xl bg-zinc-950/5 dark:bg-white/10 px-3 py-1.5 text-[11px] font-bold text-zinc-700 dark:text-zinc-200 hover:bg-zinc-950/10 dark:hover:bg-white/15 transition-colors cursor-pointer"
+                      >
+                        Change
+                      </button>
+                    </div>
+
+                    <div className="border-t border-zinc-950/5 dark:border-white/5 pt-3">
+                      <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-2">
+                        Desired Shift To Work
+                      </label>
+                      <div className="grid grid-cols-4 gap-1.5">
+                        {[
+                          { code: 'M', label: 'Morning' },
+                          { code: 'A', label: 'Afternoon' },
+                          { code: 'N', label: 'Night' },
+                          { code: 'OFF', label: 'Off Days' },
+                        ].map(({ code, label }) => {
+                          const isSelected = solverTargetShift === code;
+                          return (
+                            <button
+                              key={code}
+                              type="button"
+                              onClick={() => {
+                                setSolverTargetShift(code);
+                                setSolverResult(null);
+                              }}
+                              className={`flex flex-col items-center justify-center py-2 px-1 rounded-xl text-center transition-all cursor-pointer ${
+                                isSelected
+                                  ? 'bg-blue-500 text-white font-bold shadow-md shadow-blue-500/20 scale-[1.02]'
+                                  : 'bg-zinc-950/5 dark:bg-white/5 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-950/10 dark:hover:bg-white/10'
+                              }`}
+                            >
+                              <span className="text-[14px] font-bold leading-none">{code}</span>
+                              <span className="mt-1 text-[10px] opacity-80 truncate">{label}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="border-t border-zinc-950/5 dark:border-white/5 pt-3 flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!roster || !selectedEmployee) return;
+                          setSolverSimulationVariant(0);
+                          setSolverResult(findShiftTransformationPreview(roster, selectedEmployee, solverTargetShift, currentMonth, currentYear, 0));
+                        }}
+                        className="flex-1 flex items-center justify-center gap-2 rounded-2xl bg-blue-500 py-3 text-[14px] font-bold text-white shadow-lg shadow-blue-500/25 active:scale-[0.98] transition-all cursor-pointer"
+                      >
+                        <Sparkles className="size-4" />
+                        Find Solution
+                      </button>
+                      {solverResult && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!roster || !selectedEmployee) return;
+                            const nextVariant = solverSimulationVariant + 1;
+                            setSolverSimulationVariant(nextVariant);
+                            setSolverResult(findShiftTransformationPreview(roster, selectedEmployee, solverTargetShift, currentMonth, currentYear, nextVariant));
+                          }}
+                          className="flex items-center justify-center gap-1.5 rounded-2xl border border-zinc-950/10 dark:border-white/15 px-4 py-3 text-[13px] font-bold text-zinc-700 dark:text-zinc-200 active:scale-[0.98] transition-all cursor-pointer hover:bg-zinc-950/5 dark:hover:bg-white/5"
+                          title="Try alternative swap path"
+                        >
+                          <RotateCcw className="size-3.5" />
+                          Alternative
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
 
                 {solverResult && (
-                  <>
-                    <div className={`mb-4 p-3.5 min-w-0 ${GLASS_CARD} border ${solverResult.possible ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-rose-500/30 bg-rose-500/5'}`}>
-                      <div className="font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Result</div>
-                      <div className={`mt-1 text-[15px] font-bold ${solverResult.possible ? 'text-emerald-500 dark:text-emerald-400' : 'text-rose-500 dark:text-rose-400'}`}>
-                        {solverResult.possible ? 'Possible' : 'Impossible'}
+                  <div className="space-y-4">
+                    {/* Clean Status Card */}
+                    <div className={`p-4 rounded-2xl border ${
+                      solverResult.possible
+                        ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
+                        : 'border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-400'
+                    }`}>
+                      <div className="flex items-center gap-2 font-bold text-[15px]">
+                        {solverResult.possible ? <CheckCircle2 className="size-5 shrink-0 text-emerald-500" /> : <AlertCircle className="size-5 shrink-0 text-rose-500" />}
+                        <span>{solverResult.possible ? 'Solution Available' : 'No Solution Found'}</span>
                       </div>
-                      <p className="mt-2 text-[12px] leading-relaxed text-zinc-700 dark:text-zinc-200 break-words">{solverResult.summary}</p>
-                      {solverResult.firstAttempt && (
-                        <p className="mt-2 text-[11px] text-blue-600 dark:text-cyan-300 break-words">First attempted branch: {solverResult.firstAttempt}</p>
-                      )}
+                      <p className="mt-1.5 text-[12px] leading-relaxed opacity-90">
+                        {solverResult.summary}
+                      </p>
                     </div>
 
-                    <div className={`mb-4 p-3.5 min-w-0 overflow-hidden ${GLASS_CARD}`}>
-                      <div className="mb-2 font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Required swaps</div>
-                      {solverResult.swaps.length > 0 ? (
-                        <div className="space-y-2 min-w-0">
+                    {/* Swaps List */}
+                    {solverResult.swaps.length > 0 && (
+                      <div className={`p-4 ${GLASS_CARD}`}>
+                        <div className="flex items-center justify-between mb-3">
+                          <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-400">
+                            Recommended Swaps ({solverResult.swaps.length})
+                          </span>
+                          <span className="text-[10px] text-zinc-400 font-mono">
+                            {solverResult.swaps.filter(s => s.status === 'good').length} optimal
+                          </span>
+                        </div>
+
+                        <div className="space-y-2.5">
                           {solverResult.swaps.map((swap, index) => (
-                            <div key={`${swap.isoDate}-${swap.otherEmployee}-${index}`} className="rounded-xl border border-zinc-950/5 dark:border-white/5 bg-zinc-950/[0.03] dark:bg-white/5 p-2.5 text-[12px] text-zinc-800 dark:text-zinc-200 min-w-0 break-words">
-                              <div className="font-semibold break-words">{formatRequiredSwap(swap)}</div>
-                              <div className="mt-1 text-zinc-600 dark:text-zinc-300 break-words">{swap.employee} ↔ {swap.otherEmployee}</div>
-                              <div className="mt-1 flex flex-wrap items-center gap-2 font-mono text-[10px] uppercase tracking-wider">
-                                <span className="text-blue-600 dark:text-cyan-300">{swap.from} → {swap.to}</span>
-                                {swap.type && <span className={swap.status === 'good' ? 'text-emerald-500' : 'text-amber-500'}>{swap.type === 'WHOLE_BLOCK' ? 'Good' : swap.type === 'PARTIAL_BLOCK' ? 'Under review' : 'Eligible'}</span>}
+                            <div
+                              key={`${swap.isoDate}-${swap.otherEmployee}-${index}`}
+                              className="rounded-2xl border border-zinc-950/5 dark:border-white/5 bg-zinc-950/[0.03] dark:bg-white/5 p-3 text-[13px]"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-zinc-950/10 dark:bg-white/10 text-[10px] font-bold">
+                                    {initials(swap.otherEmployee)}
+                                  </div>
+                                  <span className="font-semibold truncate text-zinc-900 dark:text-zinc-100">
+                                    {swap.otherEmployee}
+                                  </span>
+                                </div>
+                                <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                                  swap.status === 'good'
+                                    ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                                    : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                                }`}>
+                                  {swap.type === 'WHOLE_BLOCK' ? 'Full Block' : 'Partial Block'}
+                                </span>
+                              </div>
+
+                              <p className="mt-2 text-[12px] font-medium text-zinc-700 dark:text-zinc-200 leading-snug">
+                                {formatRequiredSwap(swap)}
+                              </p>
+
+                              <div className="mt-2 flex items-center gap-2 text-[11px] font-mono">
+                                <span className="rounded bg-blue-500/10 px-2 py-0.5 text-blue-600 dark:text-blue-400 font-bold">
+                                  {shiftLabel(swap.from)} → {shiftLabel(swap.to)}
+                                </span>
                               </div>
                             </div>
                           ))}
                         </div>
-                      ) : (
-                        <div className="text-[12px] text-zinc-500 dark:text-zinc-300">No swaps were needed for this month preview.</div>
-                      )}
-                    </div>
+                      </div>
+                    )}
 
-                    <div className={`overflow-hidden min-w-0 ${GLASS_CARD}`}>
-                      <div className="flex items-center justify-between border-b border-zinc-950/5 dark:border-white/5 px-3.5 py-2.5">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                            Rendered preview
-                          </span>
-                          <span className="text-[11px] font-semibold text-zinc-400 dark:text-zinc-500">· {title}</span>
+                    {/* Rendered Preview Grid */}
+                    <div className={`overflow-hidden ${GLASS_CARD}`}>
+                      <div className="flex items-center justify-between border-b border-zinc-950/5 dark:border-white/5 px-4 py-3">
+                        <div>
+                          <h3 className="text-[13px] font-bold text-zinc-900 dark:text-zinc-100">
+                            Transformed Schedule Preview
+                          </h3>
+                          <p className="text-[11px] text-zinc-400">
+                            {title} · Blue rings indicate swapped shifts
+                          </p>
                         </div>
-                        <span className="font-mono text-[10px] font-bold text-blue-500 dark:text-blue-400 truncate max-w-[130px] sm:max-w-none">
-                          {selectedEmployee}
-                        </span>
                       </div>
 
                       <div className="w-full">
-                        {/* Weekday headers */}
                         <div className="grid grid-cols-7 border-b border-zinc-950/5 dark:border-white/5 bg-zinc-950/[0.02] dark:bg-white/[0.02] text-center text-[10px] font-semibold text-zinc-400">
                           {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((day, i) => (
                             <div key={`${day}-${i}`} className="py-2">{day}</div>
                           ))}
                         </div>
 
-                        {/* Calendar days grid: 7 equal columns spanning 100% width naturally */}
                         <div className="grid grid-cols-7 text-center">
                           {monthDays(currentMonth, currentYear).map((day, idx) => {
                             const dayIso = iso(day);
@@ -1266,7 +1370,6 @@ export default function App() {
                               const requesterDates = dateParts.length === 2 ? [dateParts[0]] : swap.isoDate.split(', ');
                               return requesterDates.includes(dayIso) || (dateParts.length === 2 && dateParts[1] === dayIso);
                             });
-                            const previewTitle = sourceSwap ? `Swap with ${sourceSwap.otherEmployee}` : undefined;
                             const isCurrentMonth = day.getMonth() === currentMonth;
                             const isOff = finalShift === 'OFF';
                             const colors = colorFor(finalShift);
@@ -1275,7 +1378,6 @@ export default function App() {
                             return (
                               <div
                                 key={dayIso}
-                                title={previewTitle}
                                 className={`flex flex-col items-center justify-center p-1 min-h-[46px] sm:min-h-[50px] border-b ${
                                   !isRightColumn ? 'border-r' : ''
                                 } border-zinc-950/[0.05] dark:border-white/[0.06] transition-colors ${
@@ -1298,7 +1400,7 @@ export default function App() {
                                 ) : (
                                   <span
                                     className={`mt-0.5 inline-flex items-center justify-center rounded-full px-1.5 py-[1px] text-[9px] font-bold leading-none ${colors.bg} ${colors.text} ${
-                                      sourceSwap ? 'ring-1 ring-blue-500' : ''
+                                      sourceSwap ? 'ring-2 ring-blue-500 font-extrabold shadow-sm' : ''
                                     }`}
                                   >
                                     {finalShift}
@@ -1310,7 +1412,7 @@ export default function App() {
                         </div>
                       </div>
                     </div>
-                  </>
+                  </div>
                 )}
               </div>
             )}
