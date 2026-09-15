@@ -135,46 +135,48 @@ async function dispatchTaskToShift(
   prevIsoDate: string,
   customBody?: string
 ) {
+  const isOnlyAlex = Boolean(task.notifyOnlyAlex) || String(task.notifyOnlyAlex) === 'true';
+
   // Deduplicate within the minute to avoid duplicate pushes if multiple devices or crons trigger
-  const dedupKey = `dedup:task:${task.id}:${isoDate}:${time}`;
-  const alreadySent = await kv.get(dedupKey, 'text');
-  if (alreadySent) {
-    return {
-      taskId: task.id,
-      title: task.title,
-      skipped: true,
-      reason: 'Already dispatched for this minute',
-    };
+  if (!isOnlyAlex) {
+    const dedupKey = `dedup:task:${task.id}:${isoDate}:${time}`;
+    const alreadySent = await kv.get(dedupKey, 'text');
+    if (alreadySent) {
+      return {
+        taskId: task.id,
+        title: task.title,
+        skipped: true,
+        reason: 'Already dispatched for this minute',
+      };
+    }
+    await kv.put(dedupKey, new Date().toISOString());
   }
-
-  // Mark dedup immediately
-  await kv.put(dedupKey, new Date().toISOString());
-
-  const rawRoster = await kv.get('active_roster', 'text');
-  if (!rawRoster) {
-    return {
-      taskId: task.id,
-      title: task.title,
-      skipped: true,
-      reason: 'No active roster found in KV',
-    };
-  }
-
-  const roster = JSON.parse(rawRoster) as {
-    employees: string[];
-    rows: Record<string, Record<string, string>>;
-  };
 
   const targetShift = task.targetShift || 'ALL_ACTIVE';
   const eligibleEmployees: { name: string; shift: string }[] = [];
 
-  if (task.notifyOnlyAlex) {
+  if (isOnlyAlex) {
     // Test mode: Send alert exclusively to Alex (check both naming aliases), bypass shift checks
     const alexAliases = ['Stoian Alexandru-Gabriel', 'Alexandru Stoian'];
     for (const name of alexAliases) {
       eligibleEmployees.push({ name, shift: 'TEST' });
     }
   } else {
+    const rawRoster = await kv.get('active_roster', 'text');
+    if (!rawRoster) {
+      return {
+        taskId: task.id,
+        title: task.title,
+        skipped: true,
+        reason: 'No active roster found in KV',
+      };
+    }
+
+    const roster = JSON.parse(rawRoster) as {
+      employees: string[];
+      rows: Record<string, Record<string, string>>;
+    };
+
     for (const emp of roster.employees) {
       const shiftStatus = checkIsOnShift(roster.rows, emp, time, isoDate, prevIsoDate);
       if (!shiftStatus.onShift) continue;
@@ -324,7 +326,7 @@ export async function onRequestPost(context: PagesContext) {
         id: payload.taskId || 'adhoc',
         title: taskTitle,
         targetShift,
-        notifyOnlyAlex: payload.notifyOnlyAlex,
+        notifyOnlyAlex: payload.notifyOnlyAlex === true || String(payload.notifyOnlyAlex) === 'true',
       },
       checkHHMM,
       isoDate,

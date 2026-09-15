@@ -418,6 +418,13 @@ export default function App() {
       lastCheckedMinute.current = currentHHMM;
 
       const activeEmployee = authenticatedEmployee || selectedEmployee;
+      const isCurrentAlex = Boolean(
+        activeEmployee && (
+          activeEmployee === 'Stoian Alexandru-Gabriel' ||
+          activeEmployee === 'Alexandru Stoian' ||
+          (/stoian/i.test(activeEmployee) && /alexandru/i.test(activeEmployee))
+        )
+      );
       const taskAlertsEnabled = localStorage.getItem(NOTIFICATION_PREF_KEY) !== 'false';
       const onlyOnShiftEnabled = localStorage.getItem(ONLY_ON_SHIFT_NOTIFS_KEY) !== 'false';
 
@@ -438,9 +445,10 @@ export default function App() {
 
           if (!shouldTrigger) return;
 
-          if (task.notifyOnlyAlex) {
-            // Test Mode: only trigger for Alex (skips shift restrictions so Alex can test anytime)
-            if (!isAlexandruStoian) return;
+          const isTestOnlyAlex = Boolean(task.notifyOnlyAlex);
+          if (isTestOnlyAlex) {
+            // Test Mode: strictly trigger for Alex. For all other colleagues, silence completely.
+            if (!isCurrentAlex) return;
           } else if (onlyOnShiftEnabled && roster && activeEmployee) {
             // Shift filtering: Only notify colleagues who are actively on shift
             const shiftStatus = isEmployeeOnShift(roster, activeEmployee, now);

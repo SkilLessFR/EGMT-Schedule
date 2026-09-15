@@ -195,6 +195,7 @@ export async function onRequestPost(context: PagesContext) {
       targetShift: (t.targetShift && ['ALL_ACTIVE', 'M', 'A', 'N', 'MID'].includes(t.targetShift))
         ? t.targetShift
         : 'ALL_ACTIVE',
+      notifyOnlyAlex: Boolean(t.notifyOnlyAlex),
     }));
 
     const payload: StoredTasksPayload = {
