@@ -941,13 +941,15 @@ export function findShiftTransformationPreview(
   simulationVariant: number = 0,
 ): ShiftTransformationResult {
   const requestedShift = shiftKey(targetShift);
-  if (requestedShift === 'MID') {
+  if (requestedShift === 'MID' || requestedShift === 'OFF') {
     return {
       possible: false,
-      targetShift: 'MID',
+      targetShift: requestedShift,
       swaps: [],
       finalRoster: roster.rows,
-      summary: 'MID shifts cannot swap with anyone.',
+      summary: requestedShift === 'MID' 
+        ? 'MID shifts cannot swap with anyone.'
+        : 'Cannot convert entire schedule to OFF shifts.',
     };
   }
 

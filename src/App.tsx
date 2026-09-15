@@ -1262,12 +1262,11 @@ export default function App() {
                       <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-2">
                         Desired Shift To Work
                       </label>
-                      <div className="grid grid-cols-4 gap-1.5">
+                      <div className="grid grid-cols-3 gap-1.5">
                         {[
                           { code: 'M', label: 'Morning' },
                           { code: 'A', label: 'Afternoon' },
                           { code: 'N', label: 'Night' },
-                          { code: 'OFF', label: 'Off Days' },
                         ].map(({ code, label }) => {
                           const isSelected = solverTargetShift === code;
                           return (
