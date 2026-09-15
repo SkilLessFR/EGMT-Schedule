@@ -20,9 +20,9 @@ import {
 } from './scheduleUtils';
 import DayDetailsModal from './DayDetailsModal';
 import AuthPinModal from './AuthPinModal';
-import { AUTH_STORAGE_KEY } from './authConfig';
+import { AUTH_STORAGE_KEY, syncPushSubscriptionToKv } from './authConfig';
 import { NotificationSettingsCard, NotificationPromptBanner } from './NotificationManager';
-import { registerServiceWorker, showAppNotification, NOTIFICATION_PREF_KEY, SHIFT_ALERTS_PREF_KEY } from './notificationService';
+import { registerServiceWorker, showAppNotification, getPushSubscription, getNotificationPermission, NOTIFICATION_PREF_KEY, SHIFT_ALERTS_PREF_KEY } from './notificationService';
 import { getIncomingSwapRequests, dismissIncomingSwapRequest, type SwapRequestItem } from './swapNotificationService';
 import {
   type Task,
@@ -345,6 +345,21 @@ export default function App() {
   useEffect(() => {
     registerServiceWorker().catch(() => {});
   }, []);
+
+  // Proactively ensure the current device's Web Push subscription is linked in Cloudflare KV
+  useEffect(() => {
+    const activeEmp = authenticatedEmployee || selectedEmployee;
+    if (!activeEmp) return;
+    if (getNotificationPermission() === 'granted') {
+      getPushSubscription()
+        .then((sub) => {
+          if (sub) {
+            syncPushSubscriptionToKv(activeEmp, sub.toJSON()).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }
+  }, [authenticatedEmployee, selectedEmployee]);
 
   // Poll Cloudflare KV for incoming shift swap requests directed to this employee
   useEffect(() => {

@@ -54,11 +54,12 @@ export function useNotifications(authenticatedEmployee?: string | null) {
       localStorage.setItem(NOTIFICATION_PREF_KEY, 'true');
 
       // Sync Web Push subscription to Cloudflare KV for this employee
-      if (authenticatedEmployee) {
+      const empToSync = authenticatedEmployee || localStorage.getItem('work-schedule-employee');
+      if (empToSync) {
         try {
           const sub = await getPushSubscription();
           if (sub) {
-            syncPushSubscriptionToKv(authenticatedEmployee, sub.toJSON()).catch(() => {});
+            syncPushSubscriptionToKv(empToSync, sub.toJSON()).catch(() => {});
           }
         } catch {
           // Non-blocking
@@ -84,12 +85,13 @@ export function useNotifications(authenticatedEmployee?: string | null) {
       setTestSent(true);
       setTimeout(() => setTestSent(false), 3500);
 
-      if (authenticatedEmployee) {
+      const empToSync = authenticatedEmployee || localStorage.getItem('work-schedule-employee');
+      if (empToSync) {
         try {
           const sub = await getPushSubscription();
           if (sub) {
-            await syncPushSubscriptionToKv(authenticatedEmployee, sub.toJSON());
-            const bgRes = await triggerRemoteTestPush(authenticatedEmployee, 4);
+            await syncPushSubscriptionToKv(empToSync, sub.toJSON());
+            const bgRes = await triggerRemoteTestPush(empToSync, 4);
             if (bgRes.success) {
               setBackgroundPushScheduled(true);
               setTimeout(() => setBackgroundPushScheduled(false), 7000);

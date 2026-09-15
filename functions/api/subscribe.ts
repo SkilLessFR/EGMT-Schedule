@@ -84,9 +84,37 @@ export async function onRequestPost(context: PagesContext) {
       });
     }
 
-    // Store the employee's subscription in KV
+    // Read existing subscriptions for this employee to support multiple devices (e.g. Phone + Laptop)
+    const rawExisting = await kv.get(`sub:${employee}`, 'text');
+    let existingSubs: Array<{ endpoint?: string; keys?: unknown }> = [];
+    if (rawExisting) {
+      try {
+        const parsed = JSON.parse(rawExisting);
+        if (Array.isArray(parsed.subscriptions)) {
+          existingSubs = parsed.subscriptions;
+        } else if (parsed.subscription) {
+          existingSubs = [parsed.subscription];
+        } else if (parsed.endpoint) {
+          existingSubs = [parsed];
+        }
+      } catch {
+        // Fallback
+      }
+    }
+
+    const newSubObj = subscription as { endpoint?: string; keys?: unknown };
+    const newEndpoint = newSubObj?.endpoint;
+
+    // Filter out duplicate or matching endpoint and keep up to 5 devices per employee
+    const updatedSubs = [
+      newSubObj,
+      ...existingSubs.filter((s) => s?.endpoint && s.endpoint !== newEndpoint),
+    ].slice(0, 5);
+
+    // Store the employee's subscriptions in KV
     await kv.put(`sub:${employee}`, JSON.stringify({
-      subscription,
+      subscription, // Backwards-compatible single subscription
+      subscriptions: updatedSubs, // Multi-device subscriptions array
       updatedAt: new Date().toISOString(),
     }));
 
