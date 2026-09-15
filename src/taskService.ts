@@ -16,6 +16,7 @@ export interface Task {
   daysOfWeek?: number[];
   dateCreated?: string;
   targetShift?: TargetShiftFilter;
+  notifyOnlyAlex?: boolean;
 }
 
 export interface TimeSelection {
@@ -184,6 +185,7 @@ export async function triggerTaskPushToShift(
         taskTitle: task.title,
         targetShift: task.targetShift || 'ALL_ACTIVE',
         time: time || (task.times && task.times[0]),
+        notifyOnlyAlex: task.notifyOnlyAlex,
       }),
     });
     const data = await res.json();

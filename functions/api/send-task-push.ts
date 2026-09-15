@@ -25,6 +25,7 @@ interface TaskItem {
   daysOfWeek?: number[];
   dateCreated?: string;
   targetShift?: 'ALL_ACTIVE' | 'M' | 'A' | 'N' | 'MID';
+  notifyOnlyAlex?: boolean;
 }
 
 interface SendTaskPushPayload {
@@ -33,6 +34,7 @@ interface SendTaskPushPayload {
   time?: string;
   targetShift?: 'ALL_ACTIVE' | 'M' | 'A' | 'N' | 'MID';
   body?: string;
+  notifyOnlyAlex?: boolean;
 }
 
 const jsonHeaders = {
@@ -127,7 +129,7 @@ function checkIsOnShift(
 
 async function dispatchTaskToShift(
   kv: KVNamespaceLike,
-  task: { id: string; title: string; targetShift?: string },
+  task: { id: string; title: string; targetShift?: string; notifyOnlyAlex?: boolean },
   time: string,
   isoDate: string,
   prevIsoDate: string,
@@ -166,11 +168,19 @@ async function dispatchTaskToShift(
   const targetShift = task.targetShift || 'ALL_ACTIVE';
   const eligibleEmployees: { name: string; shift: string }[] = [];
 
-  for (const emp of roster.employees) {
-    const shiftStatus = checkIsOnShift(roster.rows, emp, time, isoDate, prevIsoDate);
-    if (!shiftStatus.onShift) continue;
-    if (targetShift !== 'ALL_ACTIVE' && shiftStatus.shift !== targetShift) continue;
-    eligibleEmployees.push({ name: emp, shift: shiftStatus.shift || 'ON_SHIFT' });
+  if (task.notifyOnlyAlex) {
+    // Test mode: Send alert exclusively to Alex (check both naming aliases), bypass shift checks
+    const alexAliases = ['Stoian Alexandru-Gabriel', 'Alexandru Stoian'];
+    for (const name of alexAliases) {
+      eligibleEmployees.push({ name, shift: 'TEST' });
+    }
+  } else {
+    for (const emp of roster.employees) {
+      const shiftStatus = checkIsOnShift(roster.rows, emp, time, isoDate, prevIsoDate);
+      if (!shiftStatus.onShift) continue;
+      if (targetShift !== 'ALL_ACTIVE' && shiftStatus.shift !== targetShift) continue;
+      eligibleEmployees.push({ name: emp, shift: shiftStatus.shift || 'ON_SHIFT' });
+    }
   }
 
   const delivered: string[] = [];
@@ -314,6 +324,7 @@ export async function onRequestPost(context: PagesContext) {
         id: payload.taskId || 'adhoc',
         title: taskTitle,
         targetShift,
+        notifyOnlyAlex: payload.notifyOnlyAlex,
       },
       checkHHMM,
       isoDate,

@@ -22,6 +22,7 @@ export interface TaskItem {
   daysOfWeek?: number[];
   dateCreated?: string;
   targetShift?: 'ALL_ACTIVE' | 'M' | 'A' | 'N' | 'MID';
+  notifyOnlyAlex?: boolean;
 }
 
 export interface StoredTasksPayload {

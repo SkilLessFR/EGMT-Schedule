@@ -1,7 +1,7 @@
 // App.tsx
 import type React from 'react';
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, ChevronDown, Moon, Search, Settings2, Sun, Users, Wallet, CheckSquare, Plus, Trash2, Bell, AlertTriangle, Edit2, X, UploadCloud, Loader2, Cloud, ShieldCheck, LogOut, Lock, ArrowLeftRight, Save, Sparkles, RotateCcw, CheckCircle2, AlertCircle } from 'lucide-react';
+import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, ChevronDown, Moon, Search, Settings2, Sun, Users, Wallet, CheckSquare, Plus, Trash2, Bell, AlertTriangle, Edit2, X, UploadCloud, Loader2, Cloud, ShieldCheck, LogOut, Lock, ArrowLeftRight, Save, Sparkles, RotateCcw, CheckCircle2, AlertCircle, Send } from 'lucide-react';
 import type { RosterData, ShiftEvent } from './types';
 import { parseRoster, mergeRosters } from './parser';
 import {
@@ -196,6 +196,7 @@ export default function App() {
   const [targetShift, setTargetShift] = useState<TargetShiftFilter>('ALL_ACTIVE');
   const [selectedDays, setSelectedDays] = useState<number[]>([]);
   const [newTaskTimes, setNewTaskTimes] = useState<TimeSelection[]>([{ hour: '00', minute: '00' }]);
+  const [notifyOnlyAlex, setNotifyOnlyAlex] = useState(false);
   
   const [activeAlarmTask, setActiveAlarmTask] = useState<{ id: string; taskTitle: string; time: string; type: ScheduleType } | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -422,8 +423,11 @@ export default function App() {
 
           if (!shouldTrigger) return;
 
-          // Shift filtering: Only notify colleagues who are actively on shift
-          if (onlyOnShiftEnabled && roster && activeEmployee) {
+          if (task.notifyOnlyAlex) {
+            // Test Mode: only trigger for Alex (skips shift restrictions so Alex can test anytime)
+            if (!isAlexandruStoian) return;
+          } else if (onlyOnShiftEnabled && roster && activeEmployee) {
+            // Shift filtering: Only notify colleagues who are actively on shift
             const shiftStatus = isEmployeeOnShift(roster, activeEmployee, now);
             // If employee is scheduled OFF, H8, or outside shift hours, suppress alert
             if (!shiftStatus.onShift) {
@@ -524,6 +528,7 @@ export default function App() {
               scheduleType, 
               daysOfWeek: scheduleType === 'weekly' ? [...selectedDays].sort() : undefined,
               targetShift,
+              notifyOnlyAlex: isAlexandruStoian ? notifyOnlyAlex : t.notifyOnlyAlex,
             }
           : t
       );
@@ -536,6 +541,7 @@ export default function App() {
         daysOfWeek: scheduleType === 'weekly' ? [...selectedDays].sort() : undefined,
         dateCreated: iso(new Date()),
         targetShift,
+        notifyOnlyAlex: isAlexandruStoian ? notifyOnlyAlex : false,
       };
       nextStore = [...tasks, newTask];
     }
@@ -570,6 +576,7 @@ export default function App() {
     setScheduleType(task.scheduleType);
     setTargetShift(task.targetShift || 'ALL_ACTIVE');
     setSelectedDays(task.daysOfWeek || []);
+    setNotifyOnlyAlex(Boolean(task.notifyOnlyAlex));
     
     const splitTimes = task.times.map(t => {
       const parts = t.split(':');
@@ -585,6 +592,7 @@ export default function App() {
     setTargetShift('ALL_ACTIVE');
     setSelectedDays([]);
     setNewTaskTimes([{ hour: '00', minute: '00' }]);
+    setNotifyOnlyAlex(false);
   };
 
   const toggleDaySelection = (dayIndex: number) => {
@@ -1712,6 +1720,30 @@ export default function App() {
                       </button>
                     </div>
 
+                    {isAlexandruStoian && (
+                      <div className="rounded-xl border border-blue-500/30 bg-blue-500/10 p-3">
+                        <label className="flex items-center gap-3 cursor-pointer select-none">
+                          <div className={`flex size-5 shrink-0 items-center justify-center rounded-md border transition-all ${notifyOnlyAlex ? 'bg-blue-500 border-blue-500 text-white' : 'border-zinc-400 bg-transparent'}`}>
+                            <input
+                              type="checkbox"
+                              checked={notifyOnlyAlex}
+                              onChange={(e) => setNotifyOnlyAlex(e.target.checked)}
+                              className="sr-only"
+                            />
+                            {notifyOnlyAlex && <Check className="size-3.5 stroke-[3]" />}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-[13px] font-bold text-blue-600 dark:text-blue-400">
+                              Send notification only to Alex
+                            </p>
+                            <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                              Testing mode: this alert will only ring your phone and skip other colleagues
+                            </p>
+                          </div>
+                        </label>
+                      </div>
+                    )}
+
                     <button 
                       type="submit"
                       disabled={scheduleType === 'weekly' && selectedDays.length === 0}
@@ -1748,6 +1780,11 @@ export default function App() {
                               <span className={`rounded-full px-2 py-0.5 text-[9px] font-extrabold tracking-wide uppercase ${task.scheduleType === 'once' ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20' : task.scheduleType === 'weekly' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'bg-green-500/10 text-green-400 border border-green-500/20'}`}>
                                 {task.scheduleType === 'once' ? 'One Time' : task.scheduleType}
                               </span>
+                              {task.notifyOnlyAlex && (
+                                <span className="rounded-full px-2 py-0.5 text-[9px] font-extrabold tracking-wide uppercase bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20">
+                                  Only Alex
+                                </span>
+                              )}
                               {task.targetShift && task.targetShift !== 'ALL_ACTIVE' ? (
                                 <span className="rounded-full px-2 py-0.5 text-[9px] font-extrabold tracking-wide uppercase bg-blue-500/10 text-blue-500 dark:text-blue-400 border border-blue-500/20">
                                   Shift {task.targetShift}
@@ -1775,6 +1812,13 @@ export default function App() {
 
                             {/* Personal shift status badge for current user */}
                             {(() => {
+                              if (task.notifyOnlyAlex) {
+                                return (
+                                  <p className="mt-1 text-[11px] text-purple-600 dark:text-purple-400 font-medium flex items-center gap-1">
+                                    <span>🧪</span> {isAlexandruStoian ? 'Active for you (Alex Test Alert)' : 'Silent for you (Testing mode for Alex)'}
+                                  </p>
+                                );
+                              }
                               const emp = authenticatedEmployee || selectedEmployee;
                               if (!roster || !emp) return null;
                               const status = isEmployeeOnShift(roster, emp, new Date());
@@ -1803,6 +1847,24 @@ export default function App() {
                           </div>
                           
                           <div className="flex items-center gap-1 shrink-0">
+                            {isAlexandruStoian && (
+                              <button 
+                                type="button"
+                                onClick={async () => {
+                                  const res = await triggerTaskPushToShift(task);
+                                  showAppNotification(`🧪 Test Push: ${task.title}`, {
+                                    body: res.delivered?.length
+                                      ? `Dispatched test push to ${res.delivered.join(', ')}!`
+                                      : 'Test push sent to registered device.',
+                                    tag: `test-push-${task.id}`,
+                                  }).catch(() => {});
+                                }}
+                                className="hidden lg:flex p-2.5 text-zinc-400 hover:text-cyan-500 hover:bg-cyan-500/10 rounded-xl transition-colors"
+                                title="Send test push to your phone right now"
+                              >
+                                <Send className="size-4" />
+                              </button>
+                            )}
                             <button 
                               onClick={() => startEditingTask(task)}
                               className="hidden lg:flex p-2.5 text-zinc-400 hover:text-blue-500 hover:bg-blue-500/10 rounded-xl transition-colors"
