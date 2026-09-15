@@ -1530,7 +1530,7 @@ export default function App() {
             )}
 
             {activeTab === 'tasks' && (
-              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-24 pt-6 lg:px-0 lg:pb-8">
+              <div className="flex min-h-0 flex-1 flex-col px-5 pb-40 pt-6 lg:px-0 lg:pb-8">
                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                   <div>
                     <h1 className="text-[34px] font-bold tracking-tight">Recurring Tasks</h1>
@@ -1557,7 +1557,7 @@ export default function App() {
                   <NotificationPromptBanner />
                 </div>
                 
-                <section className="mt-6">
+                <section className="mt-6 hidden lg:block">
                   <form onSubmit={handleSaveTask} className={`p-4 ${GLASS_CARD} space-y-4`}>
                     <div className="flex items-center justify-between">
                       <h3 className="text-[14px] font-bold text-zinc-400 uppercase tracking-wide">
@@ -1718,7 +1718,10 @@ export default function App() {
                   </div>
                   <div className="space-y-2">
                     {tasks.length === 0 ? (
-                      <p className="text-xs italic text-zinc-400 px-1">No custom metrics monitored. Create a task above.</p>
+                      <p className="text-xs italic text-zinc-400 px-1">
+                        No custom metrics monitored.
+                        <span className="hidden lg:inline"> Create a task above.</span>
+                      </p>
                     ) : (
                       tasks.map((task) => (
                         <div key={task.id} className={`flex items-center justify-between p-4 ${GLASS_CARD} ${editingTaskId === task.id ? 'ring-2 ring-blue-500/50 bg-blue-500/[0.02]' : ''}`}>
@@ -1785,7 +1788,7 @@ export default function App() {
                           <div className="flex items-center gap-1 shrink-0">
                             <button 
                               onClick={() => startEditingTask(task)}
-                              className="p-2.5 text-zinc-400 hover:text-blue-500 hover:bg-blue-500/10 rounded-xl transition-colors"
+                              className="hidden lg:flex p-2.5 text-zinc-400 hover:text-blue-500 hover:bg-blue-500/10 rounded-xl transition-colors"
                               title="Edit Task parameters"
                             >
                               <Edit2 className="size-4" />
