@@ -168,7 +168,8 @@ export function exportTasksAsJsonFile(tasks: Task[]): void {
  */
 export async function triggerTaskPushToShift(
   task: Task,
-  time?: string
+  time?: string,
+  isManualTest?: boolean
 ): Promise<{
   success: boolean;
   eligibleCount?: number;
@@ -186,6 +187,7 @@ export async function triggerTaskPushToShift(
         targetShift: task.targetShift || 'ALL_ACTIVE',
         time: time || (task.times && task.times[0]),
         notifyOnlyAlex: task.notifyOnlyAlex,
+        isManualTest: Boolean(isManualTest),
       }),
     });
     const data = await res.json();

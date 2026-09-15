@@ -197,6 +197,7 @@ export default function App() {
   const [selectedDays, setSelectedDays] = useState<number[]>([]);
   const [newTaskTimes, setNewTaskTimes] = useState<TimeSelection[]>([{ hour: '00', minute: '00' }]);
   const [notifyOnlyAlex, setNotifyOnlyAlex] = useState(false);
+  const [sentTaskId, setSentTaskId] = useState<string | null>(null);
   
   const [activeAlarmTask, setActiveAlarmTask] = useState<{ id: string; taskTitle: string; time: string; type: ScheduleType } | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -467,14 +468,17 @@ export default function App() {
             audioRef.current.currentTime = 0;
             audioRef.current.play().catch(err => console.log("Audio deferred configuration:", err));
           }
-          showAppNotification(`⏰ Alarm: ${task.title}`, {
-            body: `Scheduled alarm triggered at ${currentHHMM}`,
-            tag: `alarm-${task.id}`,
-          }).catch(() => {});
 
-          // Dispatch real Web Push via Cloudflare to all on-shift colleagues with closed apps
+          // Dispatch real Web Push via Cloudflare to all registered devices (delivers to phone even if locked/closed)
+          // We do NOT call showAppNotification here to avoid creating a duplicate second notification banner
+          // alongside the Web Push notification.
           triggerTaskPushToShift(task, currentHHMM).catch((err) => {
             console.warn('Background task push dispatch error:', err);
+            // Fallback to local notification only if remote Web Push dispatch failed
+            showAppNotification(`⏰ Task Alert: ${task.title}`, {
+              body: `Task reminder for ${currentHHMM}`,
+              tag: `task-${task.id}-${currentHHMM}`,
+            }).catch(() => {});
           });
         });
       }
@@ -1874,18 +1878,22 @@ export default function App() {
                               <button 
                                 type="button"
                                 onClick={async () => {
-                                  const res = await triggerTaskPushToShift(task);
-                                  showAppNotification(`🧪 Test Push: ${task.title}`, {
-                                    body: res.delivered?.length
-                                      ? `Dispatched test push to ${res.delivered.join(', ')}!`
-                                      : 'Test push sent to registered device.',
-                                    tag: `test-push-${task.id}`,
-                                  }).catch(() => {});
+                                  setSentTaskId(task.id);
+                                  await triggerTaskPushToShift(task, undefined, true);
+                                  setTimeout(() => setSentTaskId(null), 2500);
                                 }}
-                                className="hidden lg:flex p-2.5 text-zinc-400 hover:text-cyan-500 hover:bg-cyan-500/10 rounded-xl transition-colors"
-                                title="Send test push to your phone right now"
+                                className={`hidden lg:flex p-2.5 rounded-xl transition-colors ${
+                                  sentTaskId === task.id
+                                    ? 'text-emerald-500 bg-emerald-500/10'
+                                    : 'text-zinc-400 hover:text-cyan-500 hover:bg-cyan-500/10'
+                                }`}
+                                title={sentTaskId === task.id ? "Push sent!" : "Send test push to your phone right now"}
                               >
-                                <Send className="size-4" />
+                                {sentTaskId === task.id ? (
+                                  <Check className="size-4" />
+                                ) : (
+                                  <Send className="size-4" />
+                                )}
                               </button>
                             )}
                             <button 

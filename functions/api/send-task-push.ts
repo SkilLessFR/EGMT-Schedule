@@ -35,6 +35,7 @@ interface SendTaskPushPayload {
   targetShift?: 'ALL_ACTIVE' | 'M' | 'A' | 'N' | 'MID';
   body?: string;
   notifyOnlyAlex?: boolean;
+  isManualTest?: boolean;
 }
 
 const jsonHeaders = {
@@ -133,12 +134,13 @@ async function dispatchTaskToShift(
   time: string,
   isoDate: string,
   prevIsoDate: string,
-  customBody?: string
+  customBody?: string,
+  isManualTest?: boolean
 ) {
   const isOnlyAlex = Boolean(task.notifyOnlyAlex) || String(task.notifyOnlyAlex) === 'true';
 
-  // Deduplicate within the minute to avoid duplicate pushes if multiple devices or crons trigger
-  if (!isOnlyAlex) {
+  // Deduplicate within the minute to avoid duplicate pushes between cron runner and client triggers
+  if (!isManualTest) {
     const dedupKey = `dedup:task:${task.id}:${isoDate}:${time}`;
     const alreadySent = await kv.get(dedupKey, 'text');
     if (alreadySent) {
@@ -156,10 +158,20 @@ async function dispatchTaskToShift(
   const eligibleEmployees: { name: string; shift: string }[] = [];
 
   if (isOnlyAlex) {
-    // Test mode: Send alert exclusively to Alex (check both naming aliases), bypass shift checks
+    // Test mode: Send alert exclusively to Alex
+    // Check both aliases in KV, but pick the first active one so we don't send duplicates
     const alexAliases = ['Stoian Alexandru-Gabriel', 'Alexandru Stoian'];
+    let foundAlias: string | null = null;
     for (const name of alexAliases) {
-      eligibleEmployees.push({ name, shift: 'TEST' });
+      const sub = await kv.get(`sub:${name}`, 'text');
+      if (sub) {
+        eligibleEmployees.push({ name, shift: 'TEST' });
+        foundAlias = name;
+        break; // Stop at first valid alias to prevent duplicate notifications to Alex
+      }
+    }
+    if (!foundAlias) {
+      eligibleEmployees.push({ name: alexAliases[0], shift: 'TEST' });
     }
   } else {
     const rawRoster = await kv.get('active_roster', 'text');
@@ -194,7 +206,9 @@ async function dispatchTaskToShift(
 
     const pushRes = await dispatchWebPush(rawSub, {
       title: `⏰ Task Alert: ${task.title}`,
-      body: customBody || `Shift ${shift} task reminder for ${time}`,
+      body: customBody || (isOnlyAlex
+        ? `Task reminder for ${time}`
+        : `Shift ${shift} task reminder for ${time}`),
       icon: '/icon.svg',
       badge: '/icon.svg',
       tag: `task-${task.id}-${time}`,
@@ -331,7 +345,8 @@ export async function onRequestPost(context: PagesContext) {
       checkHHMM,
       isoDate,
       prevIsoDate,
-      payload.body
+      payload.body,
+      Boolean(payload.isManualTest)
     );
 
     return new Response(
