@@ -51,14 +51,26 @@ export async function dispatchWebPush(
           tag: notification.tag || `push-${Date.now()}`,
           data: notification.data || { url: '/' },
         }),
+        options: {
+          urgency: 'high',
+          ttl: 86400,
+        },
       },
       sub,
       VAPID_KEYS
     );
 
+    // Merge high urgency and Apple APNs priority headers to prevent iOS from deferring/batching delivery
+    const mergedHeaders: Record<string, string> = {
+      ...payload.headers,
+      urgency: 'high',
+      'apns-priority': '10',
+      'apns-push-type': 'alert',
+    };
+
     const res = await fetch(sub.endpoint, {
       method: 'POST',
-      headers: payload.headers,
+      headers: mergedHeaders,
       body: payload.body,
     });
 

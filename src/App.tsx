@@ -373,8 +373,19 @@ export default function App() {
     };
 
     checkIncomingSwaps();
-    const timer = setInterval(checkIncomingSwaps, 12000);
-    return () => clearInterval(timer);
+    const timer = setInterval(checkIncomingSwaps, 6000);
+
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') checkIncomingSwaps();
+    };
+    window.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
   }, [authenticatedEmployee]);
 
   useEffect(() => {
