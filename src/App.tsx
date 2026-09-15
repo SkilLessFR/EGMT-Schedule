@@ -33,6 +33,7 @@ import {
   fetchTasksFromCloud,
   saveTasksToCloud,
   TASKS_UPDATED_AT_KEY,
+  triggerTaskPushToShift,
 } from './taskService';
 
 const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
@@ -432,6 +433,11 @@ export default function App() {
             body: `Scheduled alarm triggered at ${currentHHMM}`,
             tag: `alarm-${task.id}`,
           }).catch(() => {});
+
+          // Dispatch real Web Push via Cloudflare to all on-shift colleagues with closed apps
+          triggerTaskPushToShift(task, currentHHMM).catch((err) => {
+            console.warn('Background task push dispatch error:', err);
+          });
         });
       }
 
