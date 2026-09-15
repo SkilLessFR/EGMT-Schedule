@@ -470,16 +470,23 @@ export default function App() {
           }
 
           // Dispatch real Web Push via Cloudflare to all registered devices (delivers to phone even if locked/closed)
-          // We do NOT call showAppNotification here to avoid creating a duplicate second notification banner
-          // alongside the Web Push notification.
-          triggerTaskPushToShift(task, currentHHMM).catch((err) => {
-            console.warn('Background task push dispatch error:', err);
-            // Fallback to local notification only if remote Web Push dispatch failed
-            showAppNotification(`⏰ Task Alert: ${task.title}`, {
-              body: `Task reminder for ${currentHHMM}`,
-              tag: `task-${task.id}-${currentHHMM}`,
-            }).catch(() => {});
-          });
+          // We do NOT call showAppNotification here unless remote push fails, avoiding duplicate banners.
+          triggerTaskPushToShift(task, currentHHMM)
+            .then((res) => {
+              if (!res.success) {
+                showAppNotification(`⏰ Task Alert: ${task.title}`, {
+                  body: `Task reminder for ${currentHHMM}`,
+                  tag: `task-${task.id}-${currentHHMM}`,
+                }).catch(() => {});
+              }
+            })
+            .catch((err) => {
+              console.warn('Background task push dispatch error:', err);
+              showAppNotification(`⏰ Task Alert: ${task.title}`, {
+                body: `Task reminder for ${currentHHMM}`,
+                tag: `task-${task.id}-${currentHHMM}`,
+              }).catch(() => {});
+            });
         });
       }
 
