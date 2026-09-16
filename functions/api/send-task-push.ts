@@ -55,6 +55,7 @@ export async function onRequestOptions() {
 function getBucharestTime(date: Date = new Date()): {
   isoDate: string;
   hhmm: string;
+  prevHhmm: string;
   prevIsoDate: string;
   dayOfWeek: number;
 } {
@@ -76,13 +77,23 @@ function getBucharestTime(date: Date = new Date()): {
   const isoDate = `${partMap.year}-${partMap.month}-${partMap.day}`;
   const hhmm = `${partMap.hour}:${partMap.minute}`;
 
+  // 1 minute prior for jitter tolerance
+  const prevDateObj = new Date(date.getTime() - 60000);
+  const prevParts = formatter.formatToParts(prevDateObj);
+  const prevPartMap: Record<string, string> = {};
+  for (const p of prevParts) {
+    prevPartMap[p.type] = p.value;
+  }
+  const prevHhmm = `${prevPartMap.hour}:${prevPartMap.minute}`;
+
   const d = new Date(`${isoDate}T12:00:00Z`);
   const dayOfWeek = d.getUTCDay(); // 0 = Sunday, 1 = Monday, ...
   d.setUTCDate(d.getUTCDate() - 1);
   const prevIsoDate = d.toISOString().slice(0, 10);
 
-  return { isoDate, hhmm, prevIsoDate, dayOfWeek };
+  return { isoDate, hhmm, prevHhmm, prevIsoDate, dayOfWeek };
 }
+
 
 function checkIsOnShift(
   rows: Record<string, Record<string, string>>,
@@ -244,9 +255,50 @@ export async function onRequestGet(context: PagesContext) {
   }
 
   try {
-    const { isoDate, hhmm, prevIsoDate, dayOfWeek } = getBucharestTime();
+    const { isoDate, hhmm, prevHhmm, prevIsoDate, dayOfWeek } = getBucharestTime();
+    const url = new URL(context.request.url);
+    const showStatus = url.searchParams.get('status') === 'true';
 
-    // 1. Fetch active tasks from KV
+    // 1. If status requested, return health and last ping info without dispatching
+    if (showStatus) {
+      const rawPing = await kv.get('last_cron_ping', 'text');
+      let lastPing: { timestamp: string; bucharestTime: string; userAgent?: string } | null = null;
+      let secondsAgo: number | null = null;
+      if (rawPing) {
+        try {
+          lastPing = JSON.parse(rawPing);
+          if (lastPing?.timestamp) {
+            secondsAgo = Math.round((Date.now() - new Date(lastPing.timestamp).getTime()) / 1000);
+          }
+        } catch {
+          // Ignore JSON parse error on legacy ping values
+        }
+      }
+      return new Response(
+        JSON.stringify({
+          success: true,
+          currentBucharestTime: hhmm,
+          lastPing,
+          secondsAgo,
+          isHealthy: secondsAgo !== null && secondsAgo <= 180,
+        }),
+        { status: 200, headers: jsonHeaders }
+      );
+    }
+
+    // 2. Record this ping into KV for audit and health monitoring
+    const userAgent = context.request.headers.get('user-agent') || 'unknown';
+    const nowIso = new Date().toISOString();
+    await kv.put(
+      'last_cron_ping',
+      JSON.stringify({
+        timestamp: nowIso,
+        bucharestTime: hhmm,
+        userAgent,
+      })
+    );
+
+    // 3. Fetch active tasks from KV
     const rawTasks = await kv.get('site_tasks', 'text');
     let tasks: TaskItem[] = [];
     if (rawTasks) {
@@ -267,33 +319,44 @@ export async function onRequestGet(context: PagesContext) {
       );
     }
 
-    // 2. Filter tasks scheduled for current minute
-    const matchingTasks = tasks.filter((t) => {
-      if (!t.times || !t.times.includes(hhmm)) return false;
-      if (t.scheduleType === 'daily') return true;
-      if (t.scheduleType === 'once' && t.dateCreated === isoDate) return true;
-      if (t.scheduleType === 'weekly' && t.daysOfWeek?.includes(dayOfWeek)) return true;
-      return false;
-    });
+    // 4. Filter tasks scheduled for current minute OR previous minute (jitter tolerance)
+    const matchingTasksWithTimes: { task: TaskItem; time: string }[] = [];
+    for (const t of tasks) {
+      const isValidDate =
+        t.scheduleType === 'daily' ||
+        (t.scheduleType === 'once' && t.dateCreated === isoDate) ||
+        (t.scheduleType === 'weekly' && t.daysOfWeek?.includes(dayOfWeek));
+      if (!isValidDate || !t.times) continue;
 
-    if (matchingTasks.length === 0) {
+      for (const checkTime of [prevHhmm, hhmm]) {
+        if (t.times.includes(checkTime)) {
+          // Avoid duplicate entry if task has duplicate time definition
+          if (!matchingTasksWithTimes.some(m => m.task.id === t.id && m.time === checkTime)) {
+            matchingTasksWithTimes.push({ task: t, time: checkTime });
+          }
+        }
+      }
+    }
+
+    if (matchingTasksWithTimes.length === 0) {
       return new Response(
         JSON.stringify({
           success: true,
           evaluatedTime: hhmm,
+          jitterCheckedTime: prevHhmm,
           bucharestDate: isoDate,
           dayOfWeek,
           matchedTasks: 0,
-          message: `No tasks scheduled for ${hhmm}`,
+          message: `No tasks scheduled for ${hhmm} or ${prevHhmm}`,
         }),
         { status: 200, headers: jsonHeaders }
       );
     }
 
-    // 3. Dispatch Web Push for each matching task
+    // 5. Dispatch Web Push for each matching task (dedupKey prevents duplicate deliveries)
     const results = [];
-    for (const task of matchingTasks) {
-      const res = await dispatchTaskToShift(kv, task, hhmm, isoDate, prevIsoDate);
+    for (const item of matchingTasksWithTimes) {
+      const res = await dispatchTaskToShift(kv, item.task, item.time, isoDate, prevIsoDate);
       results.push(res);
     }
 
@@ -302,7 +365,7 @@ export async function onRequestGet(context: PagesContext) {
         success: true,
         evaluatedTime: hhmm,
         bucharestDate: isoDate,
-        matchedTasks: matchingTasks.length,
+        matchedTasks: matchingTasksWithTimes.length,
         results,
       }),
       { status: 200, headers: jsonHeaders }
