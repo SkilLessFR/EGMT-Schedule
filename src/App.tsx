@@ -202,6 +202,7 @@ export default function App() {
   const [activeAlarmTask, setActiveAlarmTask] = useState<{ id: string; taskTitle: string; time: string; type: ScheduleType } | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const lastCheckedMinute = useRef<string>('');
+  const triggeredAlarmsRef = useRef<Set<string>>(new Set());
 
   const hoursArray = useMemo(() => Array.from({ length: 24 }, (_, i) => String(i).padStart(2, '0')), []);
   const minutesArray = useMemo(() => Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0')), []);
@@ -415,7 +416,12 @@ export default function App() {
       const currentDayOfWeek = now.getDay();
       const currentIsoDate = iso(now);
       
-      if (lastCheckedMinute.current === currentHHMM) return;
+      const minutesToCheck = [currentHHMM];
+      const prevMinuteDate = new Date(now.getTime() - 60000);
+      const prevHHMM = `${String(prevMinuteDate.getHours()).padStart(2, '0')}:${String(prevMinuteDate.getMinutes()).padStart(2, '0')}`;
+      if (lastCheckedMinute.current && lastCheckedMinute.current !== prevHHMM && prevHHMM !== currentHHMM) {
+        minutesToCheck.push(prevHHMM);
+      }
       lastCheckedMinute.current = currentHHMM;
 
       const activeEmployee = authenticatedEmployee || selectedEmployee;
@@ -432,7 +438,12 @@ export default function App() {
       // Check recurring task alarms
       if (taskAlertsEnabled) {
         tasks.forEach((task) => {
-          if (!task.times.includes(currentHHMM)) return;
+          const matchingTime = task.times.find((t) => minutesToCheck.includes(t));
+          if (!matchingTime) return;
+
+          const triggerKey = `${task.id}-${currentIsoDate}-${matchingTime}`;
+          if (triggeredAlarmsRef.current.has(triggerKey)) return;
+          triggeredAlarmsRef.current.add(triggerKey);
 
           let shouldTrigger = false;
 
@@ -463,7 +474,7 @@ export default function App() {
             }
           }
 
-          setActiveAlarmTask({ id: task.id, taskTitle: task.title, time: currentHHMM, type: task.scheduleType });
+          setActiveAlarmTask({ id: task.id, taskTitle: task.title, time: matchingTime, type: task.scheduleType });
           if (audioRef.current) {
             audioRef.current.currentTime = 0;
             audioRef.current.play().catch(err => console.log("Audio deferred configuration:", err));
@@ -471,20 +482,20 @@ export default function App() {
 
           // Dispatch real Web Push via Cloudflare to all registered devices (delivers to phone even if locked/closed)
           // We do NOT call showAppNotification here unless remote push fails, avoiding duplicate banners.
-          triggerTaskPushToShift(task, currentHHMM)
+          triggerTaskPushToShift(task, matchingTime)
             .then((res) => {
               if (!res.success) {
                 showAppNotification(`⏰ Task Alert: ${task.title}`, {
-                  body: `Task reminder for ${currentHHMM}`,
-                  tag: `task-${task.id}-${currentHHMM}`,
+                  body: `Task reminder for ${matchingTime}`,
+                  tag: `task-${task.id}-${matchingTime}`,
                 }).catch(() => {});
               }
             })
             .catch((err) => {
               console.warn('Background task push dispatch error:', err);
               showAppNotification(`⏰ Task Alert: ${task.title}`, {
-                body: `Task reminder for ${currentHHMM}`,
-                tag: `task-${task.id}-${currentHHMM}`,
+                body: `Task reminder for ${matchingTime}`,
+                tag: `task-${task.id}-${matchingTime}`,
               }).catch(() => {});
             });
         });
