@@ -40,6 +40,28 @@ export const AUTH_STORAGE_KEY = 'work-schedule-auth-user';
 export const AUTH_TOKEN_STORAGE_KEY = 'work-schedule-auth-token';
 
 /**
+ * 15-day investigation window (2026-10-22 to 2026-11-05 inclusive).
+ * During this window, their shifts are set to OFF.
+ */
+export const SUSPENDED_PERIOD = {
+  startDate: '2026-10-22',
+  endDate: '2026-11-05',
+  employees: new Set<string>([
+    'Stan Antonio-Claudiu',
+    'Jimboreanu Adelin-Cosmin',
+  ]),
+};
+
+export const SUSPENDED_EMPLOYEES = SUSPENDED_PERIOD.employees;
+
+export function isEmployeeSuspendedOnDate(employee: string, isoDate: string): boolean {
+  return SUSPENDED_PERIOD.employees.has(employee) &&
+    isoDate >= SUSPENDED_PERIOD.startDate &&
+    isoDate <= SUSPENDED_PERIOD.endDate;
+}
+
+
+/**
  * Resolve the expected authentication PIN code for an employee name.
  */
 export function getExpectedCodeForEmployee(employeeName: string): string | null {
