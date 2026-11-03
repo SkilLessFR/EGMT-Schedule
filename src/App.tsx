@@ -1,9 +1,10 @@
 // App.tsx
 import type React from 'react';
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, ChevronDown, Moon, Search, Settings2, Sun, Users, Wallet, CheckSquare, Plus, Trash2, Bell, AlertTriangle, Edit2, X, UploadCloud, Loader2, Cloud, ShieldCheck, LogOut, Lock, ArrowLeftRight, Save, Sparkles, RotateCcw, CheckCircle2, AlertCircle, Send } from 'lucide-react';
+import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, ChevronDown, Moon, Search, Settings2, Sun, Users, Wallet, CheckSquare, Plus, Trash2, Bell, AlertTriangle, Edit2, X, UploadCloud, Loader2, Cloud, ShieldCheck, LogOut, Lock, ArrowLeftRight, Save, Sparkles, RotateCcw, CheckCircle2, AlertCircle, Send, CalendarRange } from 'lucide-react';
 import type { RosterData, ShiftEvent } from './types';
 import { parseRoster, mergeRosters } from './parser';
+import ScheduleBuilderTab from './ScheduleBuilderTab';
 import {
   colorFor,
   shiftKey,
@@ -748,11 +749,11 @@ export default function App() {
     };
   }, [dark]);
 
-  const [activeTab, setActiveTab] = useState<'calendar' | 'reports' | 'tasks' | 'settings' | 'solver'>('calendar');
+  const [activeTab, setActiveTab] = useState<'calendar' | 'reports' | 'tasks' | 'settings' | 'solver' | 'builder'>('calendar');
   const [solverTargetShift, setSolverTargetShift] = useState<string>('M');
   const [solverResult, setSolverResult] = useState<ReturnType<typeof findShiftTransformationPreview> | null>(null);
   const [solverSimulationVariant, setSolverSimulationVariant] = useState(0);
-  const handleTabChange = useCallback((tab: 'calendar' | 'reports' | 'tasks' | 'settings' | 'solver') => {
+  const handleTabChange = useCallback((tab: 'calendar' | 'reports' | 'tasks' | 'settings' | 'solver' | 'builder') => {
     setActiveTab(tab);
     setSelectedEvent(null);
   }, []);
@@ -1043,10 +1044,12 @@ export default function App() {
     { id: 'calendar' as const, label: 'Calendar', Icon: CalendarIcon }, 
     { id: 'reports' as const, label: 'Reports', Icon: BarChart3 }, 
     { id: 'solver' as const, label: 'Solver', Icon: Search },
+    { id: 'builder' as const, label: 'Schedule Builder', Icon: CalendarRange, desktopOnly: true },
     { id: 'tasks' as const, label: 'Tasks', Icon: CheckSquare },
     { id: 'settings' as const, label: 'Settings', Icon: Settings2 }
   ];
-  const activeTabIndex = tabs.findIndex((t) => t.id === activeTab);
+  const mobileTabs = tabs.filter((t) => !('desktopOnly' in t && t.desktopOnly));
+  const mobileActiveTabIndex = mobileTabs.findIndex((t) => t.id === activeTab);
   
   const statCards = [
     { code: 'M', label: 'Morning' }, 
@@ -1082,7 +1085,7 @@ export default function App() {
 
           <div className={`flex min-h-0 flex-1 flex-col ${activeTab === 'calendar' ? 'overflow-hidden' : 'overflow-y-auto overscroll-contain'}`}>
           <div className={`flex min-h-0 flex-1 flex-col transition-[filter] duration-200 ${sheetOpen ? 'pointer-events-none select-none blur-[1px]' : ''}`} aria-hidden={sheetOpen}>
-            <div className={`mx-auto flex w-full flex-col lg:max-w-4xl lg:px-10 lg:py-8 ${activeTab === 'calendar' ? 'min-h-0 flex-1' : ''}`}>
+            <div className={`mx-auto flex w-full flex-col ${activeTab === 'builder' ? 'lg:max-w-7xl lg:px-6' : 'lg:max-w-4xl lg:px-10'} lg:py-8 ${activeTab === 'calendar' ? 'min-h-0 flex-1' : ''}`}>
             {incomingSwapRequests.length > 0 && (
               <div className="mx-4 lg:mx-0 mb-3 space-y-2">
                 {incomingSwapRequests.map((req) => (
@@ -1483,6 +1486,33 @@ export default function App() {
                     </div>
                   </div>
                 )}
+              </div>
+            )}
+
+            {activeTab === 'builder' && (
+              <div className="w-full px-4 pb-48 pt-4 sm:px-5 lg:px-0 lg:pb-8">
+                {/* Mobile Fallback Notice */}
+                <div className="lg:hidden p-6 rounded-3xl border border-blue-500/20 bg-blue-500/5 text-center space-y-3 my-8">
+                  <div className="mx-auto size-12 rounded-2xl bg-blue-500/10 flex items-center justify-center text-blue-500">
+                    <CalendarRange className="size-6" />
+                  </div>
+                  <h2 className="text-[18px] font-bold">Desktop Only Feature</h2>
+                  <p className="text-[13px] text-zinc-500 dark:text-zinc-400 max-w-sm mx-auto">
+                    The Schedule Builder matrix is designed for widescreen desktop displays to manage full team schedules and 24/7 coverage.
+                  </p>
+                </div>
+
+                {/* Desktop Component */}
+                <div className="hidden lg:block">
+                  <ScheduleBuilderTab
+                    roster={roster}
+                    onApplySchedule={(updatedRoster, targetMonth, targetYear) => {
+                      setRoster(updatedRoster);
+                      setCurrentMonth(targetMonth);
+                      setCurrentYear(targetYear);
+                    }}
+                  />
+                </div>
               </div>
             )}
 
@@ -2313,12 +2343,13 @@ export default function App() {
               {/* Dynamic Liquid Glass Active Indicator */}
               <div
                 style={{
-                  width: `calc((100% - 0.75rem) / ${tabs.length})`,
-                  transform: `translateX(${activeTabIndex * 100}%)`,
+                  width: `calc((100% - 0.75rem) / ${mobileTabs.length})`,
+                  transform: `translateX(${Math.max(0, mobileActiveTabIndex) * 100}%)`,
+                  opacity: mobileActiveTabIndex >= 0 ? 1 : 0,
                 }}
                 className="absolute inset-y-1.5 left-1.5 rounded-[22px] bg-white/90 shadow-sm transition-transform duration-[220ms] ease-out dark:bg-white/[0.16] pointer-events-none"
               />
-              {tabs.map(({ id, label, Icon }) => {
+              {mobileTabs.map(({ id, label, Icon }) => {
                 const isActive = activeTab === id;
                 return (
                   <button

@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@block65/webcrypto-web-push": "^2.0.0",
+    "exceljs": "^4.4.0",
     "html2canvas": "^1.4.1",
     "jspdf": "^3.0.3",
     "lucide-react": "^0.542.0",
@@ -18,6 +19,7 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@types/exceljs": "^0.5.3",
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
