@@ -1,11 +1,9 @@
-// src/ScheduleBuilderTab.tsx
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   RotateCcw,
   Save,
   FileSpreadsheet,
   Download,
-  ArrowLeftRight,
   ChevronLeft,
   ChevronRight,
   AlertTriangle,
@@ -13,18 +11,20 @@ import {
   Shield,
   Lock,
   Clock,
-  X
+  X,
+  Loader2,
+  MousePointerClick
 } from 'lucide-react';
 import type { RosterData } from './types';
 import {
   generateBalancedSchedule,
   validateScheduleCompliance,
-  swapEmployeeShifts,
   exportRosterToExcelFile,
   countLegalWorkingDaysInMonth,
   isHistoricalMonthInRoster,
   loadHistoricalSchedule,
   FIXED_MID_EMPLOYEES,
+  FIXED_WEEKDAY_MA_EMPLOYEES,
   type GeneratedScheduleResult,
   type ScheduleValidationReport
 } from './scheduleBuilder';
@@ -72,15 +72,42 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
   const [currentSeed, setCurrentSeed] = useState<number>(() => Math.floor(Math.random() * 999999));
   const [appliedNotification, setAppliedNotification] = useState<string | null>(null);
 
-  // Multi-day selection state for swaps
-  const [selectedDates, setSelectedDates] = useState<Set<string>>(new Set());
-  const [swapEmployeeA, setSwapEmployeeA] = useState<string>('');
-  const [swapEmployeeB, setSwapEmployeeB] = useState<string>('');
-  const [swapFeedback, setSwapFeedback] = useState<{ type: 'success' | 'warning'; message: string } | null>(null);
+  // Multi-cell selection state for block changes
+  const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
+  const [lastClickedCell, setLastClickedCell] = useState<{ employee: string; isoDate: string } | null>(null);
+  const [bulkFeedback, setBulkFeedback] = useState<string | null>(null);
+  const isMouseDownRef = useRef(false);
+
+  // Clear dragging on mouseup
+  useEffect(() => {
+    const handleMouseUp = () => {
+      isMouseDownRef.current = false;
+    };
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => window.removeEventListener('mouseup', handleMouseUp);
+  }, []);
 
   // Single cell editing popover
   const [editingCell, setEditingCell] = useState<{ employee: string; isoDate: string } | null>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
   const [hasUserNavigated, setHasUserNavigated] = useState(false);
+
+  // Close editing popover when clicking outside
+  useEffect(() => {
+    if (!editingCell) return;
+    const handleClickOutside = (e: MouseEvent | PointerEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setEditingCell(null);
+      }
+    };
+    const timer = setTimeout(() => {
+      document.addEventListener('pointerdown', handleClickOutside);
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('pointerdown', handleClickOutside);
+    };
+  }, [editingCell]);
 
   // Sync initial month and year once roster data loads if user hasn't explicitly navigated
   useEffect(() => {
@@ -92,23 +119,32 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
     }
   }, [roster, hasUserNavigated]);
 
+  const [isGenerating, setIsGenerating] = useState(false);
+
   // Generate initial schedule or load historical schedule if already set in stone
-  const runGeneration = (seedValue: number = currentSeed) => {
-    if (isHistoricalMonthInRoster(roster, targetYear, targetMonth)) {
-      setScheduleData(loadHistoricalSchedule(roster!, targetYear, targetMonth));
-    } else {
-      const result = generateBalancedSchedule(roster, targetYear, targetMonth, {
-        seed: seedValue,
-        targetWorkingDays
-      });
-      setScheduleData(result);
-    }
-    setSelectedDates(new Set());
-    setSwapFeedback(null);
-  };
+  const runGeneration = useCallback(
+    (seedValue: number = currentSeed, y: number = targetYear, m: number = targetMonth) => {
+      setIsGenerating(true);
+      setTimeout(() => {
+        if (isHistoricalMonthInRoster(roster, y, m)) {
+          setScheduleData(loadHistoricalSchedule(roster!, y, m));
+        } else {
+          const result = generateBalancedSchedule(roster, y, m, {
+            seed: seedValue,
+            targetWorkingDays: countLegalWorkingDaysInMonth(m, y)
+          });
+          setScheduleData(result);
+        }
+        setSelectedCells(new Set());
+        setBulkFeedback(null);
+        setIsGenerating(false);
+      }, 20);
+    },
+    [roster, currentSeed, targetYear, targetMonth]
+  );
 
   useEffect(() => {
-    runGeneration(currentSeed);
+    runGeneration(currentSeed, targetYear, targetMonth);
   }, [targetYear, targetMonth, targetWorkingDays, roster]);
 
   // Live validation whenever schedule rows change
@@ -118,6 +154,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
         isFullyCompliant: true,
         totalViolations: 0,
         understaffedDaysCount: 0,
+        nightOverstaffedDaysCount: 0,
         streakViolationCount: 0,
         nightRestViolationCount: 0,
         excessiveRestViolationCount: 0,
@@ -127,6 +164,9 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
         employeeStats: {},
         warnings: []
       };
+    }
+    if (scheduleData.validation) {
+      return scheduleData.validation;
     }
     return validateScheduleCompliance(
       scheduleData.rows,
@@ -144,95 +184,154 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
     return roster?.employees ?? [];
   }, [scheduleData, roster]);
 
-  const rotatingEmployees = useMemo(() => {
-    return employees.filter((emp) => !FIXED_MID_EMPLOYEES.includes(emp));
-  }, [employees]);
-
   // Handlers for month navigation
   const handlePrevMonth = () => {
+    if (isGenerating) return;
     setHasUserNavigated(true);
-    setTargetMonth((prev) => {
-      if (prev === 0) {
-        setTargetYear((y) => y - 1);
-        return 11;
-      }
-      return prev - 1;
-    });
+    const prev = new Date(targetYear, targetMonth - 1, 1);
+    setTargetMonth(prev.getMonth());
+    setTargetYear(prev.getFullYear());
   };
 
   const handleNextMonth = () => {
+    if (isGenerating) return;
     setHasUserNavigated(true);
-    setTargetMonth((prev) => {
-      if (prev === 11) {
-        setTargetYear((y) => y + 1);
-        return 0;
-      }
-      return prev + 1;
-    });
+    const next = new Date(targetYear, targetMonth + 1, 1);
+    setTargetMonth(next.getMonth());
+    setTargetYear(next.getFullYear());
   };
 
   const handleRegenerateVariant = () => {
-    if (isHistorical) return;
+    if (isHistorical || isGenerating) return;
     const nextSeed = Math.floor(Math.random() * 999999);
     setCurrentSeed(nextSeed);
-    runGeneration(nextSeed);
+    runGeneration(nextSeed, targetYear, targetMonth);
   };
 
-  // Date multi-selection toggle
-  const toggleDateSelection = (isoDate: string) => {
-    if (isHistorical) return;
-    setSelectedDates((prev) => {
-      const next = new Set(prev);
-      if (next.has(isoDate)) next.delete(isoDate);
-      else next.add(isoDate);
+  // Multi-cell selection & block change handlers
+  const handleCellMouseDown = (e: React.MouseEvent, emp: string, isoDate: string) => {
+    if ((e.target as HTMLElement).closest('.shift-popover')) return;
+
+    const cellKey = `${emp}::${isoDate}`;
+    isMouseDownRef.current = true;
+
+    if (e.ctrlKey || e.metaKey) {
+      // Holding Ctrl / Cmd: Toggle cell into/out of multi-selection
+      setEditingCell(null);
+      setSelectedCells((prev) => {
+        const next = new Set(prev);
+        if (next.has(cellKey)) {
+          next.delete(cellKey);
+        } else {
+          next.add(cellKey);
+        }
+        return next;
+      });
+      setLastClickedCell({ employee: emp, isoDate });
+    } else if (e.shiftKey && lastClickedCell && scheduleData) {
+      // Holding Shift: Select rectangular block range between last clicked cell and current
+      setEditingCell(null);
+      const allDates = scheduleData.dateColumns.map((c) => c.isoDate);
+      const allEmps = Object.keys(scheduleData.rows);
+
+      const startEmpIdx = allEmps.indexOf(lastClickedCell.employee);
+      const endEmpIdx = allEmps.indexOf(emp);
+      const startDateIdx = allDates.indexOf(lastClickedCell.isoDate);
+      const endDateIdx = allDates.indexOf(isoDate);
+
+      if (startEmpIdx !== -1 && endEmpIdx !== -1 && startDateIdx !== -1 && endDateIdx !== -1) {
+        const [lowEmp, highEmp] = startEmpIdx <= endEmpIdx ? [startEmpIdx, endEmpIdx] : [endEmpIdx, startEmpIdx];
+        const [lowDate, highDate] = startDateIdx <= endDateIdx ? [startDateIdx, endDateIdx] : [endDateIdx, startDateIdx];
+
+        setSelectedCells((prev) => {
+          const next = new Set(prev);
+          for (let eIdx = lowEmp; eIdx <= highEmp; eIdx++) {
+            for (let dIdx = lowDate; dIdx <= highDate; dIdx++) {
+              next.add(`${allEmps[eIdx]}::${allDates[dIdx]}`);
+            }
+          }
+          return next;
+        });
+      }
+    } else {
+      // Normal click without Ctrl/Shift:
+      if (selectedCells.size > 0 && selectedCells.has(cellKey)) {
+        return;
+      }
+      setSelectedCells(new Set());
+      setEditingCell({ employee: emp, isoDate });
+      setLastClickedCell({ employee: emp, isoDate });
+    }
+  };
+
+  const handleCellMouseEnter = (e: React.MouseEvent, emp: string, isoDate: string) => {
+    if (isMouseDownRef.current && (e.ctrlKey || e.metaKey)) {
+      const cellKey = `${emp}::${isoDate}`;
+      setSelectedCells((prev) => {
+        const next = new Set(prev);
+        next.add(cellKey);
+        return next;
+      });
+    }
+  };
+
+  // Toggle selection for an entire day column
+  const handleToggleColumnSelection = (isoDate: string, isCtrl: boolean) => {
+    if (!scheduleData) return;
+    const emps = Object.keys(scheduleData.rows);
+    const colKeys = emps.map((emp) => `${emp}::${isoDate}`);
+    setSelectedCells((prev) => {
+      const next = isCtrl ? new Set(prev) : new Set<string>();
+      const allSelected = colKeys.every((k) => prev.has(k));
+      if (allSelected && isCtrl) {
+        colKeys.forEach((k) => next.delete(k));
+      } else {
+        colKeys.forEach((k) => next.add(k));
+      }
       return next;
     });
+    setEditingCell(null);
   };
 
-  const selectAllWeekdays = () => {
+  // Toggle selection for an entire employee row
+  const handleToggleRowSelection = (emp: string, isCtrl: boolean) => {
     if (!scheduleData) return;
-    const weekdays = scheduleData.dateColumns
-      .filter((d) => d.date.getDay() !== 0 && d.date.getDay() !== 6)
-      .map((d) => d.isoDate);
-    setSelectedDates(new Set(weekdays));
+    const rowKeys = scheduleData.dateColumns.map((c) => `${emp}::${c.isoDate}`);
+    setSelectedCells((prev) => {
+      const next = isCtrl ? new Set(prev) : new Set<string>();
+      const allSelected = rowKeys.every((k) => prev.has(k));
+      if (allSelected && isCtrl) {
+        rowKeys.forEach((k) => next.delete(k));
+      } else {
+        rowKeys.forEach((k) => next.add(k));
+      }
+      return next;
+    });
+    setEditingCell(null);
   };
 
-  const selectAllWeekends = () => {
-    if (!scheduleData) return;
-    const weekends = scheduleData.dateColumns
-      .filter((d) => d.date.getDay() === 0 || d.date.getDay() === 6)
-      .map((d) => d.isoDate);
-    setSelectedDates(new Set(weekends));
-  };
+  // Apply shift code to all currently selected cells (block change)
+  const handleApplyShiftToSelected = (shiftCode: string) => {
+    if (!scheduleData || selectedCells.size === 0) return;
 
-  const clearSelection = () => {
-    setSelectedDates(new Set());
-    setSwapFeedback(null);
-  };
+    const updatedRows = { ...scheduleData.rows };
+    selectedCells.forEach((cellKey) => {
+      const [emp, isoDate] = cellKey.split('::');
+      if (updatedRows[emp]) {
+        updatedRows[emp] = {
+          ...updatedRows[emp],
+          [isoDate]: shiftCode
+        };
+      }
+    });
 
-  // Apply swap between two employees on selected dates
-  const handleExecuteSwap = () => {
-    if (isHistorical || !scheduleData || !swapEmployeeA || !swapEmployeeB || selectedDates.size === 0) return;
-    if (swapEmployeeA === swapEmployeeB) {
-      setSwapFeedback({ type: 'warning', message: 'Select two different employees to swap shifts.' });
-      return;
-    }
-
-    const datesArray = Array.from(selectedDates);
-    const updatedRows = swapEmployeeShifts(
-      scheduleData.rows,
-      swapEmployeeA,
-      swapEmployeeB,
-      datesArray
-    );
-
-    // Validate updated
     const testReport = validateScheduleCompliance(
       updatedRows,
       scheduleData.dateColumns,
       roster,
       targetYear,
-      targetMonth
+      targetMonth,
+      targetWorkingDays
     );
 
     setScheduleData({
@@ -241,22 +340,54 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
       validation: testReport
     });
 
-    if (testReport.isFullyCompliant) {
-      setSwapFeedback({
-        type: 'success',
-        message: `Swapped ${datesArray.length} day(s) between ${swapEmployeeA.split(' ')[0]} and ${swapEmployeeB.split(' ')[0]}. Schedule remains 100% compliant!`
-      });
-    } else {
-      setSwapFeedback({
-        type: 'warning',
-        message: `Swapped shifts with ${testReport.totalViolations} legal/coverage alert(s). Review summary below.`
-      });
-    }
+    setBulkFeedback(`Changed ${selectedCells.size} shift(s) to ${shiftCode}`);
+    setTimeout(() => setBulkFeedback(null), 3000);
   };
+
+  const handleClearSelectedCells = () => {
+    setSelectedCells(new Set());
+    setEditingCell(null);
+  };
+
+  // Keyboard shortcuts for block shifts and deselecting
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      if (e.key === 'Escape') {
+        setSelectedCells(new Set());
+        setEditingCell(null);
+        return;
+      }
+
+      if (selectedCells.size === 0) return;
+
+      const key = e.key.toUpperCase();
+      if (key === 'M') {
+        e.preventDefault();
+        handleApplyShiftToSelected('M');
+      } else if (key === 'A') {
+        e.preventDefault();
+        handleApplyShiftToSelected('A');
+      } else if (key === 'N') {
+        e.preventDefault();
+        handleApplyShiftToSelected('N');
+      } else if (key === 'O' || e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        handleApplyShiftToSelected('OFF');
+      } else if (key === 'H') {
+        e.preventDefault();
+        handleApplyShiftToSelected('H8');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedCells, scheduleData, roster, targetYear, targetMonth, targetWorkingDays]);
 
   // Manual shift override
   const handleSetCellShift = (shiftCode: string) => {
-    if (isHistorical || !editingCell || !scheduleData) return;
+    if (!editingCell || !scheduleData) return;
     const { employee, isoDate } = editingCell;
 
     const updatedRows = {
@@ -272,7 +403,8 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
       scheduleData.dateColumns,
       roster,
       targetYear,
-      targetMonth
+      targetMonth,
+      targetWorkingDays
     );
 
     setScheduleData({
@@ -483,17 +615,23 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
           {/* Regenerate Variant Button */}
           <button
             type="button"
-            disabled={isHistorical}
+            disabled={isHistorical || isGenerating}
             onClick={handleRegenerateVariant}
             className={`flex items-center gap-2 rounded-xl font-semibold px-4 py-2 text-[13px] shadow transition-all ${
-              isHistorical
+              isHistorical || isGenerating
                 ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 cursor-not-allowed opacity-60'
                 : 'bg-blue-500 hover:bg-blue-600 text-white active:scale-98 cursor-pointer'
             }`}
             title={isHistorical ? 'Historical records are set in stone and cannot be regenerated' : 'Generate new balanced variant'}
           >
-            {isHistorical ? <Lock className="size-4" /> : <RotateCcw className="size-4" />}
-            <span>{isHistorical ? 'Locked: Set in Stone' : 'Regenerate Variant'}</span>
+            {isHistorical ? (
+              <Lock className="size-4" />
+            ) : isGenerating ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <RotateCcw className="size-4" />
+            )}
+            <span>{isHistorical ? 'Locked: Set in Stone' : isGenerating ? 'Generating...' : 'Regenerate Variant'}</span>
           </button>
 
           {/* Legal Monthly Working Days Norm (Fixed, non-modifiable variable) */}
@@ -560,117 +698,26 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
         </div>
       </div>
 
-      {/* Multi-Select Date & Replace / Swap Employee Toolbar */}
-      {isHistorical ? (
-        <div className={`p-4 ${GLASS_CARD} flex items-center justify-between`}>
-          <div className="flex items-center gap-2.5 text-zinc-500 dark:text-zinc-400 text-[13px]">
-            <Lock className="size-4 text-amber-500" />
-            <span>This is an official historical roster record (set in stone). Shift modifications and swaps are disabled.</span>
-          </div>
-          <span className="rounded-full bg-zinc-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-zinc-500 border border-zinc-500/20">
-            Read Only
+      {/* Quick Help & Status Bar */}
+      <div className={`p-3 px-4 ${GLASS_CARD} flex flex-wrap items-center justify-between gap-2.5 text-[12px]`}>
+        <div className="flex items-center gap-2 text-zinc-600 dark:text-zinc-400">
+          <MousePointerClick className="size-4 text-blue-500 shrink-0" />
+          <span>
+            <strong className="text-zinc-800 dark:text-zinc-200">Block Selection:</strong> Hold <kbd className="px-1.5 py-0.5 rounded bg-zinc-950/10 dark:bg-white/10 font-mono text-[11px] text-blue-500 font-bold">Ctrl</kbd> (or <kbd className="px-1.5 py-0.5 rounded bg-zinc-950/10 dark:bg-white/10 font-mono text-[11px] text-blue-500 font-bold">⌘</kbd>) and click/drag to select multiple shifts, or use <kbd className="px-1.5 py-0.5 rounded bg-zinc-950/10 dark:bg-white/10 font-mono text-[11px] font-bold">Shift+Click</kbd> for a range.
           </span>
         </div>
-      ) : (
-        <div className={`p-4 ${GLASS_CARD} space-y-3 border-2 ${selectedDates.size > 0 ? 'border-blue-500/30 bg-blue-500/[0.02]' : 'border-transparent'}`}>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <ArrowLeftRight className="size-5 text-blue-500" />
-              <h2 className="text-[14px] font-bold">Swap & Replace Shifts</h2>
-              <span className="text-[12px] text-zinc-400">
-                {selectedDates.size > 0
-                  ? `(${selectedDates.size} date${selectedDates.size === 1 ? '' : 's'} selected)`
-                  : '— Click column dates or use quick range'}
-              </span>
-            </div>
+        {bulkFeedback ? (
+          <span className="font-semibold text-emerald-600 dark:text-emerald-400 animate-in fade-in flex items-center gap-1.5">
+            <CheckCircle2 className="size-4 shrink-0" />
+            {bulkFeedback}
+          </span>
+        ) : (
+          <span className="text-zinc-400 text-[11px]">
+            Hotkeys: <span className="font-mono font-semibold">M</span>, <span className="font-mono font-semibold">A</span>, <span className="font-mono font-semibold">N</span>, <span className="font-mono font-semibold">O</span> (off), <span className="font-mono font-semibold">H</span> (h8)
+          </span>
+        )}
+      </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={selectAllWeekdays}
-                className="rounded-lg bg-zinc-950/5 dark:bg-white/5 hover:bg-zinc-950/10 dark:hover:bg-white/10 px-2 py-1 text-[11px] font-semibold text-zinc-600 dark:text-zinc-400 cursor-pointer"
-              >
-                + Weekdays
-              </button>
-              <button
-                type="button"
-                onClick={selectAllWeekends}
-                className="rounded-lg bg-zinc-950/5 dark:bg-white/5 hover:bg-zinc-950/10 dark:hover:bg-white/10 px-2 py-1 text-[11px] font-semibold text-zinc-600 dark:text-zinc-400 cursor-pointer"
-              >
-                + Weekends
-              </button>
-              {selectedDates.size > 0 && (
-                <button
-                  type="button"
-                  onClick={clearSelection}
-                  className="text-[11px] font-semibold text-rose-500 hover:text-rose-600 cursor-pointer ml-1"
-                >
-                  Clear
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Swap Controls Row */}
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2">
-              <span className="text-[12px] text-zinc-500 font-medium">Employee A:</span>
-              <select
-                value={swapEmployeeA}
-                onChange={(e) => setSwapEmployeeA(e.target.value)}
-                className="rounded-xl border border-zinc-950/10 dark:border-white/10 bg-zinc-950/5 dark:bg-white/5 px-3 py-1.5 text-[12px] font-semibold outline-none focus:ring-2 focus:ring-blue-500/30"
-              >
-                <option value="">Select Employee...</option>
-                {rotatingEmployees.map((emp) => (
-                  <option key={emp} value={emp}>
-                    {emp}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <span className="text-zinc-400">⇄</span>
-
-            <div className="flex items-center gap-2">
-              <span className="text-[12px] text-zinc-500 font-medium">Employee B:</span>
-              <select
-                value={swapEmployeeB}
-                onChange={(e) => setSwapEmployeeB(e.target.value)}
-                className="rounded-xl border border-zinc-950/10 dark:border-white/10 bg-zinc-950/5 dark:bg-white/5 px-3 py-1.5 text-[12px] font-semibold outline-none focus:ring-2 focus:ring-blue-500/30"
-              >
-                <option value="">Select Employee...</option>
-                {rotatingEmployees.map((emp) => (
-                  <option key={emp} value={emp}>
-                    {emp}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <button
-              type="button"
-              disabled={!swapEmployeeA || !swapEmployeeB || selectedDates.size === 0}
-              onClick={handleExecuteSwap}
-              className="flex items-center gap-2 rounded-xl bg-blue-500 hover:bg-blue-600 disabled:opacity-40 text-white font-semibold px-4 py-1.5 text-[12px] shadow transition-all active:scale-98 cursor-pointer"
-            >
-              <ArrowLeftRight className="size-3.5" />
-              <span>Swap on {selectedDates.size} Day(s)</span>
-            </button>
-          </div>
-
-          {/* Swap Feedback Message */}
-          {swapFeedback && (
-            <div className={`rounded-xl p-2.5 text-[12px] flex items-center gap-2 ${
-              swapFeedback.type === 'success'
-                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20'
-                : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20'
-            }`}>
-              {swapFeedback.type === 'success' ? <CheckCircle2 className="size-4 shrink-0" /> : <AlertTriangle className="size-4 shrink-0" />}
-              <span>{swapFeedback.message}</span>
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Interactive Schedule Matrix Grid */}
       <div className={`overflow-hidden ${GLASS_CARD}`}>
@@ -685,28 +732,22 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                 </th>
 
                 {/* Day Columns */}
+                {/* Day Columns */}
                 {scheduleData?.dateColumns.map(({ isoDate, date }) => {
                   const dayNum = date.getDate();
                   const dayName = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][date.getDay()];
                   const isWeekend = date.getDay() === 0 || date.getDay() === 6;
-                  const isSelected = selectedDates.has(isoDate);
 
                   return (
                     <th
                       key={isoDate}
-                      onClick={() => !isHistorical && toggleDateSelection(isoDate)}
-                      className={`min-w-[42px] max-w-[42px] p-1 text-center font-semibold transition-colors border-r border-zinc-950/5 dark:border-white/5 ${
-                        isHistorical
-                          ? isWeekend
-                            ? 'bg-zinc-950/[0.05] dark:bg-white/[0.05] text-zinc-500 cursor-default'
-                            : 'text-zinc-700 dark:text-zinc-300 cursor-default'
-                          : isSelected
-                            ? 'bg-blue-500/20 text-blue-600 dark:text-blue-400 font-bold cursor-pointer'
-                            : isWeekend
-                              ? 'bg-zinc-950/[0.05] dark:bg-white/[0.05] text-zinc-500 cursor-pointer'
-                              : 'text-zinc-700 dark:text-zinc-300 hover:bg-zinc-950/[0.03] dark:hover:bg-white/[0.03] cursor-pointer'
+                      onClick={(e) => handleToggleColumnSelection(isoDate, e.ctrlKey || e.metaKey)}
+                      className={`min-w-[42px] max-w-[42px] p-1 text-center font-semibold transition-colors border-r border-zinc-950/5 dark:border-white/5 cursor-pointer ${
+                        isWeekend
+                          ? 'bg-zinc-950/[0.05] dark:bg-white/[0.05] text-zinc-500 hover:bg-zinc-950/10 dark:hover:bg-white/10'
+                          : 'text-zinc-700 dark:text-zinc-300 hover:bg-zinc-950/[0.03] dark:hover:bg-white/[0.03]'
                       }`}
-                      title={isHistorical ? `${isoDate} (Historical record)` : `Click to select/deselect ${isoDate}`}
+                      title={`Click to select/deselect all shifts on ${isoDate}`}
                     >
                       <div className="text-[9px] uppercase tracking-tighter opacity-70">{dayName}</div>
                       <div className="text-[12px] font-bold leading-tight">{dayNum}</div>
@@ -725,6 +766,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
             <tbody className="divide-y divide-zinc-950/5 dark:divide-white/5">
               {employees.map((emp) => {
                 const isFixedMid = FIXED_MID_EMPLOYEES.includes(emp);
+                const isWeekdayMA = FIXED_WEEKDAY_MA_EMPLOYEES.includes(emp);
                 const stats = validation.employeeStats[emp];
 
                 return (
@@ -733,10 +775,18 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                     className="hover:bg-zinc-950/[0.02] dark:hover:bg-white/[0.02] transition-colors"
                   >
                     {/* Sticky Employee Name Cell */}
-                    <td className="sticky left-0 z-10 p-2 font-medium bg-zinc-50/90 dark:bg-[#101010]/95 backdrop-blur border-r border-zinc-950/10 dark:border-white/10">
+                    <td
+                      onClick={(e) => handleToggleRowSelection(emp, e.ctrlKey || e.metaKey)}
+                      className="sticky left-0 z-10 p-2 font-medium bg-zinc-50/90 dark:bg-[#101010]/95 backdrop-blur border-r border-zinc-950/10 dark:border-white/10 cursor-pointer hover:bg-zinc-100 dark:hover:bg-[#181818] transition-colors"
+                      title={`Click to select/deselect all shifts for ${emp}`}
+                    >
                       <div className="flex items-center gap-2">
                         <div className={`flex size-6 shrink-0 items-center justify-center rounded-lg text-[10px] font-bold ${
-                          isFixedMid ? 'bg-blue-500/15 text-blue-500' : 'bg-zinc-500/15 text-zinc-600 dark:text-zinc-400'
+                          isFixedMid
+                            ? 'bg-blue-500/15 text-blue-500'
+                            : isWeekdayMA
+                            ? 'bg-emerald-500/15 text-emerald-500'
+                            : 'bg-zinc-500/15 text-zinc-600 dark:text-zinc-400'
                         }`}>
                           {initials(emp)}
                         </div>
@@ -747,6 +797,9 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                           {isFixedMid && (
                             <span className="text-[9px] font-bold text-blue-500 uppercase">Fixed Mid</span>
                           )}
+                          {isWeekdayMA && (
+                            <span className="text-[9px] font-bold text-emerald-500 uppercase">Weekday M/A</span>
+                          )}
                         </div>
                       </div>
                     </td>
@@ -756,7 +809,8 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                       const rawShift = scheduleData.rows[emp]?.[isoDate] ?? 'OFF';
                       const sKey = shiftKey(rawShift);
                       const isWeekend = date.getDay() === 0 || date.getDay() === 6;
-                      const isDateSelected = selectedDates.has(isoDate);
+                      const cellKey = `${emp}::${isoDate}`;
+                      const isCellSelected = selectedCells.has(cellKey);
                       const isEditing = editingCell?.employee === emp && editingCell?.isoDate === isoDate;
 
                       // Badge styles
@@ -768,52 +822,69 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                       return (
                         <td
                           key={isoDate}
-                          onClick={() => {
-                            if (!isHistorical && !isFixedMid) {
-                              setEditingCell({ employee: emp, isoDate });
-                            }
-                          }}
-                          className={`p-1 text-center border-r border-zinc-950/5 dark:border-white/5 relative ${
-                            isHistorical || isFixedMid ? 'cursor-default' : 'cursor-pointer'
-                          } ${
-                            isDateSelected ? 'bg-blue-500/[0.06]' : isWeekend ? 'bg-zinc-950/[0.015] dark:bg-white/[0.015]' : ''
+                          onMouseDown={(e) => handleCellMouseDown(e, emp, isoDate)}
+                          onMouseEnter={(e) => handleCellMouseEnter(e, emp, isoDate)}
+                          className={`p-1 text-center border-r border-zinc-950/5 dark:border-white/5 relative cursor-pointer select-none transition-all ${
+                            isCellSelected
+                              ? 'bg-blue-500/25 dark:bg-blue-500/35 ring-2 ring-blue-500 ring-inset z-20'
+                              : isEditing
+                                ? 'z-30 ring-2 ring-blue-500/50 rounded-lg'
+                                : isWeekend
+                                  ? 'bg-zinc-950/[0.015] dark:bg-white/[0.015]'
+                                  : ''
                           }`}
-                          title={`${emp} on ${isoDate}: ${rawShift}${isHistorical ? ' (Historical Record - Set in Stone)' : isFixedMid ? ' (Fixed MID)' : ' (Click to edit)'}`}
+                          title={`${emp} on ${isoDate}: ${rawShift} (Click to edit, Ctrl+click to multi-select)`}
                         >
                           <div
                             className={`inline-flex items-center justify-center size-6 rounded-lg font-bold text-[10px] transition-transform ${
-                              isHistorical || isFixedMid ? '' : 'hover:scale-110 active:scale-95'
+                              isCellSelected
+                                ? 'scale-110 shadow-md ring-1 ring-blue-400 bg-blue-500 text-white'
+                                : 'hover:scale-110 active:scale-95'
                             } ${
-                              sKey === 'OFF'
-                                ? 'text-zinc-300 dark:text-zinc-600 hover:bg-zinc-950/5 dark:hover:bg-white/5'
-                                : `${colors.bg} ${colors.text} shadow-xs`
+                              isCellSelected
+                                ? ''
+                                : sKey === 'OFF'
+                                  ? 'text-zinc-300 dark:text-zinc-600 hover:bg-zinc-950/5 dark:hover:bg-white/5'
+                                  : `${colors.bg} ${colors.text} shadow-xs`
                             }`}
                           >
-                            {sKey === 'OFF' ? '·' : sKey}
+                            {sKey === 'OFF' && !isCellSelected ? '·' : sKey}
                           </div>
 
-                          {/* Quick Shift Edit Popover */}
-                          {isEditing && (
+                          {/* Quick Shift Edit Popover (only when not multi-selecting) */}
+                          {isEditing && selectedCells.size === 0 && (
                             <div
+                              ref={popoverRef}
                               onClick={(e) => e.stopPropagation()}
-                              className="absolute z-50 top-full left-1/2 -translate-x-1/2 mt-1 rounded-xl bg-white dark:bg-[#1a1a1a] shadow-xl border border-zinc-950/10 dark:border-white/10 p-2 flex gap-1 animate-in fade-in zoom-in-95"
+                              className={`shift-popover absolute z-50 top-full ${
+                                date.getDate() <= 2 ? 'left-0' : date.getDate() >= 29 ? 'right-0' : 'left-1/2 -translate-x-1/2'
+                              } mt-1 rounded-xl bg-white dark:bg-[#1c1c1e] shadow-2xl border border-zinc-950/15 dark:border-white/15 p-1.5 flex items-center gap-1 animate-in fade-in zoom-in-95`}
                             >
-                              {['M', 'A', 'N', 'MID', 'OFF', 'H8'].map((code) => (
+                              {(['M', 'A', 'N', 'MID', 'OFF', 'H8'] as const).map((code) => (
                                 <button
                                   key={code}
-                                  onClick={() => handleSetCellShift(code)}
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleSetCellShift(code);
+                                  }}
                                   className={`px-2 py-1 rounded-lg text-[10px] font-bold cursor-pointer transition-colors ${
-                                    sKey === code ? 'bg-blue-500 text-white' : 'hover:bg-zinc-100 dark:hover:bg-white/10'
+                                    sKey === code ? 'bg-blue-500 text-white shadow-xs' : 'hover:bg-zinc-100 dark:hover:bg-white/10 text-zinc-700 dark:text-zinc-300'
                                   }`}
                                 >
                                   {code}
                                 </button>
                               ))}
                               <button
-                                onClick={() => setEditingCell(null)}
-                                className="px-1.5 py-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 cursor-pointer"
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setEditingCell(null);
+                                }}
+                                className="p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 cursor-pointer rounded-lg hover:bg-zinc-100 dark:hover:bg-white/10"
+                                title="Close"
                               >
-                                <X className="size-3" />
+                                <X className="size-3.5" />
                               </button>
                             </div>
                           )}
@@ -829,12 +900,13 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                           <span className="text-orange-600 dark:text-orange-400 font-bold" title="Afternoon shifts">{stats.A}A</span>
                           <span className="text-purple-600 dark:text-purple-400 font-bold" title="Night shifts">{stats.N}N</span>
                           {stats.MID > 0 && <span className="text-blue-500 font-bold" title="Mid shifts">{stats.MID}MID</span>}
+                          {stats.H8 > 0 && <span className="text-pink-500 font-bold" title="H8 Holiday shifts">{stats.H8}H8</span>}
                           <span className="text-zinc-400" title="Off days">{stats.OFF}O</span>
                           <span
                             className={`font-bold px-1.5 py-0.5 rounded text-[10px] ${
                               stats.totalWorkingDays === stats.targetWorkingDays
                                 ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
-                                : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                                : 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
                             }`}
                             title={`Total working days: ${stats.totalWorkingDays}/${stats.targetWorkingDays} required`}
                           >
@@ -905,12 +977,12 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                 </td>
                 {scheduleData?.dateColumns.map(({ isoDate }) => {
                   const cov = validation.dailyCoverage[isoDate];
-                  const under = cov ? cov.N < 2 : false;
+                  const nightIssue = cov ? cov.N !== 2 : false;
                   return (
                     <td
                       key={isoDate}
                       className={`p-1 text-center font-mono text-[11px] border-r border-zinc-950/5 dark:border-white/5 ${
-                        under ? 'bg-rose-500/20 text-rose-600 font-bold' : 'text-purple-700 dark:text-purple-400'
+                        nightIssue ? 'bg-rose-500/20 text-rose-600 font-bold' : 'text-purple-700 dark:text-purple-400'
                       }`}
                     >
                       {cov?.N ?? 0}
@@ -918,7 +990,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                   );
                 })}
                 <td className="sticky right-0 z-10 p-1 text-center bg-zinc-100 dark:bg-[#141414] border-l border-zinc-950/10 dark:border-white/10 font-bold text-purple-700 dark:text-purple-400">
-                  N ≥ 2
+                  N = 2
                 </td>
               </tr>
 
@@ -964,6 +1036,57 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
               </li>
             )}
           </ul>
+        </div>
+      )}
+
+      {/* Floating Block Shift Edit Toolbar */}
+      {selectedCells.size > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 animate-in fade-in slide-in-from-bottom-4 duration-200">
+          <div className={`p-2 px-4 ${GLASS_CARD} flex flex-wrap items-center gap-3 shadow-2xl border border-blue-500/40 ring-2 ring-blue-500/20 backdrop-blur-2xl bg-white/95 dark:bg-[#181818]/95`}>
+            <div className="flex items-center gap-2">
+              <span className="flex size-6 items-center justify-center rounded-full bg-blue-500 text-white text-[11px] font-bold shadow-xs">
+                {selectedCells.size}
+              </span>
+              <span className="text-[12px] font-bold text-zinc-900 dark:text-zinc-100 whitespace-nowrap">
+                Shifts Selected
+              </span>
+            </div>
+
+            <div className="h-5 w-px bg-zinc-950/10 dark:bg-white/10" />
+
+            <span className="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400 whitespace-nowrap">
+              Set Block:
+            </span>
+
+            <div className="flex items-center gap-1.5">
+              {(['M', 'A', 'N', 'MID', 'OFF', 'H8'] as const).map((code) => {
+                const colors = shiftColors[code] ?? { bg: 'bg-zinc-500/10', text: 'text-zinc-500' };
+                return (
+                  <button
+                    key={code}
+                    type="button"
+                    onClick={() => handleApplyShiftToSelected(code)}
+                    className={`px-3 py-1.5 rounded-xl text-[11px] font-bold cursor-pointer transition-all active:scale-95 shadow-xs border border-zinc-950/5 dark:border-white/5 hover:scale-105 ${colors.bg} ${colors.text} hover:ring-2 hover:ring-blue-500/50`}
+                    title={`Change all ${selectedCells.size} selected shifts to ${code} (or press ${code === 'OFF' ? 'O' : code === 'H8' ? 'H' : code})`}
+                  >
+                    {code}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="h-5 w-px bg-zinc-950/10 dark:bg-white/10" />
+
+            <button
+              type="button"
+              onClick={handleClearSelectedCells}
+              className="flex items-center gap-1 text-[11px] font-semibold text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 px-2 py-1 rounded-lg hover:bg-zinc-950/5 dark:hover:bg-white/5 cursor-pointer whitespace-nowrap"
+              title="Deselect all (Esc)"
+            >
+              <X className="size-3.5" />
+              <span>Deselect (Esc)</span>
+            </button>
+          </div>
         </div>
       )}
     </div>

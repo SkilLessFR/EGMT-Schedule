@@ -919,14 +919,18 @@ export default function App() {
   }, [roster, selectedEmployee, currentMonthEvents]);
 
   const goToPreviousMonth = useCallback(() => {
-    setCurrentMonth((m) => { const d = new Date(currentYear, m - 1); setCurrentYear(d.getFullYear()); return d.getMonth(); });
+    const prev = new Date(currentYear, currentMonth - 1, 1);
+    setCurrentMonth(prev.getMonth());
+    setCurrentYear(prev.getFullYear());
     setSolverResult(null);
-  }, [currentYear]);
+  }, [currentMonth, currentYear]);
 
   const goToNextMonth = useCallback(() => {
-    setCurrentMonth((m) => { const d = new Date(currentYear, m + 1); setCurrentYear(d.getFullYear()); return d.getMonth(); });
+    const next = new Date(currentYear, currentMonth + 1, 1);
+    setCurrentMonth(next.getMonth());
+    setCurrentYear(next.getFullYear());
     setSolverResult(null);
-  }, [currentYear]);
+  }, [currentMonth, currentYear]);
 
   const hasRosterForCurrentMonth = useMemo(() => {
     if (!roster) return false;
