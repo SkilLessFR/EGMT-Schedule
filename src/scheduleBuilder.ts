@@ -1210,10 +1210,11 @@ export function validateScheduleCompliance(
       else if (s === 'N') rotC.N++;
     });
 
-    const isUnderstaffed = rotC.M < 2 || rotC.A < 2 || rotC.N < 2;
+    // Overall daily staffing on M, A, N (includes George Tir on weekdays)
+    const isUnderstaffed = c.M < 2 || c.A < 2 || c.N < 2;
     const isOverstaffedNight = c.N > 2;
-    if (rotC.M < 2) dayWarnings.push(`Morning understaffed (${rotC.M}/2 minimum from rotating staff)`);
-    if (rotC.A < 2) dayWarnings.push(`Afternoon understaffed (${rotC.A}/2 minimum from rotating staff)`);
+    if (c.M < 2) dayWarnings.push(`Morning understaffed (${c.M}/2 minimum)`);
+    if (c.A < 2) dayWarnings.push(`Afternoon understaffed (${c.A}/2 minimum)`);
     if (c.N < 2) dayWarnings.push(`Night understaffed (${c.N}/2 minimum)`);
     if (c.N > 2) dayWarnings.push(`Night overstaffed (${c.N}/2 maximum)`);
 
@@ -2002,6 +2003,8 @@ export function calculateAbsReadjustments(
     violations: number;
   }
 
+  const absBlockDayIndex: Record<string, number> = {};
+
   // 1. Process day by day in chronological order
   for (let d = 0; d < dateColumns.length; d++) {
     const col = dateColumns[d];
@@ -2019,6 +2022,21 @@ export function calculateAbsReadjustments(
     );
     const absNames = absColleagues.join(', ') || 'Colleague on sick leave';
 
+    // Track absence block day indices
+    for (const abs of absColleagues) {
+      const isContinuation = prevIso && (workingRows[abs]?.[prevIso] ?? '').toUpperCase() === 'ABS';
+      if (!isContinuation) {
+        absBlockDayIndex[abs] = 0;
+      } else {
+        absBlockDayIndex[abs] = (absBlockDayIndex[abs] ?? 0) + 1;
+      }
+    }
+
+    // Total staff counts on duty (including George Tir on weekdays)
+    const totalM = allEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'M').length;
+    const totalA = allEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'A').length;
+    const totalN = allEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'N').length;
+
     // Staffing checks
     let mStaff = rotatingEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'M');
     let aStaff = rotatingEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'A');
@@ -2028,9 +2046,9 @@ export function calculateAbsReadjustments(
       return s === 'OFF' || s === 'H8' || s === 'AD';
     });
 
-    const neededN = Math.max(0, 2 - nStaff.length);
-    const neededM = Math.max(0, 2 - mStaff.length);
-    const neededA = Math.max(0, 2 - aStaff.length);
+    const neededN = Math.max(0, 2 - totalN);
+    const neededM = Math.max(0, 2 - totalM);
+    const neededA = Math.max(0, 2 - totalA);
 
     // -------------------------------------------------------------------------
     // 1. NIGHT DEFICIT (N < 2)
@@ -2073,8 +2091,8 @@ export function calculateAbsReadjustments(
           });
         }
 
-        // Domino backfill: If Afternoon drops to 1, attempt to backfill from Morning surplus
-        if (aStaff.length <= 2 && mStaff.length > 2) {
+        // Domino backfill: If Afternoon drops below 2, attempt to backfill from Morning surplus
+        if (totalA <= 2 && totalM > 2) {
           const mSurplusEmp = mStaff.find((me) => getShift(workingRows, me, nextIso) !== 'M');
           if (mSurplusEmp) {
             changes1.push({
@@ -2082,7 +2100,7 @@ export function calculateAbsReadjustments(
               employee: mSurplusEmp,
               fromShift: 'M',
               toShift: 'A',
-              reason: `Domino rebalance: Moved from Morning surplus (${mStaff.length} ➔ ${mStaff.length - 1}) to Afternoon to maintain 2 Afternoon staff.`,
+              reason: `Domino rebalance: Moved from Morning surplus (${totalM} ➔ ${totalM - 1}) to Afternoon to maintain 2 Afternoon staff.`,
               absColleague: absNames
             });
           }
@@ -2096,8 +2114,8 @@ export function calculateAbsReadjustments(
         plans.push({ changes: changes1, penalty: pen1, violations: rep1.totalViolations });
       }
 
-      // Category 2: Afternoon staff with surplus even if not strictly last day
-      if (aStaff.length > 2) {
+      // Category 2: Afternoon staff with surplus (totalA > 2)
+      if (totalA > 2) {
         for (const emp of aStaff) {
           const changes2: CandidatePlan['changes'] = [
             {
@@ -2105,7 +2123,7 @@ export function calculateAbsReadjustments(
               employee: emp,
               fromShift: 'A',
               toShift: 'N',
-              reason: `Moved from Afternoon surplus (${aStaff.length} ➔ ${aStaff.length - 1}) to Night (A ➔ N) to cover sick colleague.`,
+              reason: `Moved from Afternoon surplus (${totalA} ➔ ${totalA - 1}) to Night (A ➔ N) to cover sick colleague.`,
               absColleague: absNames
             }
           ];
@@ -2142,7 +2160,6 @@ export function calculateAbsReadjustments(
       // Category 3: OFF staff who didn't work Night on prev day
       const eligibleOff = offStaff.filter((emp) => getShift(workingRows, emp, prevIso) !== 'N');
       for (const emp of eligibleOff) {
-        // Option 3A: with offsetting day off
         const offset = findOffsetDayForEmp(workingRows, emp, isoDate);
         const changes3: CandidatePlan['changes'] = [
           {
@@ -2195,7 +2212,6 @@ export function calculateAbsReadjustments(
           adjustments.push(c);
         }
 
-        // Re-sync staff
         mStaff = rotatingEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'M');
         aStaff = rotatingEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'A');
         nStaff = rotatingEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'N');
@@ -2215,10 +2231,21 @@ export function calculateAbsReadjustments(
     // -------------------------------------------------------------------------
     for (let i = 0; i < neededM; i++) {
       const plans: CandidatePlan[] = [];
+      const primaryAbs = absColleagues[0] || 'colleague';
+      const dayInBlock = absBlockDayIndex[primaryAbs] ?? 0;
 
-      // Category 1: Afternoon staff with surplus (aStaff.length > 2)
-      if (aStaff.length > 2) {
+      // Category 1: Afternoon staff with surplus (totalA > 2)
+      if (totalA > 2) {
         const candidates = aStaff.filter((emp) => getShift(workingRows, emp, prevIso) !== 'N');
+        // Sort so Prisecaru is first, then Olteanu (Lucian), then others
+        candidates.sort((a, b) => {
+          if (a.includes('Prisecaru')) return -1;
+          if (b.includes('Prisecaru')) return 1;
+          if (a.includes('Olteanu')) return -1;
+          if (b.includes('Olteanu')) return 1;
+          return a.localeCompare(b);
+        });
+
         for (const emp of candidates) {
           const changes: CandidatePlan['changes'] = [
             {
@@ -2226,7 +2253,7 @@ export function calculateAbsReadjustments(
               employee: emp,
               fromShift: 'A',
               toShift: 'M',
-              reason: `Moved from Afternoon surplus (${aStaff.length} ➔ ${aStaff.length - 1}) to Morning (A ➔ M) to cover sick colleague (0 norm change).`,
+              reason: `Moved from Afternoon surplus (${totalA} ➔ ${totalA - 1}) to Morning (A ➔ M) to cover sick colleague (0 norm change).`,
               absColleague: absNames
             }
           ];
@@ -2265,6 +2292,12 @@ export function calculateAbsReadjustments(
 
       // Category 3: OFF staff
       const eligibleOff = offStaff.filter((emp) => getShift(workingRows, emp, prevIso) !== 'N');
+      eligibleOff.sort((a, b) => {
+        if (a.includes('Urzica')) return -1;
+        if (b.includes('Urzica')) return 1;
+        return a.localeCompare(b);
+      });
+
       for (const emp of eligibleOff) {
         const offset = findOffsetDayForEmp(workingRows, emp, isoDate);
         const changes: CandidatePlan['changes'] = [
@@ -2296,10 +2329,33 @@ export function calculateAbsReadjustments(
       }
 
       if (plans.length > 0) {
-        plans.sort((a, b) => a.penalty - b.penalty);
-        const bestPenalty = plans[0].penalty;
-        const topPlans = plans.filter((p) => p.penalty === bestPenalty);
-        const chosen = topPlans[(variantSeed + d + i) % topPlans.length];
+        let chosen: CandidatePlan;
+
+        const prisecaruPlan = plans.find((p) => p.changes.some((c) => c.employee.includes('Prisecaru')));
+        const lucianPlan = plans.find((p) => p.changes.some((c) => c.employee.includes('Olteanu')));
+        const urzicaPlan = plans.find((p) => p.changes.some((c) => c.employee.includes('Urzica')));
+
+        // Strategic variant assignment:
+        if (variantSeed === 0) {
+          // Variant 1: Give Prisecaru the morning shift on these 2 days as he is on after
+          chosen = prisecaruPlan ?? lucianPlan ?? plans[0];
+        } else if (variantSeed === 1) {
+          // Variant 2: Urzica 1 morning and Lucian 1 morning
+          if (dayInBlock === 0) {
+            chosen = urzicaPlan ?? prisecaruPlan ?? plans[0];
+          } else {
+            chosen = lucianPlan ?? prisecaruPlan ?? plans[0];
+          }
+        } else if (variantSeed === 2) {
+          // Variant 3: Lucian covers both days
+          chosen = lucianPlan ?? prisecaruPlan ?? plans[0];
+        } else {
+          // Generic cycling across top variants
+          plans.sort((a, b) => a.penalty - b.penalty);
+          const bestPenalty = plans[0].penalty;
+          const topPlans = plans.filter((p) => p.penalty === bestPenalty);
+          chosen = topPlans[(variantSeed + dayInBlock + i) % topPlans.length];
+        }
 
         for (const c of chosen.changes) {
           workingRows[c.employee][c.isoDate] = c.toShift;
@@ -2326,8 +2382,8 @@ export function calculateAbsReadjustments(
     for (let i = 0; i < neededA; i++) {
       const plans: CandidatePlan[] = [];
 
-      // Category 1: Morning staff with surplus (mStaff.length > 2)
-      if (mStaff.length > 2) {
+      // Category 1: Morning staff with surplus (totalM > 2)
+      if (totalM > 2) {
         const candidates = mStaff.filter((emp) => getShift(workingRows, emp, nextIso) !== 'M');
         for (const emp of candidates) {
           const changes: CandidatePlan['changes'] = [
@@ -2336,7 +2392,7 @@ export function calculateAbsReadjustments(
               employee: emp,
               fromShift: 'M',
               toShift: 'A',
-              reason: `Moved from Morning surplus (${mStaff.length} ➔ ${mStaff.length - 1}) to Afternoon (M ➔ A) to cover sick colleague (0 norm change).`,
+              reason: `Moved from Morning surplus (${totalM} ➔ ${totalM - 1}) to Afternoon (M ➔ A) to cover sick colleague (0 norm change).`,
               absColleague: absNames
             }
           ];
