@@ -61,16 +61,24 @@ export function countLegalWorkingDaysInMonth(month: number, year: number): numbe
 }
 
 /**
- * Checks whether any block of consecutive working shifts in a sequence contains multiple shift types.
- * Every continuous block between OFF days must consist strictly of a single shift type.
+ * Checks whether any block of consecutive working shifts in a sequence contains incompatible shift types.
+ * M and A (day shifts) can be combined in the same block, but Day and Night cannot be combined in the same block.
  */
 export function hasMixedBlocks(sequence: string[]): boolean {
+  const isDay = (s: string) => s === 'M' || s === 'A' || s === 'MID';
   let curType: string | null = null;
   for (const s of sequence) {
     const k = s === 'OFF' || s === 'H8' || s === 'HUP' || s === 'ABS' || s === 'AD' ? 'OFF' : s;
     if (k !== 'OFF') {
-      if (curType === null) curType = k;
-      else if (curType !== k) return true;
+      if (curType === null) {
+        curType = k;
+      } else if (curType !== k) {
+        if (isDay(curType) && isDay(k)) {
+          curType = k;
+        } else {
+          return true;
+        }
+      }
     } else {
       curType = null;
     }
@@ -1334,25 +1342,32 @@ export function validateScheduleCompliance(
       }
     });
 
-    // Check Pure Blocks (no mixed shift types in any block of consecutive work days for rotating staff)
+    // Check Pure Blocks (M and A can be combined freely in the same block, but Day and Night cannot be combined without rest days)
     if (!isNonRotating) {
       const empHistory = (priorRoster && targetYear !== undefined && targetMonth !== undefined)
         ? getEmployeeHistoryTail(priorRoster, emp, targetYear, targetMonth, 5)
         : [];
       const activeTail = getActiveTailBlock(empHistory);
-      const tailType = activeTail.length > 0 ? activeTail[0] : null;
+      const tailType = activeTail.length > 0 ? activeTail[activeTail.length - 1] : null;
 
       let currentBlockType: string | null = tailType;
+      const isDayShift = (s: string) => s === 'M' || s === 'A' || s === 'MID';
+
       dateColumns.forEach(({ isoDate }) => {
         const shift = shiftKey(rows[emp]?.[isoDate] ?? 'OFF');
         if (shift !== 'OFF' && shift !== 'H8' && shift !== 'HUP' && shift !== 'ABS' && shift !== 'AD') {
           if (currentBlockType === null) {
             currentBlockType = shift;
           } else if (currentBlockType !== shift) {
-            empViolations.push(
-              `Mixed shift block on ${isoDate}: cannot combine ${currentBlockType} and ${shift} in the same block without rest days`
-            );
-            mixedBlockViolationCount++;
+            if (isDayShift(currentBlockType) && isDayShift(shift)) {
+              currentBlockType = shift;
+            } else {
+              empViolations.push(
+                `Mixed shift block on ${isoDate}: cannot combine ${currentBlockType} and ${shift} in the same block without rest days`
+              );
+              mixedBlockViolationCount++;
+              currentBlockType = shift;
+            }
           }
         } else {
           currentBlockType = null;
