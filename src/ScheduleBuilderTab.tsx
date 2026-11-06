@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   RotateCcw,
+  RefreshCw,
   Save,
   FileSpreadsheet,
   Download,
@@ -19,6 +20,7 @@ import type { RosterData } from './types';
 import {
   generateBalancedSchedule,
   validateScheduleCompliance,
+  calculateAbsReadjustments,
   exportRosterToExcelFile,
   countLegalWorkingDaysInMonth,
   isHistoricalMonthInRoster,
@@ -26,10 +28,27 @@ import {
   FIXED_MID_EMPLOYEES,
   FIXED_WEEKDAY_MA_EMPLOYEES,
   type GeneratedScheduleResult,
-  type ScheduleValidationReport
+  type ScheduleValidationReport,
+  type ReadjustmentProposal
 } from './scheduleBuilder';
-import { shiftKey, shiftColors, initials, GLASS_CARD } from './scheduleUtils';
+import { shiftKey, shiftColors, shiftSolid, initials, GLASS_CARD } from './scheduleUtils';
 import { mergeRosters } from './parser';
+
+function getWarningActionNote(warning: string): string | null {
+  const normMatch = warning.match(/^(.+?):\s*worked\s+(\d+)\s+days\s*\(target is\s*(\d+)\s*days/i);
+  if (!normMatch) return null;
+  const empName = normMatch[1].trim();
+  const surname = empName.split(/\s+/)[0];
+  const worked = parseInt(normMatch[2], 10);
+  const target = parseInt(normMatch[3], 10);
+  const diff = worked - target;
+  if (diff > 0) {
+    return `We need to give to ${surname} ${diff} day${diff > 1 ? 's' : ''} off after this change`;
+  } else if (diff < 0) {
+    return `We need to give to ${surname} ${Math.abs(diff)} more work day${Math.abs(diff) > 1 ? 's' : ''} to reach the monthly norm`;
+  }
+  return null;
+}
 
 interface ScheduleBuilderTabProps {
   roster: RosterData | null;
@@ -71,6 +90,47 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
   const [scheduleData, setScheduleData] = useState<GeneratedScheduleResult | null>(null);
   const [currentSeed, setCurrentSeed] = useState<number>(() => Math.floor(Math.random() * 999999));
   const [appliedNotification, setAppliedNotification] = useState<string | null>(null);
+
+  // Whether any employee in the schedule has ABS assigned
+  const hasAbsShifts = useMemo(() => {
+    if (!scheduleData?.rows) return false;
+    return Object.values(scheduleData.rows).some((row) =>
+      Object.values(row).some((s) => s === 'ABS' || shiftKey(s) === 'ABS')
+    );
+  }, [scheduleData]);
+
+  // Readjustment modal & proposal state
+  const [readjustProposal, setReadjustProposal] = useState<ReadjustmentProposal | null>(null);
+  const [isReadjustModalOpen, setIsReadjustModalOpen] = useState(false);
+  const [readjustSeed, setReadjustSeed] = useState(0);
+
+  const handleOpenReadjustModal = (seed = 0) => {
+    if (!scheduleData) return;
+    const proposal = calculateAbsReadjustments(
+      scheduleData.rows,
+      scheduleData.dateColumns,
+      roster,
+      targetYear,
+      targetMonth,
+      targetWorkingDays,
+      seed
+    );
+    setReadjustProposal(proposal);
+    setReadjustSeed(seed);
+    setIsReadjustModalOpen(true);
+  };
+
+  const handleApplyReadjustments = () => {
+    if (!readjustProposal || !scheduleData) return;
+    setScheduleData({
+      ...scheduleData,
+      rows: readjustProposal.updatedRows,
+      validation: readjustProposal.validation
+    });
+    setIsReadjustModalOpen(false);
+    setAppliedNotification(`Applied ${readjustProposal.adjustments.length} shift readjustments to cover ABS!`);
+    setTimeout(() => setAppliedNotification(null), 4000);
+  };
 
   // Multi-cell selection state for block changes
   const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
@@ -378,6 +438,9 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
       } else if (key === 'H') {
         e.preventDefault();
         handleApplyShiftToSelected('H8');
+      } else if (key === 'B') {
+        e.preventDefault();
+        handleApplyShiftToSelected('ABS');
       }
     };
 
@@ -612,27 +675,45 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
       {/* Main Action Bar */}
       <div className={`p-3.5 ${GLASS_CARD} flex flex-wrap items-center justify-between gap-3`}>
         <div className="flex flex-wrap items-center gap-2">
-          {/* Regenerate Variant Button */}
-          <button
-            type="button"
-            disabled={isHistorical || isGenerating}
-            onClick={handleRegenerateVariant}
-            className={`flex items-center gap-2 rounded-xl font-semibold px-4 py-2 text-[13px] shadow transition-all ${
-              isHistorical || isGenerating
-                ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 cursor-not-allowed opacity-60'
-                : 'bg-blue-500 hover:bg-blue-600 text-white active:scale-98 cursor-pointer'
-            }`}
-            title={isHistorical ? 'Historical records are set in stone and cannot be regenerated' : 'Generate new balanced variant'}
-          >
-            {isHistorical ? (
-              <Lock className="size-4" />
-            ) : isGenerating ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <RotateCcw className="size-4" />
+          {/* Regenerate Variant Button Container */}
+          <div className="flex flex-col gap-1.5">
+            <button
+              type="button"
+              disabled={isHistorical || isGenerating}
+              onClick={handleRegenerateVariant}
+              className={`flex items-center gap-2 rounded-xl font-semibold px-4 py-2 text-[13px] shadow transition-all ${
+                isHistorical || isGenerating
+                  ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 cursor-not-allowed opacity-60'
+                  : 'bg-blue-500 hover:bg-blue-600 text-white active:scale-98 cursor-pointer'
+              }`}
+              title={isHistorical ? 'Historical records are set in stone and cannot be regenerated' : 'Generate new balanced variant'}
+            >
+              {isHistorical ? (
+                <Lock className="size-4" />
+              ) : isGenerating ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <RotateCcw className="size-4" />
+              )}
+              <span>{isHistorical ? 'Locked: Set in Stone' : isGenerating ? 'Generating...' : 'Regenerate Variant'}</span>
+            </button>
+
+            {/* Readjust Shifts Button (pops up beneath regenerate button when colleagues have ABS) */}
+            {hasAbsShifts && !isHistorical && (
+              <button
+                type="button"
+                onClick={() => handleOpenReadjustModal(0)}
+                className="flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white font-semibold px-3 py-1.5 text-[12px] shadow-sm transition-all cursor-pointer active:scale-98 animate-in fade-in slide-in-from-top-1"
+                title="Calculate minimal shift readjustments to makeup for colleagues on ABS"
+              >
+                <RefreshCw className="size-3.5" />
+                <span>Readjust Shifts</span>
+                <span className="bg-black/30 text-white text-[10px] px-1.5 py-0.2 rounded font-mono font-bold">
+                  ABS
+                </span>
+              </button>
             )}
-            <span>{isHistorical ? 'Locked: Set in Stone' : isGenerating ? 'Generating...' : 'Regenerate Variant'}</span>
-          </button>
+          </div>
 
           {/* Legal Monthly Working Days Norm (Fixed, non-modifiable variable) */}
           <div className="flex items-center gap-1.5 rounded-xl border border-zinc-200/60 dark:border-zinc-800/60 bg-white/50 dark:bg-zinc-800/50 px-3 py-1.5 text-[12px]">
@@ -860,7 +941,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                                 date.getDate() <= 2 ? 'left-0' : date.getDate() >= 29 ? 'right-0' : 'left-1/2 -translate-x-1/2'
                               } mt-1 rounded-xl bg-white dark:bg-[#1c1c1e] shadow-2xl border border-zinc-950/15 dark:border-white/15 p-1.5 flex items-center gap-1 animate-in fade-in zoom-in-95`}
                             >
-                              {(['M', 'A', 'N', 'MID', 'OFF', 'H8'] as const).map((code) => (
+                              {(['M', 'A', 'N', 'MID', 'OFF', 'H8', 'ABS'] as const).map((code) => (
                                 <button
                                   key={code}
                                   type="button"
@@ -869,7 +950,11 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                                     handleSetCellShift(code);
                                   }}
                                   className={`px-2 py-1 rounded-lg text-[10px] font-bold cursor-pointer transition-colors ${
-                                    sKey === code ? 'bg-blue-500 text-white shadow-xs' : 'hover:bg-zinc-100 dark:hover:bg-white/10 text-zinc-700 dark:text-zinc-300'
+                                    sKey === code
+                                      ? 'bg-blue-500 text-white shadow-xs'
+                                      : code === 'ABS'
+                                        ? 'bg-black text-white hover:bg-zinc-800'
+                                        : 'hover:bg-zinc-100 dark:hover:bg-white/10 text-zinc-700 dark:text-zinc-300'
                                   }`}
                                 >
                                   {code}
@@ -901,6 +986,11 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                           <span className="text-purple-600 dark:text-purple-400 font-bold" title="Night shifts">{stats.N}N</span>
                           {stats.MID > 0 && <span className="text-blue-500 font-bold" title="Mid shifts">{stats.MID}MID</span>}
                           {stats.H8 > 0 && <span className="text-pink-500 font-bold" title="H8 Holiday shifts">{stats.H8}H8</span>}
+                          {(stats.ABS ?? 0) > 0 && (
+                            <span className="bg-black text-white px-1 py-0.5 rounded text-[9px] font-bold" title="Absent / Medical leave">
+                              {stats.ABS}ABS
+                            </span>
+                          )}
                           <span className="text-zinc-400" title="Off days">{stats.OFF}O</span>
                           <span
                             className={`font-bold px-1.5 py-0.5 rounded text-[10px] ${
@@ -1026,12 +1116,26 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
             <AlertTriangle className="size-4.5" />
             <span>Validation Warnings ({validation.warnings.length})</span>
           </div>
-          <ul className="list-disc list-inside text-[12px] text-zinc-600 dark:text-zinc-400 space-y-1">
-            {validation.warnings.slice(0, 8).map((w, i) => (
-              <li key={i}>{w}</li>
-            ))}
+          <ul className="space-y-1.5 text-[12px] text-zinc-700 dark:text-zinc-300">
+            {validation.warnings.slice(0, 8).map((w, i) => {
+              const actionNote = getWarningActionNote(w);
+              return (
+                <li key={i} className="space-y-0.5">
+                  <div className="flex items-start gap-1.5 font-mono text-[11px]">
+                    <span className="text-amber-500 font-bold">•</span>
+                    <span>{w}</span>
+                  </div>
+                  {actionNote && (
+                    <div className="pl-3.5 text-[11px] font-sans font-semibold text-amber-700 dark:text-amber-300 flex items-center gap-1.5">
+                      <span className="text-[12px]">👉</span>
+                      <span>{actionNote}</span>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
             {validation.warnings.length > 8 && (
-              <li className="font-semibold text-zinc-500">
+              <li className="font-semibold text-zinc-500 pl-3">
                 ...and {validation.warnings.length - 8} more warnings
               </li>
             )}
@@ -1059,7 +1163,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
             </span>
 
             <div className="flex items-center gap-1.5">
-              {(['M', 'A', 'N', 'MID', 'OFF', 'H8'] as const).map((code) => {
+              {(['M', 'A', 'N', 'MID', 'OFF', 'H8', 'ABS'] as const).map((code) => {
                 const colors = shiftColors[code] ?? { bg: 'bg-zinc-500/10', text: 'text-zinc-500' };
                 return (
                   <button
@@ -1067,7 +1171,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                     type="button"
                     onClick={() => handleApplyShiftToSelected(code)}
                     className={`px-3 py-1.5 rounded-xl text-[11px] font-bold cursor-pointer transition-all active:scale-95 shadow-xs border border-zinc-950/5 dark:border-white/5 hover:scale-105 ${colors.bg} ${colors.text} hover:ring-2 hover:ring-blue-500/50`}
-                    title={`Change all ${selectedCells.size} selected shifts to ${code} (or press ${code === 'OFF' ? 'O' : code === 'H8' ? 'H' : code})`}
+                    title={`Change all ${selectedCells.size} selected shifts to ${code} (or press ${code === 'OFF' ? 'O' : code === 'H8' ? 'H' : code === 'ABS' ? 'B' : code})`}
                   >
                     {code}
                   </button>
@@ -1086,6 +1190,250 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
               <X className="size-3.5" />
               <span>Deselect (Esc)</span>
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Readjustment Suggestion Modal */}
+      {isReadjustModalOpen && readjustProposal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="relative w-full max-w-2xl max-h-[90vh] flex flex-col rounded-2xl bg-white dark:bg-[#18181b] border border-zinc-200 dark:border-zinc-800 shadow-2xl overflow-hidden">
+            {/* Header */}
+            <div className="p-5 border-b border-zinc-100 dark:border-zinc-800 flex items-center justify-between bg-zinc-50/50 dark:bg-zinc-900/50">
+              <div className="flex items-center gap-3">
+                <div className="size-10 rounded-xl bg-amber-500/15 text-amber-600 dark:text-amber-400 flex items-center justify-center">
+                  <RefreshCw className="size-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-zinc-900 dark:text-white flex items-center gap-2">
+                    <span>Shift Readjustment Suggestions</span>
+                    <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 font-bold">
+                      Variant #{readjustSeed + 1}
+                    </span>
+                  </h3>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                    Minimally invasive coverage for colleagues on medical leave (ABS)
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsReadjustModalOpen(false)}
+                className="p-2 rounded-xl text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                title="Close"
+              >
+                <X className="size-5" />
+              </button>
+            </div>
+
+            {/* Content Area */}
+            <div className="p-5 overflow-y-auto space-y-4 text-xs">
+              {/* If no adjustments needed */}
+              {readjustProposal.adjustments.length === 0 && readjustProposal.unresolvedDeficits.length === 0 ? (
+                <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-800 dark:text-emerald-300 flex items-start gap-3">
+                  <CheckCircle2 className="size-5 text-emerald-500 shrink-0 mt-0.5" />
+                  <div>
+                    <h4 className="font-bold text-sm">No Shifts Need Readjustment</h4>
+                    <p className="mt-1 leading-relaxed text-zinc-600 dark:text-zinc-300">
+                      Even with colleagues on ABS, every shift still meets the minimum staffing requirement (M ≥ 2, A ≥ 2, N = 2).
+                      No colleagues need their shifts changed (0 invasiveness).
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {/* Status Banner */}
+                  <div className="p-3.5 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-900 dark:text-blue-200 flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <Clock className="size-4 text-blue-500 shrink-0" />
+                      <span>
+                        Found <strong className="font-bold">{readjustProposal.adjustments.length}</strong> minimal shift readjustment(s) to restore required staffing.
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* List of Proposed Adjustments */}
+                  <div className="space-y-2.5">
+                    <h4 className="font-semibold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider text-[11px]">
+                      Recommended Shift Changes:
+                    </h4>
+                    <div className="divide-y divide-zinc-100 dark:divide-zinc-800 border border-zinc-200 dark:border-zinc-800 rounded-xl overflow-hidden">
+                      {readjustProposal.adjustments.map((adj, idx) => (
+                        <div key={idx} className="p-3.5 bg-white dark:bg-zinc-900 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-zinc-900 dark:text-zinc-100 font-mono text-[12px]">
+                                {adj.isoDate}
+                              </span>
+                              <span className="text-zinc-400">•</span>
+                              <span className="font-semibold text-zinc-800 dark:text-zinc-200">
+                                {adj.employee}
+                              </span>
+                            </div>
+                            <p className="text-zinc-500 dark:text-zinc-400 text-[11px] leading-relaxed">
+                              {adj.reason}
+                            </p>
+                            <div className="text-[10px] text-zinc-400 flex items-center gap-1">
+                              <span>Absent colleague:</span>
+                              <span className="bg-black text-white px-1.5 py-0.2 rounded font-mono font-bold">
+                                {adj.absColleague}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0 self-start sm:self-center">
+                            <span className={`px-2 py-1 rounded font-bold text-[11px] ${shiftColors[adj.fromShift]?.bg ?? 'bg-zinc-100'} ${shiftColors[adj.fromShift]?.text ?? 'text-zinc-700'}`}>
+                              {adj.fromShift}
+                            </span>
+                            <span className="text-zinc-400 font-bold">➔</span>
+                            <span className={`px-2.5 py-1 rounded font-bold text-[12px] shadow-xs ${shiftSolid[adj.toShift] ?? 'bg-blue-500 text-white'}`}>
+                              {adj.toShift}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Unresolved Deficits (if any) */}
+                  {readjustProposal.unresolvedDeficits.length > 0 && (
+                    <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-900 dark:text-amber-200 space-y-1">
+                      <div className="flex items-center gap-2 font-bold text-amber-800 dark:text-amber-300">
+                        <AlertTriangle className="size-4 shrink-0" />
+                        <span>Unresolved Deficit Notice</span>
+                      </div>
+                      <p className="text-[11px] leading-relaxed">
+                        {readjustProposal.unresolvedDeficits.map((u, i) => (
+                          <span key={i} className="block">
+                            • {u.isoDate}: Need {u.needed} on shift {u.shift}. {u.reason}
+                          </span>
+                        ))}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Compliance Preview & Warning Details */}
+                  <div className="space-y-2">
+                    <div className="p-3 rounded-xl bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800 flex items-center justify-between text-[11px]">
+                      <span className="text-zinc-500 dark:text-zinc-400">Post-adjustment Compliance:</span>
+                      <span className={`font-semibold flex items-center gap-1 ${readjustProposal.validation.isFullyCompliant ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
+                        {readjustProposal.validation.isFullyCompliant ? (
+                          <>
+                            <CheckCircle2 className="size-3.5 text-emerald-500" />
+                            <span>Fully Compliant (All Target Norms &amp; Rest Rules Met)</span>
+                          </>
+                        ) : (
+                          <>
+                            <AlertTriangle className="size-3.5 text-amber-500" />
+                            <span>{readjustProposal.validation.totalViolations} Warning(s) Remaining</span>
+                          </>
+                        )}
+                      </span>
+                    </div>
+
+                    {/* Detailed Warnings Breakdown */}
+                    {readjustProposal.validation.warnings.length > 0 ? (
+                      <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3.5 space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 font-bold text-amber-800 dark:text-amber-300 text-xs">
+                            <AlertTriangle className="size-4 shrink-0 text-amber-500" />
+                            <span>Compliance Warning Details ({readjustProposal.validation.warnings.length})</span>
+                          </div>
+                          <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
+                            {readjustProposal.validation.workDaysMismatchCount > 0 && (
+                              <span className="bg-amber-500/15 text-amber-700 dark:text-amber-300 px-2 py-0.5 rounded-full font-mono font-medium">
+                                {readjustProposal.validation.workDaysMismatchCount} norm mismatch
+                              </span>
+                            )}
+                            {readjustProposal.validation.understaffedDaysCount > 0 && (
+                              <span className="bg-rose-500/15 text-rose-700 dark:text-rose-300 px-2 py-0.5 rounded-full font-mono font-medium">
+                                {readjustProposal.validation.understaffedDaysCount} understaffed
+                              </span>
+                            )}
+                            {readjustProposal.validation.nightRestViolationCount > 0 && (
+                              <span className="bg-purple-500/15 text-purple-700 dark:text-purple-300 px-2 py-0.5 rounded-full font-mono font-medium">
+                                {readjustProposal.validation.nightRestViolationCount} rest issue
+                              </span>
+                            )}
+                            {readjustProposal.validation.streakViolationCount > 0 && (
+                              <span className="bg-orange-500/15 text-orange-700 dark:text-orange-300 px-2 py-0.5 rounded-full font-mono font-medium">
+                                {readjustProposal.validation.streakViolationCount} streak &gt; 5d
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1 font-mono text-[11px]">
+                          {readjustProposal.validation.warnings.map((w, idx) => {
+                            const actionNote = getWarningActionNote(w);
+                            return (
+                              <div key={idx} className="p-2 rounded-lg bg-white/80 dark:bg-zinc-900/80 border border-amber-500/20 text-amber-900 dark:text-amber-200 space-y-1">
+                                <div className="flex items-start gap-2">
+                                  <span className="text-amber-500 shrink-0 font-bold">•</span>
+                                  <span className="leading-snug break-words font-medium">{w}</span>
+                                </div>
+                                {actionNote && (
+                                  <div className="pl-4 text-[11px] font-sans font-semibold text-amber-700 dark:text-amber-300 flex items-center gap-1.5 pt-1 border-t border-amber-500/10">
+                                    <span className="text-[12px]">👉</span>
+                                    <span>{actionNote}</span>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-800 dark:text-emerald-300 flex items-center justify-between text-[11px]">
+                        <div className="flex items-center gap-2">
+                          <CheckCircle2 className="size-4 text-emerald-500 shrink-0" />
+                          <span className="font-semibold">Zero Compliance Warnings</span>
+                        </div>
+                        <span className="text-emerald-700 dark:text-emerald-300">
+                          All legal monthly working norms and mandatory rest rules are fully preserved.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Footer Buttons */}
+            <div className="p-4 border-t border-zinc-100 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50 flex flex-wrap items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={() => setIsReadjustModalOpen(false)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+
+              <div className="flex items-center gap-2">
+                {readjustProposal.adjustments.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => handleOpenReadjustModal(readjustSeed + 1)}
+                    className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold text-zinc-700 dark:text-zinc-200 bg-zinc-200/70 hover:bg-zinc-300 dark:bg-zinc-800 dark:hover:bg-zinc-700 transition-all cursor-pointer active:scale-98"
+                    title="Generate alternative candidate assignment"
+                  >
+                    <RefreshCw className="size-3.5" />
+                    <span>Try Another Variant</span>
+                  </button>
+                )}
+
+                {readjustProposal.adjustments.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleApplyReadjustments}
+                    className="flex items-center gap-1.5 px-5 py-2 rounded-xl text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 active:scale-98 transition-all shadow cursor-pointer"
+                  >
+                    <CheckCircle2 className="size-4" />
+                    <span>Accept & Apply Changes</span>
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       )}

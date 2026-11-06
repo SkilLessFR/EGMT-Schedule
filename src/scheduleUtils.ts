@@ -12,6 +12,7 @@ export const shiftColors: Record<string, ShiftColor> = {
   N: { bg: 'bg-purple-500/15 dark:bg-purple-400/20', text: 'text-purple-600 dark:text-purple-300', border: 'border-transparent' },
   OFF: { bg: 'bg-transparent', text: 'text-zinc-400 dark:text-zinc-500', border: 'border-transparent' },
   H8: { bg: 'bg-pink-500/15 dark:bg-pink-400/20', text: 'text-pink-600 dark:text-pink-300', border: 'border-transparent' },
+  ABS: { bg: 'bg-black text-white dark:bg-black dark:text-white', text: 'text-white', border: 'border-zinc-800' },
 };
 export const fallbackColor: ShiftColor = { bg: 'bg-zinc-500/15 dark:bg-zinc-400/20', text: 'text-zinc-600 dark:text-zinc-300', border: 'border-transparent' };
 
@@ -22,14 +23,15 @@ export const shiftSolid: Record<string, string> = {
   N: 'bg-purple-500 text-white',
   OFF: 'bg-zinc-400 text-white',
   H8: 'bg-pink-500 text-white',
+  ABS: 'bg-black text-white',
 };
 export const fallbackSolid = 'bg-zinc-500 text-white';
 
-export const hours: Record<string, string> = { MID: '09:00–17:00', M: '06:00–14:00', A: '14:00–22:00', N: '22:00–06:00', H8: 'Holiday', OFF: 'AD' };
-export const shiftLabels: Record<string, string> = { M: 'Morning', A: 'Afternoon', N: 'Night', MID: 'Mid', OFF: 'Off', H8: 'H8' };
-export const shiftHourValues: Record<string, number> = { M: 8, A: 8, N: 8, MID: 8, OFF: 0, H8: 0 };
+export const hours: Record<string, string> = { MID: '09:00–17:00', M: '06:00–14:00', A: '14:00–22:00', N: '22:00–06:00', H8: 'Holiday', OFF: 'AD', ABS: 'Absent / Medical' };
+export const shiftLabels: Record<string, string> = { M: 'Morning', A: 'Afternoon', N: 'Night', MID: 'Mid', OFF: 'Off', H8: 'H8', ABS: 'Absent (ABS)' };
+export const shiftHourValues: Record<string, number> = { M: 8, A: 8, N: 8, MID: 8, OFF: 0, H8: 0, ABS: 0 };
 
-const OFF_SHIFT_ALIASES = new Set(['OFF', 'ABS', 'AD']);
+const OFF_SHIFT_ALIASES = new Set(['OFF', 'AD']);
 
 export function colorFor(shift: string) { return shiftColors[shift.toUpperCase()] ?? fallbackColor; }
 export function solidColorFor(shift: string) { return shiftSolid[shift.toUpperCase()] ?? fallbackSolid; }
@@ -63,7 +65,7 @@ export function buildRosterIndex(roster: RosterData | null) {
       if (code === 'A') daily.afternoon.push(employee);
       if (code === 'N') daily.night.push(employee);
       if (code === 'MID') daily.mid.push(employee);
-      if (code === 'OFF' || code === 'H8') daily.off.push(employee);
+      if (code === 'OFF' || code === 'H8' || code === 'ABS') daily.off.push(employee);
     });
 
     index[isoDate] = daily;

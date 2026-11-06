@@ -129,6 +129,7 @@ export interface DayCoverage {
   N: number;
   MID: number;
   OFF: number;
+  ABS?: number;
   totalWorking: number;
   isUnderstaffed: boolean;
   warnings: string[];
@@ -142,6 +143,7 @@ export interface EmployeeMonthStats {
   MID: number;
   OFF: number;
   H8: number;
+  ABS?: number;
   totalWorkingDays: number;
   targetWorkingDays: number;
   workDaysDiff: number;
@@ -162,6 +164,30 @@ export interface ScheduleValidationReport {
   dailyCoverage: Record<string, DayCoverage>;
   employeeStats: Record<string, EmployeeMonthStats>;
   warnings: string[];
+}
+
+export interface ReadjustmentAdjustment {
+  isoDate: string;
+  employee: string;
+  fromShift: string;
+  toShift: string;
+  reason: string;
+  absColleague: string;
+}
+
+export interface ReadjustmentProposal {
+  hasDeficits: boolean;
+  totalDeficits: number;
+  adjustments: ReadjustmentAdjustment[];
+  unresolvedDeficits: Array<{
+    isoDate: string;
+    shift: 'M' | 'A' | 'N';
+    needed: number;
+    available: number;
+    reason: string;
+  }>;
+  updatedRows: Record<string, Record<string, string>>;
+  validation: ScheduleValidationReport;
 }
 
 export interface GeneratedScheduleResult {
@@ -1161,7 +1187,7 @@ export function validateScheduleCompliance(
   dateColumns.forEach(({ date, isoDate }) => {
     const dayOfWeek = date.getDay();
     const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-    const c = { M: 0, A: 0, N: 0, MID: 0, OFF: 0, H8: 0, other: 0 };
+    const c = { M: 0, A: 0, N: 0, MID: 0, OFF: 0, H8: 0, ABS: 0, other: 0 };
     const dayWarnings: string[] = [];
 
     employees.forEach((emp) => {
@@ -1171,6 +1197,7 @@ export function validateScheduleCompliance(
       else if (s === 'N') c.N++;
       else if (s === 'MID') c.MID++;
       else if (s === 'H8') c.H8++;
+      else if (s === 'ABS') c.ABS++;
       else c.OFF++;
     });
 
@@ -1208,7 +1235,8 @@ export function validateScheduleCompliance(
       A: c.A,
       N: c.N,
       MID: c.MID,
-      OFF: c.OFF + c.H8 + c.other,
+      OFF: c.OFF + c.H8 + c.ABS + c.other,
+      ABS: c.ABS,
       totalWorking: c.M + c.A + c.N + c.MID,
       isUnderstaffed: isUnderstaffed || isOverstaffedNight,
       warnings: dayWarnings
@@ -1221,7 +1249,7 @@ export function validateScheduleCompliance(
     const isFixedWeekdayMA = FIXED_WEEKDAY_MA_EMPLOYEES.includes(emp);
     const isNonRotating = isFixedMid || isFixedWeekdayMA;
     const empViolations: string[] = [];
-    const counts = { M: 0, A: 0, N: 0, MID: 0, OFF: 0, H8: 0 };
+    const counts = { M: 0, A: 0, N: 0, MID: 0, OFF: 0, H8: 0, ABS: 0 };
 
     let currentStreak = 0;
     let maxStreak = 0;
@@ -1231,11 +1259,11 @@ export function validateScheduleCompliance(
     if (priorRoster && targetYear !== undefined && targetMonth !== undefined && !isNonRotating) {
       const history = getEmployeeHistoryTail(priorRoster, emp, targetYear, targetMonth, 5);
       for (let i = history.length - 1; i >= 0; i--) {
-        if (history[i] !== 'OFF' && history[i] !== 'H8' && history[i] !== 'HUP') currentStreak++;
+        if (history[i] !== 'OFF' && history[i] !== 'H8' && history[i] !== 'HUP' && history[i] !== 'ABS') currentStreak++;
         else break;
       }
       for (let i = history.length - 1; i >= 0; i--) {
-        if (history[i] === 'OFF' || history[i] === 'H8' || history[i] === 'HUP') currentOffStreak++;
+        if (history[i] === 'OFF' || history[i] === 'H8' || history[i] === 'HUP' || history[i] === 'ABS') currentOffStreak++;
         else break;
       }
     }
@@ -1249,7 +1277,7 @@ export function validateScheduleCompliance(
       }
 
       // Working Streak calculation
-      if (s !== 'OFF' && s !== 'H8' && s !== 'HUP') {
+      if (s !== 'OFF' && s !== 'H8' && s !== 'HUP' && s !== 'ABS') {
         currentStreak++;
         maxStreak = Math.max(maxStreak, currentStreak);
         if (currentStreak > 5) {
@@ -1260,7 +1288,8 @@ export function validateScheduleCompliance(
       } else {
         currentStreak = 0;
         // Rest period check (max 2 days, rarely 3, never > 3 for rotating staff)
-        if (!isNonRotating) {
+        // Note: ABS is approved medical absence, not counted as excessive rest violation
+        if (!isNonRotating && s !== 'ABS') {
           currentOffStreak++;
           if (currentOffStreak > 3) {
             empViolations.push(`Rest period exceeded 3 days on ${isoDate} (${currentOffStreak} days)`);
@@ -1286,7 +1315,7 @@ export function validateScheduleCompliance(
         const isHoliday = ROMANIAN_HOLIDAYS_2026.has(isoDate);
         if ((isWeekend || isHoliday) && s !== 'OFF') {
           empViolations.push(`Fixed Manager ${emp} scheduled on ${s} instead of OFF on weekend/holiday (${isoDate})`);
-        } else if (!isWeekend && !isHoliday && s !== 'MID') {
+        } else if (!isWeekend && !isHoliday && s !== 'MID' && s !== 'ABS') {
           empViolations.push(`Fixed Manager ${emp} scheduled on ${s} instead of MID on ${isoDate}`);
         }
       }
@@ -1298,7 +1327,7 @@ export function validateScheduleCompliance(
         const isHoliday = ROMANIAN_HOLIDAYS_2026.has(isoDate);
         if ((isWeekend || isHoliday) && s !== 'OFF') {
           empViolations.push(`Weekday staff ${emp} scheduled on ${s} instead of OFF on weekend/holiday (${isoDate})`);
-        } else if (!isWeekend && !isHoliday && s !== 'M' && s !== 'A') {
+        } else if (!isWeekend && !isHoliday && s !== 'M' && s !== 'A' && s !== 'ABS') {
           empViolations.push(`Weekday staff ${emp} scheduled on ${s} instead of M/A on ${isoDate}`);
         }
       }
@@ -1331,13 +1360,15 @@ export function validateScheduleCompliance(
     }
 
     const totalWorkingDays = counts.M + counts.A + counts.N + counts.MID;
-    const effectiveTarget = targetWorkingDays ?? countLegalWorkingDaysInMonth(targetMonth ?? 11, targetYear ?? 2026);
+    const baseTarget = targetWorkingDays ?? countLegalWorkingDaysInMonth(targetMonth ?? 11, targetYear ?? 2026);
+    // Medical leave (ABS) reduces the monthly working norm accordingly
+    const effectiveTarget = Math.max(0, baseTarget - counts.ABS);
     const workDaysDiff = totalWorkingDays - effectiveTarget;
 
-    // Monthly norm constraint: all employees must have the exact same number of working days
+    // Monthly norm constraint: all employees must meet their effective monthly norm
     if (targetWorkingDays !== undefined && workDaysDiff !== 0) {
       empViolations.push(
-        `${emp}: worked ${totalWorkingDays} days (monthly norm is ${targetWorkingDays} days)`
+        `${emp}: worked ${totalWorkingDays} days (target is ${effectiveTarget} days${counts.ABS > 0 ? ` after ${counts.ABS}d ABS` : ''})`
       );
       workDaysMismatchCount++;
     }
@@ -1350,6 +1381,7 @@ export function validateScheduleCompliance(
       MID: counts.MID,
       OFF: counts.OFF,
       H8: counts.H8,
+      ABS: counts.ABS,
       totalWorkingDays,
       targetWorkingDays: effectiveTarget,
       workDaysDiff,
@@ -1631,8 +1663,8 @@ export async function exportRosterToExcelFile(
           shiftCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF375623' } };
           shiftCell.font = { name: 'Calibri', size: 12, bold: true, color: { argb: 'FFFFFFFF' } };
         } else if (rawShift === 'ABS') {
-          // Absence: Purple background, white text
-          shiftCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7030A0' } };
+          // Absence: Solid black background, white text
+          shiftCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF000000' } };
           shiftCell.font = { name: 'Calibri', size: 12, bold: true, color: { argb: 'FFFFFFFF' } };
         } else if (rawShift === 'HE') {
           shiftCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0070C0' } };
@@ -1798,7 +1830,7 @@ export async function exportRosterToExcelFile(
         priority: 7,
         formulae: ['"ABS"'],
         style: {
-          fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FF7030A0' } },
+          fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FF000000' } },
           font: { color: { argb: 'FFFFFFFF' } }
         }
       }
@@ -1846,3 +1878,632 @@ export async function exportRosterToExcelFile(
   a.click();
   URL.revokeObjectURL(url);
 }
+
+/**
+ * Intelligent, minimally-invasive shift readjustment algorithm to makeup for colleagues calling in sick (ABS).
+ *
+ * Rules:
+ * 1. Minimum rotating staffing per day: M >= 2, A >= 2, N = 2.
+ * 2. Minimum invasiveness: If staffing on a shift with an ABS colleague is still >= 2, DO NOT change anyone.
+ * 3. Morning deficit (M < 2):
+ *    - Priority 1: Afternoon surplus on the same day (A > 2 -> move candidate to M).
+ *      Candidate must NOT have worked Night on the previous day.
+ *    - Priority 2: Eligible OFF colleague on that day.
+ * 4. Afternoon deficit (A < 2):
+ *    - Priority 1: Morning surplus on the same day (M > 2 -> move candidate to A).
+ *      Candidate should not work Morning on the following day (to avoid short 8h turnaround).
+ *    - Priority 2: Eligible OFF colleague on that day.
+ * 5. Night deficit (N < 2):
+ *    - Priority 1: Colleague currently on Afternoon (A) on the last day of their Afternoon block (next day is OFF).
+ *      Convert A -> N. Night shift requires rest on subsequent day(s).
+ *    - STRICT PROHIBITION: NEVER move someone on Morning shifts to Night (M -> N).
+ *    - Priority 2: Colleague scheduled OFF who is about to start Night or has sufficient rest.
+ *    - Priority 3: Other eligible Afternoon colleague if Afternoon has surplus.
+ * 6. Non-rotating employees (Palade Alexandru-Ionut, Tir George Cristian) cannot be assigned to Night.
+ * 7. Multi-variant support: variantSeed rotates candidate selection when multiple valid options exist.
+ */
+export function calculateAbsReadjustments(
+  rows: Record<string, Record<string, string>>,
+  dateColumns: { index: number; date: Date; isoDate: string }[],
+  priorRoster: RosterData | null,
+  targetYear: number,
+  targetMonth: number,
+  targetWorkingDays: number,
+  variantSeed: number = 0
+): ReadjustmentProposal {
+  // Deep clone helper
+  const cloneRows = (src: Record<string, Record<string, string>>) => {
+    const c: Record<string, Record<string, string>> = {};
+    for (const k of Object.keys(src)) {
+      c[k] = { ...src[k] };
+    }
+    return c;
+  };
+
+  const workingRows = cloneRows(rows);
+  const allEmployees = Object.keys(workingRows);
+  const rotatingEmployees = allEmployees.filter(
+    (e) => !FIXED_MID_EMPLOYEES.includes(e) && !FIXED_WEEKDAY_MA_EMPLOYEES.includes(e)
+  );
+
+  const adjustments: ReadjustmentAdjustment[] = [];
+  const unresolvedDeficits: Array<{
+    isoDate: string;
+    shift: 'M' | 'A' | 'N';
+    needed: number;
+    available: number;
+    reason: string;
+  }> = [];
+
+  const getShift = (src: Record<string, Record<string, string>>, emp: string, iso: string | null): string => {
+    if (!iso) return 'OFF';
+    return shiftKey(src[emp]?.[iso] ?? 'OFF');
+  };
+
+  // Penalty evaluation function using validateScheduleCompliance
+  const evaluatePenalty = (testRows: Record<string, Record<string, string>>) => {
+    const rep = validateScheduleCompliance(
+      testRows,
+      dateColumns,
+      priorRoster,
+      targetYear,
+      targetMonth,
+      targetWorkingDays
+    );
+    const penalty =
+      rep.totalViolations * 1000 +
+      rep.understaffedDaysCount * 500 +
+      rep.nightRestViolationCount * 400 +
+      rep.streakViolationCount * 300 +
+      rep.workDaysMismatchCount * 150 +
+      rep.excessiveRestViolationCount * 50 +
+      rep.mixedBlockViolationCount * 50;
+    return { penalty, rep };
+  };
+
+  // Helper to find an offsetting day off for an employee called in from rest
+  const findOffsetDayForEmp = (
+    baseRows: Record<string, Record<string, string>>,
+    emp: string,
+    excludeIsoDate: string
+  ): { offsetIso: string; oldShift: string } | null => {
+    for (let k = 0; k < dateColumns.length; k++) {
+      const kIso = dateColumns[k].isoDate;
+      if (kIso === excludeIsoDate) continue;
+      const curS = shiftKey(baseRows[emp]?.[kIso] ?? 'OFF');
+      if (curS !== 'M' && curS !== 'A') continue;
+
+      let count = 0;
+      for (const re of rotatingEmployees) {
+        if (shiftKey(baseRows[re]?.[kIso] ?? 'OFF') === curS) count++;
+      }
+      if (count >= 3) {
+        const tempRows = cloneRows(baseRows);
+        tempRows[emp][kIso] = 'OFF';
+        const { rep } = evaluatePenalty(tempRows);
+        if (!rep.warnings.some((w) => w.startsWith(`${kIso}:`))) {
+          return { offsetIso: kIso, oldShift: curS };
+        }
+      }
+    }
+    return null;
+  };
+
+  interface CandidatePlan {
+    changes: Array<{
+      isoDate: string;
+      employee: string;
+      fromShift: string;
+      toShift: string;
+      reason: string;
+      absColleague: string;
+    }>;
+    penalty: number;
+    violations: number;
+  }
+
+  // 1. Process day by day in chronological order
+  for (let d = 0; d < dateColumns.length; d++) {
+    const col = dateColumns[d];
+    const { isoDate } = col;
+    const prevCol = d > 0 ? dateColumns[d - 1] : null;
+    const nextCol = d < dateColumns.length - 1 ? dateColumns[d + 1] : null;
+    const nextNextCol = d < dateColumns.length - 2 ? dateColumns[d + 2] : null;
+
+    const prevIso = prevCol?.isoDate ?? null;
+    const nextIso = nextCol?.isoDate ?? null;
+    const nextNextIso = nextNextCol?.isoDate ?? null;
+
+    const absColleagues = allEmployees.filter(
+      (emp) => (workingRows[emp]?.[isoDate] ?? '').toUpperCase() === 'ABS'
+    );
+    const absNames = absColleagues.join(', ') || 'Colleague on sick leave';
+
+    // Staffing checks
+    let mStaff = rotatingEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'M');
+    let aStaff = rotatingEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'A');
+    let nStaff = rotatingEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'N');
+    const offStaff = rotatingEmployees.filter((emp) => {
+      const s = getShift(workingRows, emp, isoDate);
+      return s === 'OFF' || s === 'H8' || s === 'AD';
+    });
+
+    const neededN = Math.max(0, 2 - nStaff.length);
+    const neededM = Math.max(0, 2 - mStaff.length);
+    const neededA = Math.max(0, 2 - aStaff.length);
+
+    // -------------------------------------------------------------------------
+    // 1. NIGHT DEFICIT (N < 2)
+    // -------------------------------------------------------------------------
+    for (let i = 0; i < neededN; i++) {
+      const plans: CandidatePlan[] = [];
+
+      // Category 1: Afternoon staff on last day of block (next day is OFF)
+      for (const emp of aStaff) {
+        const nextS = getShift(workingRows, emp, nextIso);
+        const isLastDay = nextS === 'OFF' || nextS === 'H8' || nextIso === null;
+        if (!isLastDay) continue;
+
+        const nextNextS = getShift(workingRows, emp, nextNextIso);
+        const hasNaturalTwoDaysRest = nextNextS === 'OFF' || nextNextS === 'H8' || nextNextIso === null;
+
+        // Plan 1A: Simple transfer A -> N
+        const changes1: CandidatePlan['changes'] = [
+          {
+            isoDate,
+            employee: emp,
+            fromShift: 'A',
+            toShift: 'N',
+            reason: hasNaturalTwoDaysRest
+              ? `Converted last day of Afternoon block to Night (A ➔ N). Natural 2-day post-night rest already scheduled (0 extra rest days needed).`
+              : `Converted last day of Afternoon block to Night (A ➔ N) to cover sick colleague.`,
+            absColleague: absNames
+          }
+        ];
+
+        // If nextNext day is working, set it to OFF for mandatory 2-day night rest
+        if (!hasNaturalTwoDaysRest && nextNextIso) {
+          changes1.push({
+            isoDate: nextNextIso,
+            employee: emp,
+            fromShift: nextNextS,
+            toShift: 'OFF',
+            reason: `Mandatory post-night rest day 2 granted after covering Night shift.`,
+            absColleague: absNames
+          });
+        }
+
+        // Domino backfill: If Afternoon drops to 1, attempt to backfill from Morning surplus
+        if (aStaff.length <= 2 && mStaff.length > 2) {
+          const mSurplusEmp = mStaff.find((me) => getShift(workingRows, me, nextIso) !== 'M');
+          if (mSurplusEmp) {
+            changes1.push({
+              isoDate,
+              employee: mSurplusEmp,
+              fromShift: 'M',
+              toShift: 'A',
+              reason: `Domino rebalance: Moved from Morning surplus (${mStaff.length} ➔ ${mStaff.length - 1}) to Afternoon to maintain 2 Afternoon staff.`,
+              absColleague: absNames
+            });
+          }
+        }
+
+        const test1 = cloneRows(workingRows);
+        for (const c of changes1) {
+          test1[c.employee][c.isoDate] = c.toShift;
+        }
+        const { penalty: pen1, rep: rep1 } = evaluatePenalty(test1);
+        plans.push({ changes: changes1, penalty: pen1, violations: rep1.totalViolations });
+      }
+
+      // Category 2: Afternoon staff with surplus even if not strictly last day
+      if (aStaff.length > 2) {
+        for (const emp of aStaff) {
+          const changes2: CandidatePlan['changes'] = [
+            {
+              isoDate,
+              employee: emp,
+              fromShift: 'A',
+              toShift: 'N',
+              reason: `Moved from Afternoon surplus (${aStaff.length} ➔ ${aStaff.length - 1}) to Night (A ➔ N) to cover sick colleague.`,
+              absColleague: absNames
+            }
+          ];
+          if (nextIso && getShift(workingRows, emp, nextIso) !== 'OFF') {
+            changes2.push({
+              isoDate: nextIso,
+              employee: emp,
+              fromShift: getShift(workingRows, emp, nextIso),
+              toShift: 'OFF',
+              reason: `Mandatory post-night rest day 1.`,
+              absColleague: absNames
+            });
+          }
+          if (nextNextIso && getShift(workingRows, emp, nextNextIso) !== 'OFF') {
+            changes2.push({
+              isoDate: nextNextIso,
+              employee: emp,
+              fromShift: getShift(workingRows, emp, nextNextIso),
+              toShift: 'OFF',
+              reason: `Mandatory post-night rest day 2.`,
+              absColleague: absNames
+            });
+          }
+
+          const test2 = cloneRows(workingRows);
+          for (const c of changes2) {
+            test2[c.employee][c.isoDate] = c.toShift;
+          }
+          const { penalty: pen2, rep: rep2 } = evaluatePenalty(test2);
+          plans.push({ changes: changes2, penalty: pen2, violations: rep2.totalViolations });
+        }
+      }
+
+      // Category 3: OFF staff who didn't work Night on prev day
+      const eligibleOff = offStaff.filter((emp) => getShift(workingRows, emp, prevIso) !== 'N');
+      for (const emp of eligibleOff) {
+        // Option 3A: with offsetting day off
+        const offset = findOffsetDayForEmp(workingRows, emp, isoDate);
+        const changes3: CandidatePlan['changes'] = [
+          {
+            isoDate,
+            employee: emp,
+            fromShift: 'OFF',
+            toShift: 'N',
+            reason: `Assigned from rest to Night shift (OFF ➔ N) to cover sick colleague.`,
+            absColleague: absNames
+          }
+        ];
+        if (nextIso && getShift(workingRows, emp, nextIso) !== 'OFF') {
+          changes3.push({
+            isoDate: nextIso,
+            employee: emp,
+            fromShift: getShift(workingRows, emp, nextIso),
+            toShift: 'OFF',
+            reason: `Mandatory post-night rest day 1.`,
+            absColleague: absNames
+          });
+        }
+        if (offset) {
+          changes3.push({
+            isoDate: offset.offsetIso,
+            employee: emp,
+            fromShift: offset.oldShift,
+            toShift: 'OFF',
+            reason: `Offsetting day off to preserve legal ${targetWorkingDays}-day monthly norm (balances extra Night shift on ${isoDate}).`,
+            absColleague: absNames
+          });
+        }
+
+        const test3 = cloneRows(workingRows);
+        for (const c of changes3) {
+          test3[c.employee][c.isoDate] = c.toShift;
+        }
+        const { penalty: pen3, rep: rep3 } = evaluatePenalty(test3);
+        plans.push({ changes: changes3, penalty: pen3, violations: rep3.totalViolations });
+      }
+
+      // Choose plan that minimizes penalties & warnings
+      if (plans.length > 0) {
+        plans.sort((a, b) => a.penalty - b.penalty);
+        const bestPenalty = plans[0].penalty;
+        const topPlans = plans.filter((p) => p.penalty === bestPenalty);
+        const chosen = topPlans[(variantSeed + d + i) % topPlans.length];
+
+        for (const c of chosen.changes) {
+          workingRows[c.employee][c.isoDate] = c.toShift;
+          adjustments.push(c);
+        }
+
+        // Re-sync staff
+        mStaff = rotatingEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'M');
+        aStaff = rotatingEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'A');
+        nStaff = rotatingEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'N');
+      } else {
+        unresolvedDeficits.push({
+          isoDate,
+          shift: 'N',
+          needed: 1,
+          available: nStaff.length,
+          reason: `No eligible colleague found for Night shift without violating mandatory rest (M ➔ N is strictly prohibited).`
+        });
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // 2. MORNING DEFICIT (M < 2)
+    // -------------------------------------------------------------------------
+    for (let i = 0; i < neededM; i++) {
+      const plans: CandidatePlan[] = [];
+
+      // Category 1: Afternoon staff with surplus (aStaff.length > 2)
+      if (aStaff.length > 2) {
+        const candidates = aStaff.filter((emp) => getShift(workingRows, emp, prevIso) !== 'N');
+        for (const emp of candidates) {
+          const changes: CandidatePlan['changes'] = [
+            {
+              isoDate,
+              employee: emp,
+              fromShift: 'A',
+              toShift: 'M',
+              reason: `Moved from Afternoon surplus (${aStaff.length} ➔ ${aStaff.length - 1}) to Morning (A ➔ M) to cover sick colleague (0 norm change).`,
+              absColleague: absNames
+            }
+          ];
+          const test = cloneRows(workingRows);
+          test[emp][isoDate] = 'M';
+          const { penalty, rep } = evaluatePenalty(test);
+          plans.push({ changes, penalty, violations: rep.totalViolations });
+        }
+      }
+
+      // Category 2: George Tir (if weekday & not holiday)
+      if (FIXED_WEEKDAY_MA_EMPLOYEES.length > 0) {
+        const dayOfWeek = col.date.getDay();
+        const isWk = dayOfWeek === 0 || dayOfWeek === 6;
+        if (!isWk) {
+          for (const gt of FIXED_WEEKDAY_MA_EMPLOYEES) {
+            if (getShift(workingRows, gt, isoDate) === 'A') {
+              const changes: CandidatePlan['changes'] = [
+                {
+                  isoDate,
+                  employee: gt,
+                  fromShift: 'A',
+                  toShift: 'M',
+                  reason: `Fixed weekday M/A colleague switched from Afternoon to Morning to cover sick colleague.`,
+                  absColleague: absNames
+                }
+              ];
+              const test = cloneRows(workingRows);
+              test[gt][isoDate] = 'M';
+              const { penalty, rep } = evaluatePenalty(test);
+              plans.push({ changes, penalty, violations: rep.totalViolations });
+            }
+          }
+        }
+      }
+
+      // Category 3: OFF staff
+      const eligibleOff = offStaff.filter((emp) => getShift(workingRows, emp, prevIso) !== 'N');
+      for (const emp of eligibleOff) {
+        const offset = findOffsetDayForEmp(workingRows, emp, isoDate);
+        const changes: CandidatePlan['changes'] = [
+          {
+            isoDate,
+            employee: emp,
+            fromShift: 'OFF',
+            toShift: 'M',
+            reason: `Assigned from rest to Morning shift (OFF ➔ M) to ensure minimum of 2 Morning staff.`,
+            absColleague: absNames
+          }
+        ];
+        if (offset) {
+          changes.push({
+            isoDate: offset.offsetIso,
+            employee: emp,
+            fromShift: offset.oldShift,
+            toShift: 'OFF',
+            reason: `Offsetting day off granted to preserve legal ${targetWorkingDays}-day monthly norm (balances extra Morning shift on ${isoDate}).`,
+            absColleague: absNames
+          });
+        }
+        const test = cloneRows(workingRows);
+        for (const c of changes) {
+          test[c.employee][c.isoDate] = c.toShift;
+        }
+        const { penalty, rep } = evaluatePenalty(test);
+        plans.push({ changes, penalty, violations: rep.totalViolations });
+      }
+
+      if (plans.length > 0) {
+        plans.sort((a, b) => a.penalty - b.penalty);
+        const bestPenalty = plans[0].penalty;
+        const topPlans = plans.filter((p) => p.penalty === bestPenalty);
+        const chosen = topPlans[(variantSeed + d + i) % topPlans.length];
+
+        for (const c of chosen.changes) {
+          workingRows[c.employee][c.isoDate] = c.toShift;
+          adjustments.push(c);
+        }
+
+        mStaff = rotatingEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'M');
+        aStaff = rotatingEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'A');
+        nStaff = rotatingEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'N');
+      } else {
+        unresolvedDeficits.push({
+          isoDate,
+          shift: 'M',
+          needed: 1,
+          available: mStaff.length,
+          reason: `No eligible colleague from Afternoon surplus or scheduled rest could cover Morning.`
+        });
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // 3. AFTERNOON DEFICIT (A < 2)
+    // -------------------------------------------------------------------------
+    for (let i = 0; i < neededA; i++) {
+      const plans: CandidatePlan[] = [];
+
+      // Category 1: Morning staff with surplus (mStaff.length > 2)
+      if (mStaff.length > 2) {
+        const candidates = mStaff.filter((emp) => getShift(workingRows, emp, nextIso) !== 'M');
+        for (const emp of candidates) {
+          const changes: CandidatePlan['changes'] = [
+            {
+              isoDate,
+              employee: emp,
+              fromShift: 'M',
+              toShift: 'A',
+              reason: `Moved from Morning surplus (${mStaff.length} ➔ ${mStaff.length - 1}) to Afternoon (M ➔ A) to cover sick colleague (0 norm change).`,
+              absColleague: absNames
+            }
+          ];
+          const test = cloneRows(workingRows);
+          test[emp][isoDate] = 'A';
+          const { penalty, rep } = evaluatePenalty(test);
+          plans.push({ changes, penalty, violations: rep.totalViolations });
+        }
+      }
+
+      // Category 2: George Tir (if weekday & not holiday)
+      if (FIXED_WEEKDAY_MA_EMPLOYEES.length > 0) {
+        const dayOfWeek = col.date.getDay();
+        const isWk = dayOfWeek === 0 || dayOfWeek === 6;
+        if (!isWk) {
+          for (const gt of FIXED_WEEKDAY_MA_EMPLOYEES) {
+            if (getShift(workingRows, gt, isoDate) === 'M') {
+              const changes: CandidatePlan['changes'] = [
+                {
+                  isoDate,
+                  employee: gt,
+                  fromShift: 'M',
+                  toShift: 'A',
+                  reason: `Fixed weekday M/A colleague switched from Morning to Afternoon to cover sick colleague.`,
+                  absColleague: absNames
+                }
+              ];
+              const test = cloneRows(workingRows);
+              test[gt][isoDate] = 'A';
+              const { penalty, rep } = evaluatePenalty(test);
+              plans.push({ changes, penalty, violations: rep.totalViolations });
+            }
+          }
+        }
+      }
+
+      // Category 3: OFF staff
+      const eligibleOff = offStaff.filter((emp) => getShift(workingRows, emp, prevIso) !== 'N');
+      for (const emp of eligibleOff) {
+        const offset = findOffsetDayForEmp(workingRows, emp, isoDate);
+        const changes: CandidatePlan['changes'] = [
+          {
+            isoDate,
+            employee: emp,
+            fromShift: 'OFF',
+            toShift: 'A',
+            reason: `Assigned from rest to Afternoon shift (OFF ➔ A) to maintain minimum of 2 Afternoon staff.`,
+            absColleague: absNames
+          }
+        ];
+        if (offset) {
+          changes.push({
+            isoDate: offset.offsetIso,
+            employee: emp,
+            fromShift: offset.oldShift,
+            toShift: 'OFF',
+            reason: `Offsetting day off granted to preserve legal ${targetWorkingDays}-day monthly norm (balances extra Afternoon shift on ${isoDate}).`,
+            absColleague: absNames
+          });
+        }
+        const test = cloneRows(workingRows);
+        for (const c of changes) {
+          test[c.employee][c.isoDate] = c.toShift;
+        }
+        const { penalty, rep } = evaluatePenalty(test);
+        plans.push({ changes, penalty, violations: rep.totalViolations });
+      }
+
+      if (plans.length > 0) {
+        plans.sort((a, b) => a.penalty - b.penalty);
+        const bestPenalty = plans[0].penalty;
+        const topPlans = plans.filter((p) => p.penalty === bestPenalty);
+        const chosen = topPlans[(variantSeed + d + i) % topPlans.length];
+
+        for (const c of chosen.changes) {
+          workingRows[c.employee][c.isoDate] = c.toShift;
+          adjustments.push(c);
+        }
+
+        mStaff = rotatingEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'M');
+        aStaff = rotatingEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'A');
+        nStaff = rotatingEmployees.filter((emp) => getShift(workingRows, emp, isoDate) === 'N');
+      } else {
+        unresolvedDeficits.push({
+          isoDate,
+          shift: 'A',
+          needed: 1,
+          available: aStaff.length,
+          reason: `No eligible colleague from Morning surplus or scheduled rest could cover Afternoon.`
+        });
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 4. GLOBAL REBALANCING POST-PASS (Eliminate any remaining warnings)
+  // ---------------------------------------------------------------------------
+  let currentValidation = validateScheduleCompliance(
+    workingRows,
+    dateColumns,
+    priorRoster,
+    targetYear,
+    targetMonth,
+    targetWorkingDays
+  );
+
+  let improved = true;
+  let maxPasses = 5;
+  while (improved && maxPasses > 0 && currentValidation.totalViolations > 0) {
+    improved = false;
+    maxPasses--;
+
+    for (const emp of rotatingEmployees) {
+      const stats = currentValidation.employeeStats[emp];
+      if (!stats) continue;
+
+      // Case A: Employee worked more days than target (e.g. called in from OFF)
+      if (stats.totalWorkingDays > stats.targetWorkingDays) {
+        for (let k = 0; k < dateColumns.length; k++) {
+          const kIso = dateColumns[k].isoDate;
+          const curS = shiftKey(workingRows[emp]?.[kIso] ?? 'OFF');
+          if (curS !== 'M' && curS !== 'A') continue;
+
+          // Check if shift has >= 3 staff
+          const curCount = rotatingEmployees.filter(
+            (re) => shiftKey(workingRows[re]?.[kIso] ?? 'OFF') === curS
+          ).length;
+
+          if (curCount >= 3) {
+            const testRows = cloneRows(workingRows);
+            testRows[emp][kIso] = 'OFF';
+            const testRep = validateScheduleCompliance(
+              testRows,
+              dateColumns,
+              priorRoster,
+              targetYear,
+              targetMonth,
+              targetWorkingDays
+            );
+
+            if (testRep.totalViolations < currentValidation.totalViolations) {
+              workingRows[emp][kIso] = 'OFF';
+              currentValidation = testRep;
+              adjustments.push({
+                isoDate: kIso,
+                employee: emp,
+                fromShift: curS,
+                toShift: 'OFF',
+                reason: `Rebalanced: Added offsetting day off to preserve legal monthly norm of ${targetWorkingDays} working days.`,
+                absColleague: 'Rebalancing'
+              });
+              improved = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    hasDeficits: adjustments.length > 0 || unresolvedDeficits.length > 0,
+    totalDeficits: adjustments.length + unresolvedDeficits.length,
+    adjustments,
+    unresolvedDeficits,
+    updatedRows: workingRows,
+    validation: currentValidation
+  };
+}
+
