@@ -657,7 +657,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
           <div className="text-[12px]">
             <p className="font-semibold text-zinc-800 dark:text-zinc-200 text-[13px]">24/7 Shift Coverage</p>
             <div className="mt-1 flex flex-wrap gap-2 text-[11px] font-medium">
-              <span className="rounded bg-green-500/15 text-green-700 dark:text-green-300 px-1.5 py-0.5">Morning: 2–3</span>
+              <span className="rounded bg-green-500/15 text-green-700 dark:text-green-300 px-1.5 py-0.5">Morning: ≥ 1 (rot)</span>
               <span className="rounded bg-orange-500/15 text-orange-700 dark:text-orange-300 px-1.5 py-0.5">Afternoon: 2–3</span>
               <span className="rounded bg-purple-500/15 text-purple-700 dark:text-purple-300 px-1.5 py-0.5">Night: 2</span>
             </div>
@@ -1094,20 +1094,21 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                 </td>
                 {scheduleData?.dateColumns.map(({ isoDate }) => {
                   const cov = validation.dailyCoverage[isoDate];
-                  const under = cov ? cov.M < 2 : false;
+                  const under = cov ? (cov.rotM !== undefined ? cov.rotM < 1 : cov.M < 1) : false;
                   return (
                     <td
                       key={isoDate}
                       className={`p-1 text-center font-mono text-[11px] border-r border-zinc-950/5 dark:border-white/5 ${
                         under ? 'bg-rose-500/20 text-rose-600 font-bold' : 'text-green-700 dark:text-green-400'
                       }`}
+                      title={cov ? `Total Morning: ${cov.M} (${cov.rotM ?? cov.M} rotating)` : undefined}
                     >
                       {cov?.M ?? 0}
                     </td>
                   );
                 })}
                 <td className="sticky right-0 z-10 p-1 text-center bg-zinc-100 dark:bg-[#141414] border-l border-zinc-950/10 dark:border-white/10 font-bold text-green-700 dark:text-green-400">
-                  M ≥ 2
+                  M ≥ 1
                 </td>
               </tr>
 
@@ -1310,7 +1311,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                   <div>
                     <h4 className="font-bold text-sm">No Shifts Need Readjustment</h4>
                     <p className="mt-1 leading-relaxed text-zinc-600 dark:text-zinc-300">
-                      Even with colleagues on ABS, every shift still meets the minimum staffing requirement (M ≥ 2, A ≥ 2, N = 2).
+                      Even with colleagues on ABS, every shift still meets the minimum staffing requirement (M ≥ 1, A ≥ 2, N = 2).
                       No colleagues need their shifts changed (0 invasiveness).
                     </p>
                   </div>

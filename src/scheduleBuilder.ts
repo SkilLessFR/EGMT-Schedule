@@ -139,6 +139,7 @@ export interface DayCoverage {
   dayOfWeek: number; // 0 = Sun, 1 = Mon ...
   isWeekend: boolean;
   M: number;
+  rotM?: number;
   A: number;
   N: number;
   MID: number;
@@ -797,7 +798,8 @@ function equalizeExactWorkingDays(
           rotating.forEach((e) => {
             if (rows[e][isoDate] === cur) count++;
           });
-          if (count > 2) {
+          const minAllowed = cur === 'M' ? 1 : 2;
+          if (count > minAllowed) {
             rows[sEmp][isoDate] = 'OFF';
             if (isEmpValid(sEmp)) {
               dropped = true;
@@ -1328,10 +1330,12 @@ export function validateScheduleCompliance(
       else if (s === 'N') rotC.N++;
     });
 
-    // Overall daily staffing on M, A, N (includes George Tir on weekdays)
-    const isUnderstaffed = c.M < 2 || c.A < 2 || c.N < 2;
+    // Daily staffing checks:
+    // Rule: Morning shift minimum is 1 (excluding Tir and Palade from the calculation -> rotC.M)
+    // Afternoon minimum is 2, Night minimum is 2, Night maximum is 2
+    const isUnderstaffed = rotC.M < 1 || c.A < 2 || c.N < 2;
     const isOverstaffedNight = c.N > 2;
-    if (c.M < 2) dayWarnings.push(`Morning understaffed (${c.M}/2 minimum)`);
+    if (rotC.M < 1) dayWarnings.push(`Morning understaffed (${rotC.M}/1 minimum)`);
     if (c.A < 2) dayWarnings.push(`Afternoon understaffed (${c.A}/2 minimum)`);
     if (c.N < 2) dayWarnings.push(`Night understaffed (${c.N}/2 minimum)`);
     if (c.N > 2) dayWarnings.push(`Night overstaffed (${c.N}/2 maximum)`);
@@ -1351,6 +1355,7 @@ export function validateScheduleCompliance(
       dayOfWeek,
       isWeekend,
       M: c.M,
+      rotM: rotC.M,
       A: c.A,
       N: c.N,
       MID: c.MID,
@@ -2113,7 +2118,8 @@ export function calculateAbsReadjustments(
       for (const re of rotatingEmployees) {
         if (shiftKey(baseRows[re]?.[kIso] ?? 'OFF') === curS) count++;
       }
-      if (count >= 3) {
+      const minStaff = curS === 'M' ? 2 : 3;
+      if (count >= minStaff) {
         const tempRows = cloneRows(baseRows);
         tempRows[emp][kIso] = 'OFF';
         const { rep } = evaluatePenalty(tempRows);
@@ -2182,7 +2188,7 @@ export function calculateAbsReadjustments(
     });
 
     const neededN = Math.max(0, 2 - totalN);
-    const neededM = Math.max(0, 2 - totalM);
+    const neededM = Math.max(0, 1 - mStaff.length);
     const neededA = Math.max(0, 2 - totalA);
 
     // -------------------------------------------------------------------------
@@ -2226,8 +2232,8 @@ export function calculateAbsReadjustments(
           });
         }
 
-        // Domino backfill: If Afternoon drops below 2, attempt to backfill from Morning surplus
-        if (totalA <= 2 && totalM > 2) {
+        // Domino backfill: If Afternoon drops below 2, attempt to backfill from Morning surplus (rotating M > 1)
+        if (totalA <= 2 && mStaff.length > 1) {
           const mSurplusEmp = mStaff.find((me) => getShift(workingRows, me, nextIso) !== 'M');
           if (mSurplusEmp) {
             changes1.push({
@@ -2362,7 +2368,7 @@ export function calculateAbsReadjustments(
     }
 
     // -------------------------------------------------------------------------
-    // 2. MORNING DEFICIT (M < 2)
+    // 2. MORNING DEFICIT (rotM < 1)
     // -------------------------------------------------------------------------
     for (let i = 0; i < neededM; i++) {
       const plans: CandidatePlan[] = [];
