@@ -27,7 +27,7 @@ export function getIsoWeekNumber(date: Date): number {
 export const ROMANIAN_HOLIDAYS_2026 = new Set<string>([
   '2026-01-01', '2026-01-02', '2026-01-06', '2026-01-07', '2026-01-24',
   '2026-04-10', '2026-04-12', '2026-04-13', '2026-05-01', '2026-05-31',
-  '2026-06-01', '2026-08-15', '2026-11-30', '2026-12-01', '2026-12-25', '2026-12-26'
+  '2026-06-01', '2026-08-15', '2026-11-30', '2026-12-01', '2026-12-25', '2026-12-26', '2026-12-31'
 ]);
 
 export const MONTHLY_WORKING_DAYS_2026: Record<number, number> = {
@@ -42,7 +42,7 @@ export const MONTHLY_WORKING_DAYS_2026: Record<number, number> = {
   8: 22, // Sep
   9: 22, // Oct
   10: 20, // Nov (20 in 11 Noiembrie.xlsx)
-  11: 21  // Dec (21 working days in 2026: 23 weekdays minus 2 statutory public holidays: Dec 1 & Dec 25)
+  11: 20  // Dec (20 working days in 2026: 23 weekdays minus 3 statutory public holidays: Dec 1, Dec 25, Dec 31)
 };
 
 export function countLegalWorkingDaysInMonth(month: number, year: number): number {
