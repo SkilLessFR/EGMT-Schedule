@@ -135,14 +135,16 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
 
   // Multi-cell selection state for block changes
   const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
-  const [lastClickedCell, setLastClickedCell] = useState<{ employee: string; isoDate: string } | null>(null);
   const [bulkFeedback, setBulkFeedback] = useState<string | null>(null);
   const isMouseDownRef = useRef(false);
+  const dragStartCellRef = useRef<{ employee: string; isoDate: string } | null>(null);
+  const hasDraggedRef = useRef(false);
 
   // Clear dragging on mouseup
   useEffect(() => {
     const handleMouseUp = () => {
       isMouseDownRef.current = false;
+      dragStartCellRef.current = null;
     };
     window.addEventListener('mouseup', handleMouseUp);
     return () => window.removeEventListener('mouseup', handleMouseUp);
@@ -299,15 +301,82 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
     runGeneration(nextSeed, targetYear, targetMonth, excludedEmployees);
   };
 
+  // Finds the full contiguous shift block containing targetIsoDate for emp.
+  // If emp is on an extended run of OFF (> 4 days, e.g. deselected for whole month), returns a standard 4-day block.
+  const getBlockCellsForEmployee = (
+    data: GeneratedScheduleResult,
+    emp: string,
+    targetIsoDate: string
+  ): string[] => {
+    const dateCols = data.dateColumns;
+    const targetIdx = dateCols.findIndex((c) => c.isoDate === targetIsoDate);
+    if (targetIdx === -1) return [`${emp}::${targetIsoDate}`];
+
+    const row = data.rows[emp] || {};
+    const currentShift = shiftKey(row[targetIsoDate] ?? 'OFF');
+
+    // Find contiguous range of same shift for this employee
+    let startIdx = targetIdx;
+    while (startIdx > 0 && shiftKey(row[dateCols[startIdx - 1].isoDate] ?? 'OFF') === currentShift) {
+      startIdx--;
+    }
+
+    let endIdx = targetIdx;
+    while (endIdx < dateCols.length - 1 && shiftKey(row[dateCols[endIdx + 1].isoDate] ?? 'OFF') === currentShift) {
+      endIdx++;
+    }
+
+    const contiguousCount = endIdx - startIdx + 1;
+
+    // If extended OFF run (> 4 days, e.g. deselected employee off for month),
+    // select a standard 4-day block starting from targetIdx (or clamped to end of month/run)
+    if (currentShift === 'OFF' && contiguousCount > 4) {
+      const blockStart = targetIdx;
+      const blockEnd = Math.min(dateCols.length - 1, targetIdx + 3);
+      const result: string[] = [];
+      for (let i = blockStart; i <= blockEnd; i++) {
+        result.push(`${emp}::${dateCols[i].isoDate}`);
+      }
+      return result;
+    }
+
+    // Standard block: all contiguous days of this shift
+    const result: string[] = [];
+    for (let i = startIdx; i <= endIdx; i++) {
+      result.push(`${emp}::${dateCols[i].isoDate}`);
+    }
+    return result;
+  };
+
   // Multi-cell selection & block change handlers
   const handleCellMouseDown = (e: React.MouseEvent, emp: string, isoDate: string) => {
     if ((e.target as HTMLElement).closest('.shift-popover')) return;
 
     const cellKey = `${emp}::${isoDate}`;
-    isMouseDownRef.current = true;
+    hasDraggedRef.current = false;
 
+    // 1. Shift-click: Select entire shift block!
+    if (e.shiftKey && scheduleData) {
+      e.preventDefault();
+      setEditingCell(null);
+      const blockKeys = getBlockCellsForEmployee(scheduleData, emp, isoDate);
+
+      setSelectedCells((prev) => {
+        // If holding Ctrl/Cmd as well, add to existing selection; otherwise replace
+        if (e.ctrlKey || e.metaKey) {
+          const next = new Set(prev);
+          blockKeys.forEach((k) => next.add(k));
+          return next;
+        }
+        return new Set(blockKeys);
+      });
+      isMouseDownRef.current = false;
+      dragStartCellRef.current = null;
+      return;
+    }
+
+    // 2. Ctrl/Cmd click: Toggle single cell into/out of multi-selection
     if (e.ctrlKey || e.metaKey) {
-      // Holding Ctrl / Cmd: Toggle cell into/out of multi-selection
       setEditingCell(null);
       setSelectedCells((prev) => {
         const next = new Set(prev);
@@ -318,45 +387,22 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
         }
         return next;
       });
-      setLastClickedCell({ employee: emp, isoDate });
-    } else if (e.shiftKey && lastClickedCell && scheduleData) {
-      // Holding Shift: Select rectangular block range between last clicked cell and current
-      setEditingCell(null);
-      const allDates = scheduleData.dateColumns.map((c) => c.isoDate);
-      const allEmps = Object.keys(scheduleData.rows);
-
-      const startEmpIdx = allEmps.indexOf(lastClickedCell.employee);
-      const endEmpIdx = allEmps.indexOf(emp);
-      const startDateIdx = allDates.indexOf(lastClickedCell.isoDate);
-      const endDateIdx = allDates.indexOf(isoDate);
-
-      if (startEmpIdx !== -1 && endEmpIdx !== -1 && startDateIdx !== -1 && endDateIdx !== -1) {
-        const [lowEmp, highEmp] = startEmpIdx <= endEmpIdx ? [startEmpIdx, endEmpIdx] : [endEmpIdx, startEmpIdx];
-        const [lowDate, highDate] = startDateIdx <= endDateIdx ? [startDateIdx, endDateIdx] : [endDateIdx, startDateIdx];
-
-        setSelectedCells((prev) => {
-          const next = new Set(prev);
-          for (let eIdx = lowEmp; eIdx <= highEmp; eIdx++) {
-            for (let dIdx = lowDate; dIdx <= highDate; dIdx++) {
-              next.add(`${allEmps[eIdx]}::${allDates[dIdx]}`);
-            }
-          }
-          return next;
-        });
-      }
-    } else {
-      // Normal click without Ctrl/Shift:
-      if (selectedCells.size > 0 && selectedCells.has(cellKey)) {
-        return;
-      }
-      setSelectedCells(new Set());
-      setEditingCell({ employee: emp, isoDate });
-      setLastClickedCell({ employee: emp, isoDate });
+      isMouseDownRef.current = true;
+      dragStartCellRef.current = { employee: emp, isoDate };
+      return;
     }
+
+    // 3. Normal mouse down: prepare for click or drag
+    isMouseDownRef.current = true;
+    dragStartCellRef.current = { employee: emp, isoDate };
   };
 
   const handleCellMouseEnter = (e: React.MouseEvent, emp: string, isoDate: string) => {
-    if (isMouseDownRef.current && (e.ctrlKey || e.metaKey)) {
+    if (!isMouseDownRef.current || !dragStartCellRef.current || !scheduleData) return;
+
+    // Holding Ctrl/Cmd while dragging: toggle/add hovered cells
+    if (e.ctrlKey || e.metaKey) {
+      hasDraggedRef.current = true;
       const cellKey = `${emp}::${isoDate}`;
       setSelectedCells((prev) => {
         if (prev.has(cellKey)) return prev;
@@ -364,7 +410,47 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
         next.add(cellKey);
         return next;
       });
+      return;
     }
+
+    // Normal drag across cells: select range on the current employee or rectangular area
+    hasDraggedRef.current = true;
+    setEditingCell(null);
+
+    const allDates = scheduleData.dateColumns.map((c) => c.isoDate);
+    const allEmps = Object.keys(scheduleData.rows);
+
+    const startEmpIdx = allEmps.indexOf(dragStartCellRef.current.employee);
+    const endEmpIdx = allEmps.indexOf(emp);
+    const startDateIdx = allDates.indexOf(dragStartCellRef.current.isoDate);
+    const endDateIdx = allDates.indexOf(isoDate);
+
+    if (startEmpIdx !== -1 && endEmpIdx !== -1 && startDateIdx !== -1 && endDateIdx !== -1) {
+      const [lowEmp, highEmp] = startEmpIdx <= endEmpIdx ? [startEmpIdx, endEmpIdx] : [endEmpIdx, startEmpIdx];
+      const [lowDate, highDate] = startDateIdx <= endDateIdx ? [startDateIdx, endDateIdx] : [endDateIdx, startDateIdx];
+
+      const newSet = new Set<string>();
+      for (let eIdx = lowEmp; eIdx <= highEmp; eIdx++) {
+        for (let dIdx = lowDate; dIdx <= highDate; dIdx++) {
+          newSet.add(`${allEmps[eIdx]}::${allDates[dIdx]}`);
+        }
+      }
+      setSelectedCells(newSet);
+    }
+  };
+
+  const handleCellClick = (e: React.MouseEvent, emp: string, isoDate: string) => {
+    if ((e.target as HTMLElement).closest('.shift-popover')) return;
+    if (e.shiftKey || e.ctrlKey || e.metaKey) return;
+    if (hasDraggedRef.current) return;
+
+    const cellKey = `${emp}::${isoDate}`;
+    if (selectedCells.size > 0 && selectedCells.has(cellKey)) {
+      return;
+    }
+
+    setSelectedCells(new Set());
+    setEditingCell({ employee: emp, isoDate });
   };
 
   // Toggle selection for an entire day column
@@ -898,13 +984,14 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                 const isFixedMid = FIXED_MID_EMPLOYEES.includes(emp);
                 const isWeekdayMA = FIXED_WEEKDAY_MA_EMPLOYEES.includes(emp);
                 const stats = validation.employeeStats[emp];
+                const hasCustomShifts = isExcluded && (stats?.totalWorkingDays ?? 0) > 0;
 
                 return (
                   <tr
                     key={emp}
                     className={`transition-colors ${
-                      isExcluded
-                        ? 'opacity-60 bg-zinc-950/[0.04] dark:bg-white/[0.02]'
+                      isExcluded && !hasCustomShifts
+                        ? 'bg-zinc-950/[0.03] dark:bg-white/[0.015]'
                         : 'hover:bg-zinc-950/[0.02] dark:hover:bg-white/[0.02]'
                     }`}
                   >
@@ -924,11 +1011,19 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                           }}
                           disabled={isHistorical || isGenerating}
                           className="rounded border-zinc-300 dark:border-zinc-700 text-blue-600 focus:ring-blue-500 cursor-pointer size-3.5 shrink-0"
-                          title={isExcluded ? `Include ${emp} in monthly roster generation` : `Exclude ${emp} from monthly roster generation (Off whole month)`}
+                          title={
+                            isExcluded
+                              ? hasCustomShifts
+                                ? `${emp} has custom shifts assigned. Check to restore full auto-rotation`
+                                : `Include ${emp} in monthly roster generation`
+                              : `Exclude ${emp} from monthly roster generation (Off whole month)`
+                          }
                         />
                         <div className={`flex size-6 shrink-0 items-center justify-center rounded-lg text-[10px] font-bold ${
-                          isExcluded
+                          isExcluded && !hasCustomShifts
                             ? 'bg-zinc-500/10 text-zinc-400'
+                            : isExcluded && hasCustomShifts
+                            ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
                             : isFixedMid
                             ? 'bg-blue-500/15 text-blue-500'
                             : isWeekdayMA
@@ -939,14 +1034,20 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                         </div>
                         <div className="min-w-0">
                           <p className={`truncate font-semibold text-[12px] ${
-                            isExcluded
+                            isExcluded && !hasCustomShifts
                               ? 'line-through text-zinc-400 dark:text-zinc-500'
                               : 'text-zinc-900 dark:text-zinc-100'
                           }`}>
                             {emp}
                           </p>
                           {isExcluded ? (
-                            <span className="text-[9px] font-bold text-amber-500 dark:text-amber-400 uppercase tracking-tight">Month Off</span>
+                            hasCustomShifts ? (
+                              <span className="text-[9px] font-bold text-amber-500 dark:text-amber-400 uppercase tracking-tight">
+                                Off / Custom ({stats?.totalWorkingDays}d)
+                              </span>
+                            ) : (
+                              <span className="text-[9px] font-bold text-amber-500 dark:text-amber-400 uppercase tracking-tight">Month Off</span>
+                            )
                           ) : isFixedMid ? (
                             <span className="text-[9px] font-bold text-blue-500 uppercase">Fixed Mid</span>
                           ) : isWeekdayMA ? (
@@ -976,6 +1077,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                           key={isoDate}
                           onMouseDown={(e) => handleCellMouseDown(e, emp, isoDate)}
                           onMouseEnter={(e) => handleCellMouseEnter(e, emp, isoDate)}
+                          onClick={(e) => handleCellClick(e, emp, isoDate)}
                           className={`p-1 text-center border-r border-zinc-950/5 dark:border-white/5 relative cursor-pointer select-none transition-all ${
                             isCellSelected
                               ? 'bg-blue-500/25 dark:bg-blue-500/35 ring-2 ring-blue-500 ring-inset z-20'
@@ -985,7 +1087,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                                   ? 'bg-zinc-950/[0.015] dark:bg-white/[0.015]'
                                   : ''
                           }`}
-                          title={`${emp} on ${isoDate}: ${rawShift} (Click to edit, Ctrl+click to multi-select)`}
+                          title={`${emp} on ${isoDate}: ${rawShift} (Click to edit, Shift+click to select block, drag to select range)`}
                         >
                           <div
                             className={`inline-flex items-center justify-center size-6 rounded-lg font-bold text-[10px] transition-transform ${
@@ -1050,7 +1152,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
 
                     {/* Summary Stats Cell */}
                     <td className="sticky right-0 z-10 p-2 text-center bg-zinc-100 dark:bg-[#121212] border-l border-zinc-950/10 dark:border-white/10 font-mono text-[10px]">
-                      {isExcluded ? (
+                      {isExcluded && !hasCustomShifts ? (
                         <span className="inline-flex items-center px-2 py-0.5 rounded font-sans text-[10px] font-bold bg-zinc-500/10 text-zinc-500 dark:text-zinc-400">
                           Off for month
                         </span>
@@ -1069,13 +1171,15 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                           <span className="text-zinc-400" title="Off days">{stats.OFF}O</span>
                           <span
                             className={`font-bold px-1.5 py-0.5 rounded text-[10px] ${
-                              stats.totalWorkingDays === stats.targetWorkingDays
-                                ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
-                                : 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
+                              isExcluded
+                                ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                                : stats.totalWorkingDays === stats.targetWorkingDays
+                                  ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                                  : 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
                             }`}
-                            title={`Total working days: ${stats.totalWorkingDays}/${stats.targetWorkingDays} required`}
+                            title={isExcluded ? `Custom shifts on deselected employee: ${stats.totalWorkingDays} working days` : `Total working days: ${stats.totalWorkingDays}/${stats.targetWorkingDays} required`}
                           >
-                            {stats.totalWorkingDays}/{stats.targetWorkingDays}d
+                            {isExcluded ? `${stats.totalWorkingDays}d` : `${stats.totalWorkingDays}/${stats.targetWorkingDays}d`}
                           </span>
                         </div>
                       )}
