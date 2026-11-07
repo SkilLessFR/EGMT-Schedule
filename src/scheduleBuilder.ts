@@ -131,6 +131,7 @@ export interface ScheduleBuilderOptions {
   minNight?: number;
   targetOffDays?: number;
   maxConsecutiveWork?: number;
+  excludedEmployees?: string[];
 }
 
 export interface DayCoverage {
@@ -213,6 +214,7 @@ export interface GeneratedScheduleResult {
   validation: ScheduleValidationReport;
   seed: number;
   isHistorical?: boolean;
+  excludedEmployees?: string[];
 }
 
 
@@ -503,12 +505,14 @@ function equalizeExactWorkingDays(
   targetWorkingDays: number,
   priorRoster: RosterData | null,
   year: number,
-  month: number
+  month: number,
+  excludedEmployees: string[] = []
 ) {
+  const excludedSet = new Set(excludedEmployees);
   const allEmployees = Object.keys(rows);
-  const fixedMid = FIXED_MID_EMPLOYEES.filter((e) => allEmployees.includes(e));
-  const fixedWeekdayMA = FIXED_WEEKDAY_MA_EMPLOYEES.filter((e) => allEmployees.includes(e));
-  const rotating = allEmployees.filter((e) => !fixedMid.includes(e) && !fixedWeekdayMA.includes(e));
+  const fixedMid = FIXED_MID_EMPLOYEES.filter((e) => allEmployees.includes(e) && !excludedSet.has(e));
+  const fixedWeekdayMA = FIXED_WEEKDAY_MA_EMPLOYEES.filter((e) => allEmployees.includes(e) && !excludedSet.has(e));
+  const rotating = allEmployees.filter((e) => !fixedMid.includes(e) && !fixedWeekdayMA.includes(e) && !excludedSet.has(e));
 
   // 1. Fixed Managers (Palade): Monday to Friday MID, Saturday and Sunday OFF, Romanian National Holidays OFF, Dec 31st OFF
   fixedMid.forEach((emp) => {
@@ -910,9 +914,12 @@ export function generateBalancedSchedule(
         'Prisecaru Alexandru-Ionut'
       ];
 
-  const fixedMidEmployees = FIXED_MID_EMPLOYEES.filter((name) => allEmployees.includes(name));
-  const fixedWeekdayMAEmployees = FIXED_WEEKDAY_MA_EMPLOYEES.filter((name) => allEmployees.includes(name));
-  const rotatingEmployees = allEmployees.filter((name) => !fixedMidEmployees.includes(name) && !fixedWeekdayMAEmployees.includes(name));
+  const excludedSet = new Set(options.excludedEmployees ?? []);
+  const activeAllEmployees = allEmployees.filter((emp) => !excludedSet.has(emp));
+
+  const fixedMidEmployees = FIXED_MID_EMPLOYEES.filter((name) => activeAllEmployees.includes(name));
+  const fixedWeekdayMAEmployees = FIXED_WEEKDAY_MA_EMPLOYEES.filter((name) => activeAllEmployees.includes(name));
+  const rotatingEmployees = activeAllEmployees.filter((name) => !fixedMidEmployees.includes(name) && !fixedWeekdayMAEmployees.includes(name));
 
   // Balanced 1:1:1 templates with 4-day blocks and 2-day rests across 18-day coprime cycles
   // Templates rotate in all 6 possible cyclic directions (M->A->N, A->N->M, N->M->A, M->N->A, A->M->N, N->A->M)
@@ -974,7 +981,72 @@ export function generateBalancedSchedule(
     ]
   ];
 
-  // Pre-configured slot sets ensuring 100% daily coverage (M >= 2, A >= 2, N = 2 every day)
+  // Pre-configured slot sets ensuring optimal coverage across variable team sizes
+  const VALID_SLOT_SETS_6 = [
+    [0, 1, 4, 6, 10, 14],
+    [0, 1, 4, 7, 10, 14],
+    [0, 1, 4, 7, 11, 14],
+    [0, 1, 4, 7, 11, 15],
+    [0, 1, 4, 8, 10, 14],
+    [0, 1, 4, 8, 11, 14],
+    [0, 1, 4, 8, 11, 15],
+    [0, 1, 4, 8, 12, 14],
+    [0, 1, 4, 8, 12, 15],
+    [0, 1, 5, 6, 10, 14]
+  ];
+
+  const VALID_SLOT_SETS_7 = [
+    [0, 1, 4, 5, 8, 10, 14],
+    [0, 1, 4, 5, 8, 11, 14],
+    [0, 1, 4, 5, 8, 11, 15],
+    [0, 1, 4, 5, 8, 12, 14],
+    [0, 1, 4, 5, 8, 12, 15],
+    [0, 1, 4, 5, 9, 10, 14],
+    [0, 1, 4, 5, 9, 11, 14],
+    [0, 1, 4, 5, 9, 11, 15],
+    [0, 1, 4, 5, 9, 12, 14],
+    [0, 1, 4, 5, 9, 12, 15]
+  ];
+
+  const VALID_SLOT_SETS_8 = [
+    [0, 1, 4, 5, 8, 9, 12, 14],
+    [0, 1, 4, 5, 8, 9, 12, 15],
+    [0, 1, 4, 5, 8, 9, 13, 14],
+    [0, 1, 4, 5, 8, 9, 13, 15],
+    [0, 1, 4, 5, 8, 10, 12, 14],
+    [0, 1, 4, 5, 8, 10, 12, 15],
+    [0, 1, 4, 5, 8, 10, 13, 14],
+    [0, 1, 4, 5, 8, 10, 13, 15],
+    [0, 1, 4, 5, 8, 10, 14, 15],
+    [0, 1, 4, 5, 8, 11, 12, 15]
+  ];
+
+  const VALID_SLOT_SETS_9 = [
+    [0, 2, 4, 6, 8, 10, 12, 14, 16],
+    [2, 4, 6, 8, 10, 12, 14, 16, 0],
+    [4, 6, 8, 10, 12, 14, 16, 0, 2],
+    [6, 8, 10, 12, 14, 16, 0, 2, 4],
+    [8, 10, 12, 14, 16, 0, 2, 4, 6],
+    [10, 12, 14, 16, 0, 2, 4, 6, 8],
+    [12, 14, 16, 0, 2, 4, 6, 8, 10],
+    [14, 16, 0, 2, 4, 6, 8, 10, 12],
+    [16, 0, 2, 4, 6, 8, 10, 12, 14],
+    [1, 3, 5, 7, 9, 11, 13, 15, 17]
+  ];
+
+  const VALID_SLOT_SETS_10 = [
+    [0, 1, 2, 4, 6, 7, 10, 11, 14, 15],
+    [0, 1, 2, 4, 6, 8, 10, 11, 14, 15],
+    [0, 1, 2, 4, 6, 8, 10, 12, 14, 15],
+    [0, 1, 2, 4, 6, 8, 10, 12, 14, 16],
+    [0, 1, 2, 5, 6, 7, 10, 11, 14, 15],
+    [0, 1, 2, 5, 6, 8, 10, 11, 14, 15],
+    [0, 1, 2, 5, 6, 8, 10, 12, 14, 15],
+    [0, 1, 2, 5, 6, 8, 10, 12, 14, 16],
+    [0, 1, 2, 5, 6, 9, 10, 11, 14, 15],
+    [0, 1, 2, 5, 6, 9, 10, 12, 14, 15]
+  ];
+
   const VALID_SLOT_SETS_11 = [
     [0, 1, 2, 3, 4, 6, 7, 10, 11, 14, 15],
     [0, 1, 2, 4, 6, 8, 10, 11, 13, 14, 17],
@@ -994,22 +1066,35 @@ export function generateBalancedSchedule(
     [2, 3, 4, 6, 7, 8, 11, 12, 13, 16, 17]
   ];
 
-  const VALID_SLOT_SETS_9 = [
-    [0, 2, 4, 6, 8, 10, 12, 14, 16],
-    [2, 4, 6, 8, 10, 12, 14, 16, 0],
-    [4, 6, 8, 10, 12, 14, 16, 0, 2],
-    [6, 8, 10, 12, 14, 16, 0, 2, 4],
-    [8, 10, 12, 14, 16, 0, 2, 4, 6],
-    [10, 12, 14, 16, 0, 2, 4, 6, 8],
-    [12, 14, 16, 0, 2, 4, 6, 8, 10],
-    [14, 16, 0, 2, 4, 6, 8, 10, 12],
-    [16, 0, 2, 4, 6, 8, 10, 12, 14],
-    [1, 3, 5, 7, 9, 11, 13, 15, 17]
+  const VALID_SLOT_SETS_12 = [
+    [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 14, 15],
+    [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 14, 16],
+    [0, 1, 2, 4, 5, 6, 8, 9, 10, 13, 14, 15],
+    [0, 1, 2, 4, 5, 6, 8, 9, 10, 13, 14, 16],
+    [0, 1, 2, 4, 5, 6, 8, 9, 11, 12, 14, 15],
+    [0, 1, 2, 4, 5, 6, 8, 9, 11, 12, 14, 16],
+    [0, 1, 2, 4, 5, 6, 8, 9, 11, 12, 15, 16],
+    [0, 1, 2, 4, 5, 6, 8, 9, 11, 13, 14, 15],
+    [0, 1, 2, 4, 5, 6, 8, 9, 11, 13, 14, 16],
+    [0, 1, 2, 4, 5, 6, 8, 9, 11, 13, 15, 16]
   ];
 
-  const VALID_SLOT_SETS = rotatingEmployees.length === 9
-    ? VALID_SLOT_SETS_9
-    : VALID_SLOT_SETS_11;
+  function getValidSlotSets(count: number): number[][] {
+    if (count <= 6) return VALID_SLOT_SETS_6;
+    if (count === 7) return VALID_SLOT_SETS_7;
+    if (count === 8) return VALID_SLOT_SETS_8;
+    if (count === 9) return VALID_SLOT_SETS_9;
+    if (count === 10) return VALID_SLOT_SETS_10;
+    if (count === 11) return VALID_SLOT_SETS_11;
+    if (count === 12) return VALID_SLOT_SETS_12;
+    const step = 18 / count;
+    return [
+      Array.from({ length: count }, (_, i) => Math.floor(i * step) % 18),
+      Array.from({ length: count }, (_, i) => (Math.floor(i * step) + 1) % 18)
+    ];
+  }
+
+  const VALID_SLOT_SETS = getValidSlotSets(rotatingEmployees.length);
 
   let bestResultRows: Record<string, Record<string, string>> = {};
   let bestReport: ScheduleValidationReport | null = null;
@@ -1090,7 +1175,14 @@ export function generateBalancedSchedule(
 
     for (const config of topConfigs) {
       const candidateRows: Record<string, Record<string, string>> = {};
-      allEmployees.forEach((emp) => { candidateRows[emp] = {}; });
+      allEmployees.forEach((emp) => {
+        candidateRows[emp] = {};
+        if (excludedSet.has(emp)) {
+          dateColumns.forEach(({ isoDate }) => {
+            candidateRows[emp][isoDate] = 'OFF';
+          });
+        }
+      });
 
       fixedMidEmployees.forEach((emp) => {
         dateColumns.forEach(({ date, isoDate }) => {
@@ -1127,14 +1219,23 @@ export function generateBalancedSchedule(
         });
       });
 
-      equalizeExactWorkingDays(candidateRows, dateColumns, targetWorkingDays, roster, targetYear, targetMonth);
+      equalizeExactWorkingDays(
+        candidateRows,
+        dateColumns,
+        targetWorkingDays,
+        roster,
+        targetYear,
+        targetMonth,
+        options.excludedEmployees ?? []
+      );
       const testReport = validateScheduleCompliance(
         candidateRows,
         dateColumns,
         roster,
         targetYear,
         targetMonth,
-        targetWorkingDays
+        targetWorkingDays,
+        options.excludedEmployees ?? []
       );
 
       if (testReport.isFullyCompliant || !bestReport || testReport.totalViolations < bestReport.totalViolations) {
@@ -1157,7 +1258,8 @@ export function generateBalancedSchedule(
     roster,
     targetYear,
     targetMonth,
-    targetWorkingDays
+    targetWorkingDays,
+    options.excludedEmployees ?? []
   );
 
   return {
@@ -1168,7 +1270,8 @@ export function generateBalancedSchedule(
     dateColumns,
     rows: bestResultRows,
     validation,
-    seed: finalSeed
+    seed: finalSeed,
+    excludedEmployees: options.excludedEmployees ?? []
   };
 }
 
@@ -1181,8 +1284,10 @@ export function validateScheduleCompliance(
   priorRoster: RosterData | null = null,
   targetYear?: number,
   targetMonth?: number,
-  targetWorkingDays?: number
+  targetWorkingDays?: number,
+  excludedEmployees: string[] = []
 ): ScheduleValidationReport {
+  const excludedSet = new Set(excludedEmployees);
   const dailyCoverage: Record<string, DayCoverage> = {};
   const employeeStats: Record<string, EmployeeMonthStats> = {};
   const warnings: string[] = [];
@@ -1259,6 +1364,7 @@ export function validateScheduleCompliance(
 
   // 2. Check Employee Legal Constraints, Streaks & Rest Durations
   employees.forEach((emp) => {
+    const isExcluded = excludedSet.has(emp);
     const isFixedMid = FIXED_MID_EMPLOYEES.includes(emp);
     const isFixedWeekdayMA = FIXED_WEEKDAY_MA_EMPLOYEES.includes(emp);
     const isNonRotating = isFixedMid || isFixedWeekdayMA;
@@ -1270,7 +1376,7 @@ export function validateScheduleCompliance(
     let currentOffStreak = 0;
 
     // Check boundary history if available (rotating staff only)
-    if (priorRoster && targetYear !== undefined && targetMonth !== undefined && !isNonRotating) {
+    if (priorRoster && targetYear !== undefined && targetMonth !== undefined && !isNonRotating && !isExcluded) {
       const history = getEmployeeHistoryTail(priorRoster, emp, targetYear, targetMonth, 5);
       for (let i = history.length - 1; i >= 0; i--) {
         if (history[i] !== 'OFF' && history[i] !== 'H8' && history[i] !== 'HUP' && history[i] !== 'ABS') currentStreak++;
@@ -1302,8 +1408,8 @@ export function validateScheduleCompliance(
       } else {
         currentStreak = 0;
         // Rest period check (max 2 days, rarely 3, never > 3 for rotating staff)
-        // Note: ABS is approved medical absence, not counted as excessive rest violation
-        if (!isNonRotating && s !== 'ABS') {
+        // Note: ABS is approved medical absence, not counted as excessive rest violation; excluded employees are off for month
+        if (!isNonRotating && s !== 'ABS' && !isExcluded) {
           currentOffStreak++;
           if (currentOffStreak > 3) {
             empViolations.push(`Rest period exceeded 3 days on ${isoDate} (${currentOffStreak} days)`);
@@ -1323,7 +1429,7 @@ export function validateScheduleCompliance(
       }
 
       // Check Fixed Mid Rule adherence (Palade: Mon-Fri MID, weekends & Romanian holidays OFF, Dec 31st OFF)
-      if (isFixedMid) {
+      if (isFixedMid && !isExcluded) {
         const dayOfWeek = new Date(`${isoDate}T00:00:00`).getDay();
         const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
         const isOff = isWeekend || ROMANIAN_HOLIDAYS_2026.has(isoDate) || FIXED_STAFF_EXEMPT_OFF_DATES.has(isoDate);
@@ -1335,7 +1441,7 @@ export function validateScheduleCompliance(
       }
 
       // Check Weekday M/A Rule adherence (Tir: Mon-Fri M or A, weekends & Romanian holidays OFF, Dec 31st OFF)
-      if (isFixedWeekdayMA) {
+      if (isFixedWeekdayMA && !isExcluded) {
         const dayOfWeek = new Date(`${isoDate}T00:00:00`).getDay();
         const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
         const isOff = isWeekend || ROMANIAN_HOLIDAYS_2026.has(isoDate) || FIXED_STAFF_EXEMPT_OFF_DATES.has(isoDate);
@@ -1348,7 +1454,7 @@ export function validateScheduleCompliance(
     });
 
     // Check Pure Blocks (M and A can be combined freely in the same block, but Day and Night cannot be combined without rest days)
-    if (!isNonRotating) {
+    if (!isNonRotating && !isExcluded) {
       const empHistory = (priorRoster && targetYear !== undefined && targetMonth !== undefined)
         ? getEmployeeHistoryTail(priorRoster, emp, targetYear, targetMonth, 5)
         : [];
@@ -1386,12 +1492,15 @@ export function validateScheduleCompliance(
     if (isNonRotating && (targetMonth === 11 || (dateColumns[0] && dateColumns[0].isoDate.startsWith('2026-12')))) {
       baseTarget = 20;
     }
+    if (isExcluded) {
+      baseTarget = 0;
+    }
     // Medical leave (ABS) reduces the monthly working norm accordingly
     const effectiveTarget = Math.max(0, baseTarget - counts.ABS);
-    const workDaysDiff = totalWorkingDays - effectiveTarget;
+    const workDaysDiff = isExcluded ? 0 : totalWorkingDays - effectiveTarget;
 
     // Monthly norm constraint: all employees must meet their effective monthly norm
-    if (targetWorkingDays !== undefined && workDaysDiff !== 0) {
+    if (!isExcluded && targetWorkingDays !== undefined && workDaysDiff !== 0) {
       empViolations.push(
         `${emp}: worked ${totalWorkingDays} days (target is ${effectiveTarget} days${counts.ABS > 0 ? ` after ${counts.ABS}d ABS` : ''})`
       );
@@ -1408,13 +1517,13 @@ export function validateScheduleCompliance(
       H8: counts.H8,
       ABS: counts.ABS,
       totalWorkingDays,
-      targetWorkingDays: effectiveTarget,
+      targetWorkingDays: isExcluded ? 0 : effectiveTarget,
       workDaysDiff,
       maxStreak,
-      violations: empViolations
+      violations: isExcluded ? [] : empViolations
     };
 
-    if (empViolations.length > 0) {
+    if (!isExcluded && empViolations.length > 0) {
       warnings.push(...empViolations);
     }
   });

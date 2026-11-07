@@ -90,6 +90,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
   const [scheduleData, setScheduleData] = useState<GeneratedScheduleResult | null>(null);
   const [currentSeed, setCurrentSeed] = useState<number>(() => Math.floor(Math.random() * 999999));
   const [appliedNotification, setAppliedNotification] = useState<string | null>(null);
+  const [excludedEmployees, setExcludedEmployees] = useState<Set<string>>(new Set());
 
   // Whether any employee in the schedule has ABS assigned
   const hasAbsShifts = useMemo(() => {
@@ -183,7 +184,12 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
 
   // Generate initial schedule or load historical schedule if already set in stone
   const runGeneration = useCallback(
-    (seedValue: number = currentSeed, y: number = targetYear, m: number = targetMonth) => {
+    (
+      seedValue: number = currentSeed,
+      y: number = targetYear,
+      m: number = targetMonth,
+      exclusions: Set<string> = excludedEmployees
+    ) => {
       setIsGenerating(true);
       setTimeout(() => {
         if (isHistoricalMonthInRoster(roster, y, m)) {
@@ -191,7 +197,8 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
         } else {
           const result = generateBalancedSchedule(roster, y, m, {
             seed: seedValue,
-            targetWorkingDays: countLegalWorkingDaysInMonth(m, y)
+            targetWorkingDays: countLegalWorkingDaysInMonth(m, y),
+            excludedEmployees: Array.from(exclusions)
           });
           setScheduleData(result);
         }
@@ -200,11 +207,11 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
         setIsGenerating(false);
       }, 20);
     },
-    [roster, currentSeed, targetYear, targetMonth]
+    [roster, currentSeed, targetYear, targetMonth, excludedEmployees]
   );
 
   useEffect(() => {
-    runGeneration(currentSeed, targetYear, targetMonth);
+    runGeneration(currentSeed, targetYear, targetMonth, excludedEmployees);
   }, [targetYear, targetMonth, targetWorkingDays, roster]);
 
   // Live validation whenever schedule rows change
@@ -234,9 +241,10 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
       roster,
       targetYear,
       targetMonth,
-      targetWorkingDays
+      targetWorkingDays,
+      Array.from(excludedEmployees)
     );
-  }, [scheduleData, roster, targetYear, targetMonth, targetWorkingDays]);
+  }, [scheduleData, roster, targetYear, targetMonth, targetWorkingDays, excludedEmployees]);
 
   // Employee list
   const employees = useMemo(() => {
@@ -248,6 +256,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
   const handlePrevMonth = () => {
     if (isGenerating) return;
     setHasUserNavigated(true);
+    setExcludedEmployees(new Set());
     const prev = new Date(targetYear, targetMonth - 1, 1);
     setTargetMonth(prev.getMonth());
     setTargetYear(prev.getFullYear());
@@ -256,16 +265,38 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
   const handleNextMonth = () => {
     if (isGenerating) return;
     setHasUserNavigated(true);
+    setExcludedEmployees(new Set());
     const next = new Date(targetYear, targetMonth + 1, 1);
     setTargetMonth(next.getMonth());
     setTargetYear(next.getFullYear());
+  };
+
+  const handleToggleEmployeeActive = (emp: string) => {
+    if (isHistorical || isGenerating) return;
+    const next = new Set(excludedEmployees);
+    if (next.has(emp)) {
+      next.delete(emp);
+    } else {
+      next.add(emp);
+    }
+    setExcludedEmployees(next);
+    runGeneration(currentSeed, targetYear, targetMonth, next);
+  };
+
+  const handleToggleAllEmployees = () => {
+    if (isHistorical || isGenerating) return;
+    if (excludedEmployees.size > 0) {
+      const next = new Set<string>();
+      setExcludedEmployees(next);
+      runGeneration(currentSeed, targetYear, targetMonth, next);
+    }
   };
 
   const handleRegenerateVariant = () => {
     if (isHistorical || isGenerating) return;
     const nextSeed = Math.floor(Math.random() * 999999);
     setCurrentSeed(nextSeed);
-    runGeneration(nextSeed, targetYear, targetMonth);
+    runGeneration(nextSeed, targetYear, targetMonth, excludedEmployees);
   };
 
   // Multi-cell selection & block change handlers
@@ -391,7 +422,8 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
       roster,
       targetYear,
       targetMonth,
-      targetWorkingDays
+      targetWorkingDays,
+      Array.from(excludedEmployees)
     );
 
     setScheduleData({
@@ -446,7 +478,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedCells, scheduleData, roster, targetYear, targetMonth, targetWorkingDays]);
+  }, [selectedCells, scheduleData, roster, targetYear, targetMonth, targetWorkingDays, excludedEmployees]);
 
   // Manual shift override
   const handleSetCellShift = (shiftCode: string) => {
@@ -467,7 +499,8 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
       roster,
       targetYear,
       targetMonth,
-      targetWorkingDays
+      targetWorkingDays,
+      Array.from(excludedEmployees)
     );
 
     setScheduleData({
@@ -808,11 +841,25 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
             <thead>
               <tr className="border-b border-zinc-950/10 dark:border-white/10 bg-zinc-950/[0.03] dark:bg-white/[0.03]">
                 {/* Employee Column Header */}
-                <th className="sticky left-0 z-20 min-w-[190px] p-2.5 font-bold text-zinc-600 dark:text-zinc-400 bg-zinc-100 dark:bg-[#121212] border-r border-zinc-950/10 dark:border-white/10">
-                  Employee ({employees.length})
+                <th className="sticky left-0 z-20 min-w-[210px] p-2.5 font-bold text-zinc-600 dark:text-zinc-400 bg-zinc-100 dark:bg-[#121212] border-r border-zinc-950/10 dark:border-white/10">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={excludedEmployees.size === 0}
+                        onChange={handleToggleAllEmployees}
+                        disabled={isHistorical || isGenerating}
+                        className="rounded border-zinc-300 dark:border-zinc-700 text-blue-600 focus:ring-blue-500 cursor-pointer size-3.5"
+                        title={excludedEmployees.size > 0 ? "Click to reactivate all employees" : "All employees active"}
+                      />
+                      <span>Employee</span>
+                    </div>
+                    <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-zinc-200 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400">
+                      {employees.length - excludedEmployees.size}/{employees.length} Active
+                    </span>
+                  </div>
                 </th>
 
-                {/* Day Columns */}
                 {/* Day Columns */}
                 {scheduleData?.dateColumns.map(({ isoDate, date }) => {
                   const dayNum = date.getDate();
@@ -846,6 +893,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
             {/* Table Body: Employee Rows */}
             <tbody className="divide-y divide-zinc-950/5 dark:divide-white/5">
               {employees.map((emp) => {
+                const isExcluded = excludedEmployees.has(emp);
                 const isFixedMid = FIXED_MID_EMPLOYEES.includes(emp);
                 const isWeekdayMA = FIXED_WEEKDAY_MA_EMPLOYEES.includes(emp);
                 const stats = validation.employeeStats[emp];
@@ -853,7 +901,11 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                 return (
                   <tr
                     key={emp}
-                    className="hover:bg-zinc-950/[0.02] dark:hover:bg-white/[0.02] transition-colors"
+                    className={`transition-colors ${
+                      isExcluded
+                        ? 'opacity-60 bg-zinc-950/[0.04] dark:bg-white/[0.02]'
+                        : 'hover:bg-zinc-950/[0.02] dark:hover:bg-white/[0.02]'
+                    }`}
                   >
                     {/* Sticky Employee Name Cell */}
                     <td
@@ -862,8 +914,21 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                       title={`Click to select/deselect all shifts for ${emp}`}
                     >
                       <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={!isExcluded}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            handleToggleEmployeeActive(emp);
+                          }}
+                          disabled={isHistorical || isGenerating}
+                          className="rounded border-zinc-300 dark:border-zinc-700 text-blue-600 focus:ring-blue-500 cursor-pointer size-3.5 shrink-0"
+                          title={isExcluded ? `Include ${emp} in monthly roster generation` : `Exclude ${emp} from monthly roster generation (Off whole month)`}
+                        />
                         <div className={`flex size-6 shrink-0 items-center justify-center rounded-lg text-[10px] font-bold ${
-                          isFixedMid
+                          isExcluded
+                            ? 'bg-zinc-500/10 text-zinc-400'
+                            : isFixedMid
                             ? 'bg-blue-500/15 text-blue-500'
                             : isWeekdayMA
                             ? 'bg-emerald-500/15 text-emerald-500'
@@ -872,15 +937,20 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                           {initials(emp)}
                         </div>
                         <div className="min-w-0">
-                          <p className="truncate font-semibold text-[12px] text-zinc-900 dark:text-zinc-100">
+                          <p className={`truncate font-semibold text-[12px] ${
+                            isExcluded
+                              ? 'line-through text-zinc-400 dark:text-zinc-500'
+                              : 'text-zinc-900 dark:text-zinc-100'
+                          }`}>
                             {emp}
                           </p>
-                          {isFixedMid && (
+                          {isExcluded ? (
+                            <span className="text-[9px] font-bold text-amber-500 dark:text-amber-400 uppercase tracking-tight">Month Off</span>
+                          ) : isFixedMid ? (
                             <span className="text-[9px] font-bold text-blue-500 uppercase">Fixed Mid</span>
-                          )}
-                          {isWeekdayMA && (
+                          ) : isWeekdayMA ? (
                             <span className="text-[9px] font-bold text-emerald-500 uppercase">Weekday M/A</span>
-                          )}
+                          ) : null}
                         </div>
                       </div>
                     </td>
@@ -979,7 +1049,11 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
 
                     {/* Summary Stats Cell */}
                     <td className="sticky right-0 z-10 p-2 text-center bg-zinc-50/90 dark:bg-[#101010]/95 backdrop-blur border-l border-zinc-950/10 dark:border-white/10 font-mono text-[10px]">
-                      {stats && (
+                      {isExcluded ? (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded font-sans text-[10px] font-bold bg-zinc-500/10 text-zinc-500 dark:text-zinc-400">
+                          Off for month
+                        </span>
+                      ) : stats && (
                         <div className="flex items-center justify-center gap-1.5">
                           <span className="text-green-600 dark:text-green-400 font-bold" title="Morning shifts">{stats.M}M</span>
                           <span className="text-orange-600 dark:text-orange-400 font-bold" title="Afternoon shifts">{stats.A}A</span>
