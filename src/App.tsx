@@ -1,10 +1,11 @@
 // App.tsx
 import type React from 'react';
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback, Suspense, lazy } from 'react';
 import { BarChart3, Calendar as CalendarIcon, Check, ChevronLeft, ChevronRight, ChevronDown, Moon, Search, Settings2, Sun, Users, Wallet, CheckSquare, Plus, Trash2, Bell, AlertTriangle, Edit2, X, UploadCloud, Loader2, Cloud, ShieldCheck, LogOut, Lock, ArrowLeftRight, Save, Sparkles, RotateCcw, CheckCircle2, AlertCircle, Send, CalendarRange } from 'lucide-react';
 import type { RosterData, ShiftEvent } from './types';
 import { parseRoster, mergeRosters } from './parser';
-import ScheduleBuilderTab from './ScheduleBuilderTab';
+
+const ScheduleBuilderTab = lazy(() => import('./ScheduleBuilderTab'));
 import {
   colorFor,
   shiftKey,
@@ -229,7 +230,10 @@ export default function App() {
         if (res.tasks && res.tasks.length > 0) {
           // Do not overwrite form if user is actively in the middle of editing a task
           if (!editingTaskIdRef.current) {
-            setTasks(res.tasks);
+            setTasks((prev) => {
+              if (JSON.stringify(prev) === JSON.stringify(res.tasks)) return prev;
+              return res.tasks;
+            });
             if (res.updatedAt) setTasksLastUpdated(res.updatedAt);
           }
         }
@@ -374,7 +378,15 @@ export default function App() {
     const checkIncomingSwaps = async () => {
       try {
         const requests = await getIncomingSwapRequests(authenticatedEmployee);
-        setIncomingSwapRequests(requests);
+        setIncomingSwapRequests((prev) => {
+          if (
+            prev.length === requests.length &&
+            prev.every((r, idx) => r.id === requests[idx]?.id && r.status === requests[idx]?.status)
+          ) {
+            return prev;
+          }
+          return requests;
+        });
 
         // Notify user about newly arrived pending swap requests
         for (const req of requests) {
@@ -414,16 +426,21 @@ export default function App() {
     const timer = setInterval(() => {
       const now = new Date();
       const currentHHMM = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+      if (lastCheckedMinute.current === currentHHMM) {
+        return;
+      }
+      const prevCheckedMinute = lastCheckedMinute.current;
+      lastCheckedMinute.current = currentHHMM;
+
       const currentDayOfWeek = now.getDay();
       const currentIsoDate = iso(now);
       
       const minutesToCheck = [currentHHMM];
       const prevMinuteDate = new Date(now.getTime() - 60000);
       const prevHHMM = `${String(prevMinuteDate.getHours()).padStart(2, '0')}:${String(prevMinuteDate.getMinutes()).padStart(2, '0')}`;
-      if (lastCheckedMinute.current && lastCheckedMinute.current !== prevHHMM && prevHHMM !== currentHHMM) {
+      if (prevCheckedMinute && prevCheckedMinute !== prevHHMM && prevHHMM !== currentHHMM) {
         minutesToCheck.push(prevHHMM);
       }
-      lastCheckedMinute.current = currentHHMM;
 
       const activeEmployee = authenticatedEmployee || selectedEmployee;
       const isCurrentAlex = Boolean(
@@ -967,51 +984,67 @@ export default function App() {
   const handleMonthPointerDown = useCallback((e: React.PointerEvent) => {
     if (monthAnimatingRef.current) return;
     monthDragStart.current = { x: e.clientX, y: e.clientY };
-    monthDragPointerId.current = e.pointerId; monthAxisRef.current = null; monthLastDx.current = 0;
-  }, []);
+    monthDragPointerId.current = e.pointerId;
+    monthAxisRef.current = null;
+    monthLastDx.current = 0;
 
-  useEffect(() => {
-    const handleMove = (e: PointerEvent) => {
-      const start = monthDragStart.current; const grid = monthGridRef.current;
+    const handleMove = (ev: PointerEvent) => {
+      const start = monthDragStart.current;
+      const grid = monthGridRef.current;
       if (!start || !grid) return;
-      const dx = e.clientX - start.x; const dy = e.clientY - start.y;
+      const dx = ev.clientX - start.x;
+      const dy = ev.clientY - start.y;
       let axis = monthAxisRef.current;
       if (!axis) {
         if (Math.abs(dx) < MONTH_AXIS_LOCK_THRESHOLD && Math.abs(dy) < MONTH_AXIS_LOCK_THRESHOLD) return;
-        axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y'; monthAxisRef.current = axis;
+        axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+        monthAxisRef.current = axis;
         if (axis === 'x') {
-          grid.style.willChange = 'transform'; grid.classList.add('select-none');
+          grid.style.willChange = 'transform';
+          grid.classList.add('select-none');
           if (monthDragPointerId.current != null) {
-            try { grid.setPointerCapture(monthDragPointerId.current); monthCapturedPointerId.current = monthDragPointerId.current; } catch {}
+            try {
+              grid.setPointerCapture(monthDragPointerId.current);
+              monthCapturedPointerId.current = monthDragPointerId.current;
+            } catch {}
           }
         }
       }
       if (axis !== 'x') return;
-      const applied = dx; monthLastDx.current = applied; e.preventDefault(); setMonthTransform(applied, false);
+      const applied = dx;
+      monthLastDx.current = applied;
+      ev.preventDefault();
+      setMonthTransform(applied, false);
     };
 
     const handleUp = () => {
-      const grid = monthGridRef.current; const axis = monthAxisRef.current;
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
+
+      const grid = monthGridRef.current;
+      const axis = monthAxisRef.current;
       if (monthCapturedPointerId.current != null && grid?.hasPointerCapture(monthCapturedPointerId.current)) {
         grid.releasePointerCapture(monthCapturedPointerId.current);
       }
-      monthCapturedPointerId.current = null; monthDragPointerId.current = null;
+      monthCapturedPointerId.current = null;
+      monthDragPointerId.current = null;
       if (axis === 'x' && grid) {
-        grid.style.willChange = ''; grid.classList.remove('select-none');
+        grid.style.willChange = '';
+        grid.classList.remove('select-none');
         const dx = monthLastDx.current;
         if (dx <= -MONTH_SWIPE_COMMIT_THRESHOLD) commitMonthSwipe('next');
         else if (dx >= MONTH_SWIPE_COMMIT_THRESHOLD) commitMonthSwipe('prev');
         else setMonthTransform(0, true);
       }
-      monthDragStart.current = null; monthAxisRef.current = null; monthLastDx.current = 0;
+      monthDragStart.current = null;
+      monthAxisRef.current = null;
+      monthLastDx.current = 0;
     };
 
     window.addEventListener('pointermove', handleMove, { passive: false });
-    window.addEventListener('pointerup', handleUp); window.addEventListener('pointercancel', handleUp);
-    return () => {
-      window.removeEventListener('pointermove', handleMove);
-      window.removeEventListener('pointerup', handleUp); window.removeEventListener('pointercancel', handleUp);
-    };
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
   }, [commitMonthSwipe, setMonthTransform]);
 
   const handleSelectEmployee = useCallback((name: string) => {
@@ -1508,14 +1541,23 @@ export default function App() {
 
                 {/* Desktop Component */}
                 <div className="hidden lg:block">
-                  <ScheduleBuilderTab
-                    roster={roster}
-                    onApplySchedule={(updatedRoster, targetMonth, targetYear) => {
-                      setRoster(updatedRoster);
-                      setCurrentMonth(targetMonth);
-                      setCurrentYear(targetYear);
-                    }}
-                  />
+                  <Suspense
+                    fallback={
+                      <div className="flex h-96 w-full items-center justify-center gap-2 text-zinc-400">
+                        <Loader2 className="size-6 animate-spin text-blue-500" />
+                        <span className="text-[13px] font-medium">Loading Schedule Builder...</span>
+                      </div>
+                    }
+                  >
+                    <ScheduleBuilderTab
+                      roster={roster}
+                      onApplySchedule={(updatedRoster, targetMonth, targetYear) => {
+                        setRoster(updatedRoster);
+                        setCurrentMonth(targetMonth);
+                        setCurrentYear(targetYear);
+                      }}
+                    />
+                  </Suspense>
                 </div>
               </div>
             )}

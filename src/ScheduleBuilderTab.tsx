@@ -359,6 +359,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
     if (isMouseDownRef.current && (e.ctrlKey || e.metaKey)) {
       const cellKey = `${emp}::${isoDate}`;
       setSelectedCells((prev) => {
+        if (prev.has(cellKey)) return prev;
         const next = new Set(prev);
         next.add(cellKey);
         return next;
@@ -910,7 +911,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                     {/* Sticky Employee Name Cell */}
                     <td
                       onClick={(e) => handleToggleRowSelection(emp, e.ctrlKey || e.metaKey)}
-                      className="sticky left-0 z-10 p-2 font-medium bg-zinc-50/90 dark:bg-[#101010]/95 backdrop-blur border-r border-zinc-950/10 dark:border-white/10 cursor-pointer hover:bg-zinc-100 dark:hover:bg-[#181818] transition-colors"
+                      className="sticky left-0 z-10 p-2 font-medium bg-zinc-100 dark:bg-[#121212] border-r border-zinc-950/10 dark:border-white/10 cursor-pointer hover:bg-zinc-200 dark:hover:bg-[#1a1a1a] transition-colors"
                       title={`Click to select/deselect all shifts for ${emp}`}
                     >
                       <div className="flex items-center gap-2">
@@ -1048,7 +1049,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                     })}
 
                     {/* Summary Stats Cell */}
-                    <td className="sticky right-0 z-10 p-2 text-center bg-zinc-50/90 dark:bg-[#101010]/95 backdrop-blur border-l border-zinc-950/10 dark:border-white/10 font-mono text-[10px]">
+                    <td className="sticky right-0 z-10 p-2 text-center bg-zinc-100 dark:bg-[#121212] border-l border-zinc-950/10 dark:border-white/10 font-mono text-[10px]">
                       {isExcluded ? (
                         <span className="inline-flex items-center px-2 py-0.5 rounded font-sans text-[10px] font-bold bg-zinc-500/10 text-zinc-500 dark:text-zinc-400">
                           Off for month

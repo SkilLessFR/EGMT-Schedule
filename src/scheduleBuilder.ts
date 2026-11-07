@@ -1,5 +1,5 @@
 // src/scheduleBuilder.ts
-import ExcelJS from 'exceljs';
+import type ExcelJS from 'exceljs';
 import type { RosterData } from './types';
 import { shiftKey } from './scheduleUtils';
 
@@ -1649,6 +1649,8 @@ export async function exportRosterToExcelFile(
   },
   customFileName?: string
 ) {
+  const ExcelJSModule = await import('exceljs');
+  const ExcelJS = (ExcelJSModule.default || ExcelJSModule) as unknown as typeof import('exceljs');
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('Sheet1', {
     views: [{ showGridLines: true }]

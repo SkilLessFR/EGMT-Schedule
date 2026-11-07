@@ -1,4 +1,4 @@
-import * as XLSX from 'xlsx';
+import type * as XLSX from 'xlsx';
 import type { RosterData, ShiftEvent } from './types';
 
 const monthNames = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
@@ -31,8 +31,8 @@ function parseHeaderDate(text: string, year: number): Date | null {
   return date;
 }
 
-function cellText(sheet: XLSX.WorkSheet, rowIndex: number, columnIndex: number) {
-  const cell = sheet[XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex })];
+function cellText(xlsx: typeof import('xlsx'), sheet: XLSX.WorkSheet, rowIndex: number, columnIndex: number) {
+  const cell = sheet[xlsx.utils.encode_cell({ r: rowIndex, c: columnIndex })];
   return String(cell?.w ?? cell?.v ?? '').trim();
 }
 
@@ -49,13 +49,13 @@ function likelyName(value: unknown) {
   return Boolean(text) && !isKnownShiftCode(text) && /^[\p{L} .'-]{3,}$/u.test(text) && !/employee|equipment|morning|night|after|shift/i.test(text);
 }
 
-function rowHasShift(sheet: XLSX.WorkSheet, rowIndex: number, dateColumns: RosterData['dateColumns']) {
-  return dateColumns.some(({ index }) => isKnownShiftCode(cellText(sheet, rowIndex, index)));
+function rowHasShift(xlsx: typeof import('xlsx'), sheet: XLSX.WorkSheet, rowIndex: number, dateColumns: RosterData['dateColumns']) {
+  return dateColumns.some(({ index }) => isKnownShiftCode(cellText(xlsx, sheet, rowIndex, index)));
 }
 
-function inferEmployeeColumn(sheet: XLSX.WorkSheet, range: XLSX.Range, headerRow: number, dateColumns: RosterData['dateColumns']) {
+function inferEmployeeColumn(xlsx: typeof import('xlsx'), sheet: XLSX.WorkSheet, range: XLSX.Range, headerRow: number, dateColumns: RosterData['dateColumns']) {
   for (let columnIndex = range.s.c; columnIndex <= range.e.c; columnIndex += 1) {
-    if (/employee|name/i.test(cellText(sheet, headerRow, columnIndex))) return columnIndex;
+    if (/employee|name/i.test(cellText(xlsx, sheet, headerRow, columnIndex))) return columnIndex;
   }
 
   const firstDateColumn = Math.min(...dateColumns.map(({ index }) => index));
@@ -66,8 +66,8 @@ function inferEmployeeColumn(sheet: XLSX.WorkSheet, range: XLSX.Range, headerRow
     let score = 0;
 
     for (let rowIndex = headerRow + 1; rowIndex <= range.e.r; rowIndex += 1) {
-      const value = cellText(sheet, rowIndex, columnIndex);
-      if (likelyName(value) && rowHasShift(sheet, rowIndex, dateColumns)) score += 1;
+      const value = cellText(xlsx, sheet, rowIndex, columnIndex);
+      if (likelyName(value) && rowHasShift(xlsx, sheet, rowIndex, dateColumns)) score += 1;
     }
 
     if (score > bestScore) {
@@ -80,6 +80,7 @@ function inferEmployeeColumn(sheet: XLSX.WorkSheet, range: XLSX.Range, headerRow
 }
 
 export async function parseRoster(file: File): Promise<RosterData> {
+  const XLSX = await import('xlsx');
   const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: false });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
   const range = XLSX.utils.decode_range(sheet['!ref'] ?? 'A1:A1');
@@ -92,7 +93,7 @@ export async function parseRoster(file: File): Promise<RosterData> {
     const detected: RosterData['dateColumns'] = [];
 
     for (let columnIndex = range.s.c; columnIndex <= range.e.c; columnIndex += 1) {
-      const date = parseHeaderDate(cellText(sheet, rowIndex, columnIndex), currentYear);
+      const date = parseHeaderDate(cellText(XLSX, sheet, rowIndex, columnIndex), currentYear);
       if (date) detected.push({ index: columnIndex, date, isoDate: toIso(date) });
     }
 
@@ -105,18 +106,18 @@ export async function parseRoster(file: File): Promise<RosterData> {
 
   if (headerRow < 0 || dateColumns.length === 0) throw new Error('Could not find the date header row. Make sure the top row contains dates like 1-Jul, 2-Jul, etc.');
 
-  const employeeCol = inferEmployeeColumn(sheet, range, headerRow, dateColumns);
+  const employeeCol = inferEmployeeColumn(XLSX, sheet, range, headerRow, dateColumns);
 
   const employees: string[] = [];
   const parsedRows: RosterData['rows'] = {};
 
   for (let rowIndex = headerRow + 1; rowIndex <= range.e.r; rowIndex += 1) {
-    const employee = cellText(sheet, rowIndex, employeeCol);
+    const employee = cellText(XLSX, sheet, rowIndex, employeeCol);
     if (!likelyName(employee)) continue;
 
     const shifts: Record<string, string> = {};
     dateColumns.forEach(({ index, isoDate }) => {
-      const value = cellText(sheet, rowIndex, index);
+      const value = cellText(XLSX, sheet, rowIndex, index);
       if (value) shifts[isoDate] = value;
     });
 
