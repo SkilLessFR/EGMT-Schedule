@@ -27,7 +27,12 @@ export function getIsoWeekNumber(date: Date): number {
 export const ROMANIAN_HOLIDAYS_2026 = new Set<string>([
   '2026-01-01', '2026-01-02', '2026-01-06', '2026-01-07', '2026-01-24',
   '2026-04-10', '2026-04-12', '2026-04-13', '2026-05-01', '2026-05-31',
-  '2026-06-01', '2026-08-15', '2026-11-30', '2026-12-01', '2026-12-25', '2026-12-26', '2026-12-31'
+  '2026-06-01', '2026-08-15', '2026-11-30', '2026-12-01', '2026-12-25', '2026-12-26'
+]);
+
+// Dec 31st New Year's Eve exemption: Palade and Tir George are exempt/off, 24/7 rotating staff continue normal rotation
+export const FIXED_STAFF_EXEMPT_OFF_DATES = new Set<string>([
+  '2026-12-31'
 ]);
 
 export const MONTHLY_WORKING_DAYS_2026: Record<number, number> = {
@@ -42,7 +47,7 @@ export const MONTHLY_WORKING_DAYS_2026: Record<number, number> = {
   8: 22, // Sep
   9: 22, // Oct
   10: 20, // Nov (20 in 11 Noiembrie.xlsx)
-  11: 20  // Dec (20 working days in 2026: 23 weekdays minus 3 statutory public holidays: Dec 1, Dec 25, Dec 31)
+  11: 21  // Dec (21 statutory legal working days for 24/7 operations in 2026)
 };
 
 export function countLegalWorkingDaysInMonth(month: number, year: number): number {
@@ -505,13 +510,13 @@ function equalizeExactWorkingDays(
   const fixedWeekdayMA = FIXED_WEEKDAY_MA_EMPLOYEES.filter((e) => allEmployees.includes(e));
   const rotating = allEmployees.filter((e) => !fixedMid.includes(e) && !fixedWeekdayMA.includes(e));
 
-  // 1. Fixed Managers (Palade): Monday to Friday MID, Saturday and Sunday OFF, Romanian National Holidays OFF
+  // 1. Fixed Managers (Palade): Monday to Friday MID, Saturday and Sunday OFF, Romanian National Holidays OFF, Dec 31st OFF
   fixedMid.forEach((emp) => {
     dateColumns.forEach(({ date, isoDate }) => {
       const dow = date.getDay();
       const isWeekend = dow === 0 || dow === 6;
-      const isHoliday = ROMANIAN_HOLIDAYS_2026.has(isoDate);
-      if (isWeekend || isHoliday) {
+      const isOff = isWeekend || ROMANIAN_HOLIDAYS_2026.has(isoDate) || FIXED_STAFF_EXEMPT_OFF_DATES.has(isoDate);
+      if (isOff) {
         rows[emp][isoDate] = 'OFF';
       } else {
         rows[emp][isoDate] = 'MID';
@@ -519,13 +524,13 @@ function equalizeExactWorkingDays(
     });
   });
 
-  // 2. Fixed Weekday M/A (Tir George Cristian): Monday to Friday M/A (alternating weeks), Saturday and Sunday OFF, Romanian National Holidays OFF
+  // 2. Fixed Weekday M/A (Tir George Cristian): Monday to Friday M/A (alternating weeks), Saturday and Sunday OFF, Romanian National Holidays OFF, Dec 31st OFF
   fixedWeekdayMA.forEach((emp) => {
     dateColumns.forEach(({ date, isoDate }) => {
       const dow = date.getDay();
       const isWeekend = dow === 0 || dow === 6;
-      const isHoliday = ROMANIAN_HOLIDAYS_2026.has(isoDate);
-      if (isWeekend || isHoliday) {
+      const isOff = isWeekend || ROMANIAN_HOLIDAYS_2026.has(isoDate) || FIXED_STAFF_EXEMPT_OFF_DATES.has(isoDate);
+      if (isOff) {
         rows[emp][isoDate] = 'OFF';
       } else {
         const weekNum = getIsoWeekNumber(date);
@@ -1091,8 +1096,8 @@ export function generateBalancedSchedule(
         dateColumns.forEach(({ date, isoDate }) => {
           const dow = date.getDay();
           const isWeekend = dow === 0 || dow === 6;
-          const isHoliday = ROMANIAN_HOLIDAYS_2026.has(isoDate);
-          if (isWeekend || isHoliday) {
+          const isOff = isWeekend || ROMANIAN_HOLIDAYS_2026.has(isoDate) || FIXED_STAFF_EXEMPT_OFF_DATES.has(isoDate);
+          if (isOff) {
             candidateRows[emp][isoDate] = 'OFF';
           } else {
             candidateRows[emp][isoDate] = 'MID';
@@ -1104,8 +1109,8 @@ export function generateBalancedSchedule(
         dateColumns.forEach(({ date, isoDate }) => {
           const dow = date.getDay();
           const isWeekend = dow === 0 || dow === 6;
-          const isHoliday = ROMANIAN_HOLIDAYS_2026.has(isoDate);
-          if (isWeekend || isHoliday) {
+          const isOff = isWeekend || ROMANIAN_HOLIDAYS_2026.has(isoDate) || FIXED_STAFF_EXEMPT_OFF_DATES.has(isoDate);
+          if (isOff) {
             candidateRows[emp][isoDate] = 'OFF';
           } else {
             const weekNum = getIsoWeekNumber(date);
@@ -1317,26 +1322,26 @@ export function validateScheduleCompliance(
         }
       }
 
-      // Check Fixed Mid Rule adherence (Palade: Mon-Fri MID, weekends & Romanian holidays OFF)
+      // Check Fixed Mid Rule adherence (Palade: Mon-Fri MID, weekends & Romanian holidays OFF, Dec 31st OFF)
       if (isFixedMid) {
         const dayOfWeek = new Date(`${isoDate}T00:00:00`).getDay();
         const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-        const isHoliday = ROMANIAN_HOLIDAYS_2026.has(isoDate);
-        if ((isWeekend || isHoliday) && s !== 'OFF') {
+        const isOff = isWeekend || ROMANIAN_HOLIDAYS_2026.has(isoDate) || FIXED_STAFF_EXEMPT_OFF_DATES.has(isoDate);
+        if (isOff && s !== 'OFF') {
           empViolations.push(`Fixed Manager ${emp} scheduled on ${s} instead of OFF on weekend/holiday (${isoDate})`);
-        } else if (!isWeekend && !isHoliday && s !== 'MID' && s !== 'ABS') {
+        } else if (!isOff && s !== 'MID' && s !== 'ABS') {
           empViolations.push(`Fixed Manager ${emp} scheduled on ${s} instead of MID on ${isoDate}`);
         }
       }
 
-      // Check Weekday M/A Rule adherence (Tir: Mon-Fri M or A, weekends & Romanian holidays OFF)
+      // Check Weekday M/A Rule adherence (Tir: Mon-Fri M or A, weekends & Romanian holidays OFF, Dec 31st OFF)
       if (isFixedWeekdayMA) {
         const dayOfWeek = new Date(`${isoDate}T00:00:00`).getDay();
         const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-        const isHoliday = ROMANIAN_HOLIDAYS_2026.has(isoDate);
-        if ((isWeekend || isHoliday) && s !== 'OFF') {
+        const isOff = isWeekend || ROMANIAN_HOLIDAYS_2026.has(isoDate) || FIXED_STAFF_EXEMPT_OFF_DATES.has(isoDate);
+        if (isOff && s !== 'OFF') {
           empViolations.push(`Weekday staff ${emp} scheduled on ${s} instead of OFF on weekend/holiday (${isoDate})`);
-        } else if (!isWeekend && !isHoliday && s !== 'M' && s !== 'A' && s !== 'ABS') {
+        } else if (!isOff && s !== 'M' && s !== 'A' && s !== 'ABS') {
           empViolations.push(`Weekday staff ${emp} scheduled on ${s} instead of M/A on ${isoDate}`);
         }
       }
@@ -1376,7 +1381,11 @@ export function validateScheduleCompliance(
     }
 
     const totalWorkingDays = counts.M + counts.A + counts.N + counts.MID;
-    const baseTarget = targetWorkingDays ?? countLegalWorkingDaysInMonth(targetMonth ?? 11, targetYear ?? 2026);
+    let baseTarget = targetWorkingDays ?? countLegalWorkingDaysInMonth(targetMonth ?? 11, targetYear ?? 2026);
+    // Palade & Tir George are specifically exempt/off on Dec 31st (working 20 days instead of 21)
+    if (isNonRotating && (targetMonth === 11 || (dateColumns[0] && dateColumns[0].isoDate.startsWith('2026-12')))) {
+      baseTarget = 20;
+    }
     // Medical leave (ABS) reduces the monthly working norm accordingly
     const effectiveTarget = Math.max(0, baseTarget - counts.ABS);
     const workDaysDiff = totalWorkingDays - effectiveTarget;
