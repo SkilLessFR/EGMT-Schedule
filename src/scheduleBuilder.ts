@@ -340,7 +340,7 @@ function minCostMatching(costMatrix: number[][]): number[] {
 /**
  * Calculate cost for an employee starting at a given template offset
  */
-function evaluateOffsetCost(
+export function evaluateOffsetCost(
   history: string[],
   template: string[],
   offset: number,
@@ -455,7 +455,14 @@ function evaluateOffsetCost(
     }
   }
 
-  // 5. Anti-repeat check: An employee must NOT repeat the same shift block in a row after rest!
+  // 5. Anti-repeat check & Shift Sequence continuity check:
+  // The shift generation must strictly follow sequence A -> M -> N -> A
+  const EXPECTED_NEXT_SHIFT: Record<string, string> = {
+    A: 'M',
+    M: 'N',
+    N: 'A'
+  };
+
   let lastWorkShift: string | null = null;
   for (let i = history.length - 1; i >= 0; i--) {
     const s = history[i];
@@ -476,8 +483,14 @@ function evaluateOffsetCost(
 
   if (lastWorkShift && firstWorkShift) {
     if (tailOffStreak > 0 || headOffStreak > 0 || slotShifts[0] === 'OFF') {
-      if (firstWorkShift === lastWorkShift) {
-        cost += 5000000; // STRICTLY FORBIDDEN: 2 blocks of the same shift in a row!
+      // Starting a new block after rest: it MUST be the expected next shift in A -> M -> N -> A!
+      const expectedNext = EXPECTED_NEXT_SHIFT[lastWorkShift];
+      if (expectedNext) {
+        if (firstWorkShift !== expectedNext) {
+          cost += 10000000; // Strictly forbidden: breaks sequence A -> M -> N -> A
+        }
+      } else if (firstWorkShift === lastWorkShift) {
+        cost += 5000000;
       }
     }
   }
@@ -500,7 +513,7 @@ function evaluateOffsetCost(
 /**
  * Equalizes every employee so they work EXACTLY targetWorkingDays (e.g. 21 in Dec, 22 in Oct)
  */
-function equalizeExactWorkingDays(
+export function equalizeExactWorkingDays(
   rows: Record<string, Record<string, string>>,
   dateColumns: { index: number; date: Date; isoDate: string }[],
   targetWorkingDays: number,
@@ -584,11 +597,37 @@ function equalizeExactWorkingDays(
       }
     }
 
-    // 3. Anti-repeat check: NO consecutive same-shift work blocks!
+    // 0. Continuous work streak across all working shifts: NEVER > 5
+    let curWorkStreak = 0;
+    for (const s of full) {
+      if (s !== 'OFF' && s !== 'H8' && s !== 'HUP' && s !== 'ABS' && s !== 'AD') {
+        curWorkStreak++;
+        if (curWorkStreak > 5) return false;
+      } else {
+        curWorkStreak = 0;
+      }
+    }
+
+    // 1. Two WORK blocks cannot be directly adjacent without rest!
+    for (let i = 0; i < blocks.length - 1; i++) {
+      if (blocks[i].type === 'WORK' && blocks[i + 1].type === 'WORK') {
+        return false;
+      }
+    }
+
+    // 2. Shift sequence check: Work blocks must follow sequence A -> M -> N -> A!
+    const EXPECTED_NEXT_SHIFT: Record<string, string> = {
+      A: 'M',
+      M: 'N',
+      N: 'A'
+    };
     const workBlocks = blocks.filter((b) => b.type === 'WORK');
     for (let i = 0; i < workBlocks.length - 1; i++) {
-      if (workBlocks[i].shift === workBlocks[i + 1].shift) {
-        return false;
+      const cur = workBlocks[i].shift;
+      const nxt = workBlocks[i + 1].shift;
+      if (cur === nxt) return false; // Anti-repeat check
+      if (EXPECTED_NEXT_SHIFT[cur] && nxt !== EXPECTED_NEXT_SHIFT[cur]) {
+        return false; // Sequence violation
       }
     }
 
@@ -597,6 +636,8 @@ function equalizeExactWorkingDays(
       const b = blocks[i];
       if (b.type === 'WORK') {
         if (b.len > 5) return false;
+        // Internal work blocks must be between 3 and 5 days (last block at month end can be 1..5 as it continues into next month)
+        if (i < blocks.length - 1 && b.len < 3) return false;
       } else {
         // Rest period between two work blocks:
         // After Night shift: strictly >= 2 days (48h mandatory rest)
@@ -881,6 +922,78 @@ function equalizeExactWorkingDays(
     }
     if (!added) break;
   }
+
+  // Phase D: Coverage Equalization - Resolves understaffed days (N < 2, A < 2, rotM < 1) by shifting shifts within valid work blocks
+  const getDailyCoverage = () => {
+    const dailyCov: Record<string, { M: number; A: number; N: number }> = {};
+    dateColumns.forEach(({ isoDate }) => {
+      const c = { M: 0, A: 0, N: 0 };
+      rotating.forEach((emp) => {
+        const s = rows[emp][isoDate];
+        if (s === 'M' || s === 'A' || s === 'N') c[s]++;
+      });
+      dailyCov[isoDate] = c;
+    });
+    return dailyCov;
+  };
+
+  for (let iter = 0; iter < 40; iter++) {
+    const cov = getDailyCoverage();
+    let moved = false;
+
+    for (let i = 0; i < dateColumns.length; i++) {
+      const isoDate = dateColumns[i].isoDate;
+      const c = cov[isoDate];
+
+      const deficits: ('N' | 'A' | 'M')[] = [];
+      if (c.N < 2) deficits.push('N');
+      if (c.A < 2) deficits.push('A');
+      if (c.M < 1) deficits.push('M');
+
+      for (const targetShift of deficits) {
+        for (const emp of rotating) {
+          if (rows[emp][isoDate] !== 'OFF') continue;
+
+          // Target shift must be adjacent to an existing block of targetShift for this employee
+          const prev = i > 0 ? rows[emp][dateColumns[i - 1].isoDate] : (employeeHistories[emp]?.[employeeHistories[emp].length - 1] ?? 'OFF');
+          const next = i < dateColumns.length - 1 ? rows[emp][dateColumns[i + 1].isoDate] : 'OFF';
+          if (prev !== targetShift && next !== targetShift) continue;
+
+          // Try setting rows[emp][isoDate] = targetShift
+          rows[emp][isoDate] = targetShift;
+
+          // Find a day to drop from this employee where coverage is in surplus
+          let dropFound = false;
+          for (let j = 0; j < dateColumns.length; j++) {
+            if (i === j) continue;
+            const dropIso = dateColumns[j].isoDate;
+            const dropShift = rows[emp][dropIso];
+            if (dropShift !== 'M' && dropShift !== 'A' && dropShift !== 'N') continue;
+
+            const dropCov = cov[dropIso];
+            const minAllowed = dropShift === 'M' ? 1 : 2;
+            if (dropCov[dropShift] <= minAllowed) continue;
+
+            rows[emp][dropIso] = 'OFF';
+
+            if (isEmpValid(emp)) {
+              dropFound = true;
+              moved = true;
+              break;
+            } else {
+              rows[emp][dropIso] = dropShift;
+            }
+          }
+
+          if (dropFound) break;
+          rows[emp][isoDate] = 'OFF';
+        }
+        if (moved) break;
+      }
+      if (moved) break;
+    }
+    if (!moved) break;
+  }
 }
 
 /**
@@ -924,46 +1037,10 @@ export function generateBalancedSchedule(
   const rotatingEmployees = activeAllEmployees.filter((name) => !fixedMidEmployees.includes(name) && !fixedWeekdayMAEmployees.includes(name));
 
   // Balanced 1:1:1 templates with 4-day blocks and 2-day rests across 18-day coprime cycles
-  // Templates rotate in all 6 possible cyclic directions (M->A->N, A->N->M, N->M->A, M->N->A, A->M->N, N->A->M)
-  // Perfectly balanced: 4 M, 4 A, 4 N, and 6 OFF (ratio 1:1:1:1.5)
+  // Strict cyclic direction: A -> M -> N -> A (Afternoon -> Morning -> Night -> Afternoon)
+  // Perfectly balanced: 4 A, 4 M, 4 N, and 6 OFF (ratio 1:1:1:1.5)
   const BALANCED_TEMPLATES = [
-    // Template 0: M -> A -> N
-    [
-      'M','M','M','M',
-      'OFF','OFF',
-      'A','A','A','A',
-      'OFF','OFF',
-      'N','N','N','N',
-      'OFF','OFF'
-    ],
-    // Template 1: A -> N -> M
-    [
-      'A','A','A','A',
-      'OFF','OFF',
-      'N','N','N','N',
-      'OFF','OFF',
-      'M','M','M','M',
-      'OFF','OFF'
-    ],
-    // Template 2: N -> M -> A
-    [
-      'N','N','N','N',
-      'OFF','OFF',
-      'M','M','M','M',
-      'OFF','OFF',
-      'A','A','A','A',
-      'OFF','OFF'
-    ],
-    // Template 3: M -> N -> A
-    [
-      'M','M','M','M',
-      'OFF','OFF',
-      'N','N','N','N',
-      'OFF','OFF',
-      'A','A','A','A',
-      'OFF','OFF'
-    ],
-    // Template 4: A -> M -> N
+    // Template 0: A -> M -> N -> A
     [
       'A','A','A','A',
       'OFF','OFF',
@@ -972,7 +1049,16 @@ export function generateBalancedSchedule(
       'N','N','N','N',
       'OFF','OFF'
     ],
-    // Template 5: N -> A -> M
+    // Template 1: M -> N -> A -> M
+    [
+      'M','M','M','M',
+      'OFF','OFF',
+      'N','N','N','N',
+      'OFF','OFF',
+      'A','A','A','A',
+      'OFF','OFF'
+    ],
+    // Template 2: N -> A -> M -> N
     [
       'N','N','N','N',
       'OFF','OFF',
@@ -1023,18 +1109,29 @@ export function generateBalancedSchedule(
     [0, 1, 4, 5, 8, 11, 12, 15]
   ];
 
-  const VALID_SLOT_SETS_9 = [
+  const BASE_SLOT_SETS_9 = [
     [0, 2, 4, 6, 8, 10, 12, 14, 16],
-    [2, 4, 6, 8, 10, 12, 14, 16, 0],
-    [4, 6, 8, 10, 12, 14, 16, 0, 2],
-    [6, 8, 10, 12, 14, 16, 0, 2, 4],
-    [8, 10, 12, 14, 16, 0, 2, 4, 6],
-    [10, 12, 14, 16, 0, 2, 4, 6, 8],
-    [12, 14, 16, 0, 2, 4, 6, 8, 10],
-    [14, 16, 0, 2, 4, 6, 8, 10, 12],
-    [16, 0, 2, 4, 6, 8, 10, 12, 14],
-    [1, 3, 5, 7, 9, 11, 13, 15, 17]
+    [1, 3, 5, 7, 9, 11, 13, 15, 17],
+    [1, 2, 4, 5, 8, 10, 13, 14, 16],
+    [1, 2, 4, 5, 8, 10, 13, 15, 16],
+    [1, 2, 4, 5, 9, 10, 13, 14, 16],
+    [1, 2, 4, 5, 9, 10, 14, 15, 16],
+    [1, 2, 4, 5, 8, 9, 13, 14, 16],
+    [1, 2, 4, 5, 8, 9, 14, 15, 16],
+    [0, 1, 3, 4, 7, 9, 12, 13, 15],
+    [0, 1, 3, 4, 8, 9, 12, 13, 15]
   ];
+
+  const VALID_SLOT_SETS_9: number[][] = [];
+  for (const s of BASE_SLOT_SETS_9) {
+    for (let shift = 0; shift < 18; shift += 2) {
+      const rotated = s.map((x) => (x + shift) % 18).sort((a, b) => a - b);
+      const key = rotated.join(',');
+      if (!VALID_SLOT_SETS_9.some((existing) => existing.join(',') === key)) {
+        VALID_SLOT_SETS_9.push(rotated);
+      }
+    }
+  }
 
   const VALID_SLOT_SETS_10 = [
     [0, 1, 2, 4, 6, 7, 10, 11, 14, 15],
@@ -1240,7 +1337,20 @@ export function generateBalancedSchedule(
         options.excludedEmployees ?? []
       );
 
-      if (testReport.isFullyCompliant || !bestReport || testReport.totalViolations < bestReport.totalViolations) {
+      const scoreReport = (rep: ScheduleValidationReport) => {
+        const legalHard =
+          rep.streakViolationCount +
+          rep.nightRestViolationCount +
+          rep.excessiveRestViolationCount +
+          rep.mixedBlockViolationCount +
+          rep.workDaysMismatchCount;
+        return legalHard * 1000 + rep.nightOverstaffedDaysCount * 20 + rep.understaffedDaysCount * 10;
+      };
+
+      const curScore = scoreReport(testReport);
+      const bestScore = bestReport ? scoreReport(bestReport) : Infinity;
+
+      if (testReport.isFullyCompliant || !bestReport || curScore < bestScore) {
         bestResultRows = candidateRows;
         bestReport = testReport;
         finalSeed = config.attemptSeed;
