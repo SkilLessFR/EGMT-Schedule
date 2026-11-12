@@ -4,14 +4,7 @@ import type { RosterData, ShiftEvent } from './types';
 const monthNames = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const dateHeaderPattern = /^\s*(\d{1,2})\s*[-\s/]\s*([A-Za-z]{3,})\b/;
 const knownShiftCodes = new Set(['MID', 'OFF', 'ABS', 'AD', 'M', 'A', 'N', 'H8']);
-const GLOBAL_MID_EMPLOYEES = new Set(['TIR GEORGE CRISTIAN']);
 
-function normalizeEmployeeName(value: string) {
-  return String(value ?? '').replace(/\s+/g, ' ').trim().toUpperCase();
-}
-function shouldForceMidShift(employee: string) {
-  return GLOBAL_MID_EMPLOYEES.has(normalizeEmployeeName(employee));
-}
 
 function toIso(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -106,6 +99,16 @@ export async function parseRoster(file: File): Promise<RosterData> {
 
   if (headerRow < 0 || dateColumns.length === 0) throw new Error('Could not find the date header row. Make sure the top row contains dates like 1-Jul, 2-Jul, etc.');
 
+  const monthCounts = dateColumns.reduce<Record<number, number>>((acc, column) => {
+    acc[column.date.getMonth()] = (acc[column.date.getMonth()] ?? 0) + 1;
+    return acc;
+  }, {});
+  const month = Number(Object.entries(monthCounts).sort((a, b) => b[1] - a[1])[0][0]);
+  const year = dateColumns.find((column) => column.date.getMonth() === month)?.date.getFullYear() ?? currentYear;
+
+  // Keep only date columns belonging to the primary month/year so template padding columns do not bleed across months
+  dateColumns = dateColumns.filter((col) => col.date.getMonth() === month && col.date.getFullYear() === year);
+
   const employeeCol = inferEmployeeColumn(XLSX, sheet, range, headerRow, dateColumns);
 
   const employees: string[] = [];
@@ -118,14 +121,8 @@ export async function parseRoster(file: File): Promise<RosterData> {
     const shifts: Record<string, string> = {};
     dateColumns.forEach(({ index, isoDate }) => {
       const value = cellText(XLSX, sheet, rowIndex, index);
-      if (value) shifts[isoDate] = value;
+      if (value) shifts[isoDate] = normalizedCode(value);
     });
-
-    if (shouldForceMidShift(employee)) {
-      dateColumns.forEach(({ isoDate }) => {
-        shifts[isoDate] = 'MID';
-      });
-    }
 
     if (Object.keys(shifts).length) {
       employees.push(employee);
@@ -135,12 +132,6 @@ export async function parseRoster(file: File): Promise<RosterData> {
 
   if (!employees.length) throw new Error('No employee rows were found below the date header.');
 
-  const monthCounts = dateColumns.reduce<Record<number, number>>((acc, column) => {
-    acc[column.date.getMonth()] = (acc[column.date.getMonth()] ?? 0) + 1;
-    return acc;
-  }, {});
-  const month = Number(Object.entries(monthCounts).sort((a, b) => b[1] - a[1])[0][0]);
-  const year = dateColumns.find((column) => column.date.getMonth() === month)?.date.getFullYear() ?? currentYear;
   return { month, year, employees, rows: parsedRows, dateColumns, fileName: file.name };
 }
 
@@ -167,12 +158,24 @@ export function mergeRosters(existing: RosterData, incoming: RosterData): Roster
     .sort((a, b) => a.isoDate.localeCompare(b.isoDate))
     .map((col, index) => ({ ...col, index }));
 
+  const incomingDateSet = new Set(incoming.dateColumns.map((col) => col.isoDate));
+
   const rows: Record<string, Record<string, string>> = {};
   for (const emp of employees) {
-    rows[emp] = {
-      ...(existing.rows[emp] ?? {}),
-      ...(incoming.rows[emp] ?? {}),
-    };
+    const existingEmpRows = { ...(existing.rows[emp] ?? {}) };
+    const incomingEmpRows = incoming.rows[emp] ?? {};
+
+    // Incoming schedule has complete authority over all dates in its dateColumns.
+    // If an incoming cell is empty or 'OFF', any stale shift from a prior month preview is removed.
+    for (const isoDate of incomingDateSet) {
+      if (incomingEmpRows[isoDate] && incomingEmpRows[isoDate] !== 'OFF') {
+        existingEmpRows[isoDate] = incomingEmpRows[isoDate];
+      } else {
+        delete existingEmpRows[isoDate];
+      }
+    }
+
+    rows[emp] = existingEmpRows;
   }
 
   const fileName = existing.fileName && !existing.fileName.includes(incoming.fileName)

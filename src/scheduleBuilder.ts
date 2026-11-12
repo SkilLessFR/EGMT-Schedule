@@ -30,10 +30,8 @@ export const ROMANIAN_HOLIDAYS_2026 = new Set<string>([
   '2026-06-01', '2026-08-15', '2026-11-30', '2026-12-01', '2026-12-25', '2026-12-26'
 ]);
 
-// Dec 31st New Year's Eve exemption: Palade and Tir George are exempt/off, 24/7 rotating staff continue normal rotation
-export const FIXED_STAFF_EXEMPT_OFF_DATES = new Set<string>([
-  '2026-12-31'
-]);
+// Dec 31st New Year's Eve exemption: Palade and Tir George work normal weekday shift if Dec 31 is a weekday (e.g. 2026-12-31 is Thursday)
+export const FIXED_STAFF_EXEMPT_OFF_DATES = new Set<string>();
 
 export const MONTHLY_WORKING_DAYS_2026: Record<number, number> = {
   0: 22, // Jan
@@ -1523,8 +1521,10 @@ export function validateScheduleCompliance(
       } else {
         currentStreak = 0;
         // Rest period check (max 2 days, rarely 3, never > 3 for rotating staff)
-        // Note: ABS is approved medical absence, not counted as excessive rest violation; excluded employees are off for month
-        if (!isNonRotating && s !== 'ABS' && !isExcluded) {
+        // Note: ABS is approved medical absence and H8 is approved vacation, neither counted as excessive rest violation; excluded employees are off for month
+        if (s === 'H8') {
+          currentOffStreak = 0;
+        } else if (!isNonRotating && s !== 'ABS' && !isExcluded) {
           currentOffStreak++;
           if (currentOffStreak > 3) {
             empViolations.push(`Rest period exceeded 3 days on ${isoDate} (${currentOffStreak} days)`);
@@ -1603,15 +1603,11 @@ export function validateScheduleCompliance(
 
     const totalWorkingDays = counts.M + counts.A + counts.N + counts.MID;
     let baseTarget = targetWorkingDays ?? countLegalWorkingDaysInMonth(targetMonth ?? 11, targetYear ?? 2026);
-    // Palade & Tir George are specifically exempt/off on Dec 31st (working 20 days instead of 21)
-    if (isNonRotating && (targetMonth === 11 || (dateColumns[0] && dateColumns[0].isoDate.startsWith('2026-12')))) {
-      baseTarget = 20;
-    }
     if (isExcluded) {
       baseTarget = 0;
     }
-    // Medical leave (ABS) reduces the monthly working norm accordingly
-    const effectiveTarget = Math.max(0, baseTarget - counts.ABS);
+    // Medical leave (ABS) and approved vacation (H8) reduce the monthly working shift norm accordingly
+    const effectiveTarget = Math.max(0, baseTarget - counts.ABS - counts.H8);
     const workDaysDiff = isExcluded ? 0 : totalWorkingDays - effectiveTarget;
 
     // Monthly norm constraint: all employees must meet their effective monthly norm

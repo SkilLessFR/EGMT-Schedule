@@ -6,23 +6,7 @@ const XLSX = require('xlsx');
 const monthNames = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const dateHeaderPattern = /^\s*(\d{1,2})\s*[-\s/]\s*([A-Za-z]{3,})\b/;
 const knownShiftCodes = new Set(['MID', 'OFF', 'M', 'A', 'N', 'H8']);
-const GLOBAL_MID_EMPLOYEES = new Set(['TIR GEORGE CRISTIAN']);
 
-function normalizeEmployeeName(value) {
-  return String(value ?? '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^A-Z0-9\s]/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toUpperCase();
-}
-function shouldForceMidShift(employee) {
-  const normalized = normalizeEmployeeName(employee);
-  return GLOBAL_MID_EMPLOYEES.has(normalized)
-    || normalized.includes('TIRGEORGECRISTIAN')
-    || normalized.includes('TIR GEORGE CRISTIAN');
-}
 
 function toIso(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -107,6 +91,16 @@ function parseWorkbook(workbook) {
 
   if (headerRow < 0 || dateColumns.length === 0) throw new Error('Could not find the date header row. Make sure the top row contains dates like 1-Jul, 2-Jul, etc.');
 
+  const monthCounts = dateColumns.reduce((acc, column) => {
+    acc[column.date.getMonth()] = (acc[column.date.getMonth()] ?? 0) + 1;
+    return acc;
+  }, {});
+  const month = Number(Object.entries(monthCounts).sort((a, b) => b[1] - a[1])[0][0]);
+  const year = dateColumns.find((column) => column.date.getMonth() === month)?.date.getFullYear() ?? currentYear;
+
+  // Filter date columns to primary month/year so preview/padding columns don't bleed across months
+  dateColumns = dateColumns.filter((col) => col.date.getMonth() === month && col.date.getFullYear() === year);
+
   const employeeCol = inferEmployeeColumn(sheet, range, headerRow, dateColumns);
   const employees = [];
   const rows = {};
@@ -118,14 +112,8 @@ function parseWorkbook(workbook) {
     const shifts = {};
     dateColumns.forEach(({ index, isoDate }) => {
       const value = cellText(sheet, rowIndex, index);
-      if (value) shifts[isoDate] = value;
+      if (value) shifts[isoDate] = normalizedCode(value);
     });
-
-    if (shouldForceMidShift(employee)) {
-      dateColumns.forEach(({ isoDate }) => {
-        shifts[isoDate] = 'MID';
-      });
-    }
 
     if (Object.keys(shifts).length) {
       employees.push(employee);
@@ -134,13 +122,6 @@ function parseWorkbook(workbook) {
   }
 
   if (!employees.length) throw new Error('No employee rows were found below the date header.');
-
-  const monthCounts = dateColumns.reduce((acc, column) => {
-    acc[column.date.getMonth()] = (acc[column.date.getMonth()] ?? 0) + 1;
-    return acc;
-  }, {});
-  const month = Number(Object.entries(monthCounts).sort((a, b) => b[1] - a[1])[0][0]);
-  const year = dateColumns.find((column) => column.date.getMonth() === month)?.date.getFullYear() ?? currentYear;
 
   return {
     month,
@@ -181,8 +162,8 @@ if (fs.existsSync(output)) {
       const existingData = JSON.parse(existingRaw);
       
       // Keep structural metadata from the existing file or fallback
-      finalSchedule.month = existingData.month ?? newSchedule.month;
-      finalSchedule.year = existingData.year ?? newSchedule.year;
+      finalSchedule.month = newSchedule.month ?? existingData.month;
+      finalSchedule.year = newSchedule.year ?? existingData.year;
       finalSchedule.employees = Array.isArray(existingData.employees) ? existingData.employees : [];
       finalSchedule.rows = existingData.rows && typeof existingData.rows === 'object' ? existingData.rows : {};
       finalSchedule.dateColumns = Array.isArray(existingData.dateColumns) ? existingData.dateColumns : [];
@@ -209,14 +190,18 @@ const employeeSet = new Set([...finalSchedule.employees, ...newSchedule.employee
 finalSchedule.employees = Array.from(employeeSet);
 
 // 4. Merge Rows (Shifts per employee)
-for (const [employee, newShifts] of Object.entries(newSchedule.rows)) {
+const incomingDateSet = new Set(newSchedule.dateColumns.map(d => d.isoDate));
+
+for (const employee of finalSchedule.employees) {
   if (!finalSchedule.rows[employee]) {
-    // New employee to the dataset, copy all their shifts directly
-    finalSchedule.rows[employee] = { ...newShifts };
-  } else {
-    // Existing employee, merge day-by-day (new file values take precedence on clash)
-    for (const [dateIso, shiftCode] of Object.entries(newShifts)) {
-      finalSchedule.rows[employee][dateIso] = shiftCode;
+    finalSchedule.rows[employee] = {};
+  }
+  const newShifts = newSchedule.rows[employee] ?? {};
+  for (const isoDate of incomingDateSet) {
+    if (newShifts[isoDate] && newShifts[isoDate] !== 'OFF') {
+      finalSchedule.rows[employee][isoDate] = newShifts[isoDate];
+    } else {
+      delete finalSchedule.rows[employee][isoDate];
     }
   }
 }
