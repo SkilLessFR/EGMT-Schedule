@@ -31,6 +31,23 @@ export const hours: Record<string, string> = { MID: '09:00â€“17:00', M: '06:00â€
 export const shiftLabels: Record<string, string> = { M: 'Morning', A: 'Afternoon', N: 'Night', MID: 'Mid', OFF: 'Off', H8: 'H8', ABS: 'Absent (ABS)' };
 export const shiftHourValues: Record<string, number> = { M: 8, A: 8, N: 8, MID: 8, OFF: 0, H8: 0, ABS: 0 };
 
+/** Official Romanian statutory public holidays (2026 & 2027). */
+export const ROMANIAN_HOLIDAYS = new Set<string>([
+  // 2026
+  '2026-01-01', '2026-01-02', '2026-01-06', '2026-01-07', '2026-01-24',
+  '2026-04-10', '2026-04-12', '2026-04-13', '2026-05-01', '2026-05-31',
+  '2026-06-01', '2026-08-15', '2026-11-30', '2026-12-01', '2026-12-25', '2026-12-26',
+  // 2027
+  '2027-01-01', '2027-01-02', '2027-01-06', '2027-01-07', '2027-01-24',
+  '2027-04-30', '2027-05-01', '2027-05-02', '2027-05-03', '2027-06-01',
+  '2027-06-20', '2027-06-21', '2027-08-15', '2027-11-30', '2027-12-01',
+  '2027-12-25', '2027-12-26',
+]);
+
+export function isNationalHoliday(isoDate: string): boolean {
+  return ROMANIAN_HOLIDAYS.has(isoDate);
+}
+
 const OFF_SHIFT_ALIASES = new Set(['OFF', 'AD']);
 
 export function colorFor(shift: string) { return shiftColors[shift.toUpperCase()] ?? fallbackColor; }

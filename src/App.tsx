@@ -18,6 +18,7 @@ import {
   shiftLabel,
   initials,
   isEmployeeOnShift,
+  isNationalHoliday,
   ONLY_ON_SHIFT_NOTIFS_KEY,
 } from './scheduleUtils';
 import DayDetailsModal from './DayDetailsModal';
@@ -48,16 +49,6 @@ const DARK_MODE_STORAGE_KEY = 'work-schedule-dark-mode';
 const SALARY_STORAGE_KEY = 'work-schedule-salaries';
 const ADMIN_PIN_STORAGE_KEY = 'work-schedule-admin-pin';
 const APP_BASE_URL = ((import.meta as ImportMeta & { env?: { BASE_URL?: string } }).env?.BASE_URL ?? '/');
-
-const ROMANIAN_HOLIDAYS_2026 = new Set<string>([
-  '2026-01-01', '2026-01-02', '2026-01-06', '2026-01-07', '2026-01-24',
-  '2026-04-10', '2026-04-12', '2026-04-13', '2026-05-01', '2026-05-31',
-  '2026-06-01', '2026-08-15', '2026-11-30', '2026-12-01', '2026-12-25', '2026-12-26'
-]);
-
-function isNationalHoliday(isoDate: string) {
-  return ROMANIAN_HOLIDAYS_2026.has(isoDate);
-}
 
 function countWorkingDaysInMonth(month: number, year: number) {
   let count = 0;

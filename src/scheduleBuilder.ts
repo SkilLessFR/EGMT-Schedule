@@ -1,7 +1,7 @@
 // src/scheduleBuilder.ts
 import type ExcelJS from 'exceljs';
 import type { RosterData } from './types';
-import { shiftKey } from './scheduleUtils';
+import { shiftKey, ROMANIAN_HOLIDAYS } from './scheduleUtils';
 
 export const FIXED_MID_EMPLOYEES = [
   'Palade Alexandru-Ionut'
@@ -24,11 +24,8 @@ export function getIsoWeekNumber(date: Date): number {
   return Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
 }
 
-export const ROMANIAN_HOLIDAYS_2026 = new Set<string>([
-  '2026-01-01', '2026-01-02', '2026-01-06', '2026-01-07', '2026-01-24',
-  '2026-04-10', '2026-04-12', '2026-04-13', '2026-05-01', '2026-05-31',
-  '2026-06-01', '2026-08-15', '2026-11-30', '2026-12-01', '2026-12-25', '2026-12-26'
-]);
+export { ROMANIAN_HOLIDAYS };
+export const ROMANIAN_HOLIDAYS_2026 = ROMANIAN_HOLIDAYS;
 
 // Dec 31st New Year's Eve exemption: Palade and Tir George work normal weekday shift if Dec 31 is a weekday (e.g. 2026-12-31 is Thursday)
 export const FIXED_STAFF_EXEMPT_OFF_DATES = new Set<string>();
@@ -58,6 +55,8 @@ export function countLegalWorkingDaysInMonth(month: number, year: number): numbe
     const date = new Date(year, month, day);
     const dayOfWeek = date.getDay();
     if (dayOfWeek === 0 || dayOfWeek === 6) continue;
+    const isoDate = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    if (ROMANIAN_HOLIDAYS.has(isoDate)) continue;
     count += 1;
   }
   return count;
