@@ -176,6 +176,7 @@ export interface ScheduleValidationReport {
   excessiveRestViolationCount: number;
   mixedBlockViolationCount: number;
   workDaysMismatchCount: number;
+  fixedStaffViolationCount?: number;
   dailyCoverage: Record<string, DayCoverage>;
   employeeStats: Record<string, EmployeeMonthStats>;
   warnings: string[];
@@ -404,6 +405,11 @@ export function evaluateOffsetCost(
         if (headStreak + 1 < targetDaysCount && slotShifts[headStreak + 1] !== 'OFF') cost += 5000000;
       }
     }
+  } else if (history.length > 0 && firstShift !== 'OFF') {
+    // Previous month ended on rest: a new block starting Day 1 that ends in-month must be >= 3 days
+    if (headStreak < 3 && headStreak < targetDaysCount) {
+      cost += 10000000;
+    }
   }
 
   // 2. Boundary rest streak check: rest periods must be at least 2 days, at most 3 days
@@ -569,7 +575,7 @@ export function equalizeExactWorkingDays(
   const employeeHistories: Record<string, string[]> = {};
   rotating.forEach((emp) => {
     employeeHistories[emp] = priorRoster
-      ? getEmployeeHistoryTail(priorRoster, emp, year, month, 5)
+      ? getEmployeeHistoryTail(priorRoster, emp, year, month, 6)
       : [];
   });
 
@@ -845,6 +851,42 @@ export function equalizeExactWorkingDays(
         }
         if (swapped) break;
       }
+    }
+  }
+
+  // Phase 0b: Repair any rotating employee still failing isEmpValid (e.g. boundary <3d block or <2d N rest)
+  for (const emp of rotating) {
+    for (let iter = 0; iter < 5 && !isEmpValid(emp); iter++) {
+      let fixed = false;
+      for (const strictCov of [true, false]) {
+        for (let d = 0; d < dateColumns.length; d++) {
+          const dropIso = dateColumns[d].isoDate;
+          const dropShift = rows[emp][dropIso];
+          if (dropShift !== 'M' && dropShift !== 'A' && dropShift !== 'N') continue;
+          if (strictCov && !canDropShiftOnDay(dropIso, dropShift)) continue;
+
+          rows[emp][dropIso] = 'OFF';
+          for (let a = 0; a < dateColumns.length; a++) {
+            if (a === d) continue;
+            const addIso = dateColumns[a].isoDate;
+            if (rows[emp][addIso] !== 'OFF') continue;
+            for (const cand of getValidAddCandidates(emp, a)) {
+              if (!canAddShiftOnDay(addIso, cand)) continue;
+              rows[emp][addIso] = cand;
+              if (isEmpValid(emp)) {
+                fixed = true;
+                break;
+              }
+              rows[emp][addIso] = 'OFF';
+            }
+            if (fixed) break;
+          }
+          if (fixed) break;
+          rows[emp][dropIso] = dropShift;
+        }
+        if (fixed) break;
+      }
+      if (!fixed) break;
     }
   }
 
@@ -1964,7 +2006,8 @@ export function generateBalancedSchedule(
           rep.nightRestViolationCount +
           rep.excessiveRestViolationCount +
           rep.mixedBlockViolationCount +
-          rep.workDaysMismatchCount;
+          rep.workDaysMismatchCount +
+          (rep.fixedStaffViolationCount ?? 0);
         return legalHard * 1000 + rep.nightOverstaffedDaysCount * 20 + rep.understaffedDaysCount * 10;
       };
 
@@ -2031,6 +2074,7 @@ export function validateScheduleCompliance(
   let excessiveRestViolationCount = 0;
   let mixedBlockViolationCount = 0;
   let workDaysMismatchCount = 0;
+  let fixedStaffViolationCount = 0;
 
   const employees = Object.keys(rows);
 
@@ -2111,21 +2155,28 @@ export function validateScheduleCompliance(
     let maxStreak = 0;
     let currentOffStreak = 0;
 
+    const isRestCode = (code: string) =>
+      code === 'OFF' || code === 'H8' || code === 'HUP' || code === 'ABS' || code === 'AD';
+
+    const empHistory = (priorRoster && targetYear !== undefined && targetMonth !== undefined && !isNonRotating && !isExcluded)
+      ? getEmployeeHistoryTail(priorRoster, emp, targetYear, targetMonth, 6)
+      : [];
+    const empMonthShifts = dateColumns.map(({ isoDate }) => shiftKey(rows[emp]?.[isoDate] ?? 'OFF'));
+
     // Check boundary history if available (rotating staff only)
-    if (priorRoster && targetYear !== undefined && targetMonth !== undefined && !isNonRotating && !isExcluded) {
-      const history = getEmployeeHistoryTail(priorRoster, emp, targetYear, targetMonth, 5);
-      for (let i = history.length - 1; i >= 0; i--) {
-        if (history[i] !== 'OFF' && history[i] !== 'H8' && history[i] !== 'HUP' && history[i] !== 'ABS') currentStreak++;
+    if (empHistory.length > 0) {
+      for (let i = empHistory.length - 1; i >= 0; i--) {
+        if (!isRestCode(empHistory[i])) currentStreak++;
         else break;
       }
-      for (let i = history.length - 1; i >= 0; i--) {
-        if (history[i] === 'OFF' || history[i] === 'H8' || history[i] === 'HUP' || history[i] === 'ABS') currentOffStreak++;
+      for (let i = empHistory.length - 1; i >= 0; i--) {
+        if (isRestCode(empHistory[i])) currentOffStreak++;
         else break;
       }
     }
 
     dateColumns.forEach(({ isoDate }, idx) => {
-      const s = shiftKey(rows[emp]?.[isoDate] ?? 'OFF');
+      const s = empMonthShifts[idx];
       if (counts[s as keyof typeof counts] !== undefined) {
         counts[s as keyof typeof counts]++;
       } else {
@@ -2133,7 +2184,7 @@ export function validateScheduleCompliance(
       }
 
       // Working Streak calculation
-      if (s !== 'OFF' && s !== 'H8' && s !== 'HUP' && s !== 'ABS') {
+      if (!isRestCode(s)) {
         currentStreak++;
         maxStreak = Math.max(maxStreak, currentStreak);
         if (currentStreak > 5) {
@@ -2156,16 +2207,6 @@ export function validateScheduleCompliance(
         }
       }
 
-      // Night rest constraint check
-      if (idx < dateColumns.length - 1) {
-        const nextIso = dateColumns[idx + 1].isoDate;
-        const nextShift = shiftKey(rows[emp]?.[nextIso] ?? 'OFF');
-        if (s === 'N' && (nextShift === 'M' || nextShift === 'A' || nextShift === 'MID')) {
-          empViolations.push(`Night shift on ${isoDate} followed directly by ${nextShift} on ${nextIso} without rest`);
-          nightRestViolationCount++;
-        }
-      }
-
       // Check Fixed Mid Rule adherence (Palade: Mon-Fri MID, weekends & Romanian holidays OFF)
       if (isFixedMid && !isExcluded) {
         const dayOfWeek = new Date(`${isoDate}T00:00:00`).getDay();
@@ -2173,55 +2214,145 @@ export function validateScheduleCompliance(
         const isOff = isWeekend || ROMANIAN_HOLIDAYS.has(isoDate) || FIXED_STAFF_EXEMPT_OFF_DATES.has(isoDate);
         if (isOff && s !== 'OFF') {
           empViolations.push(`Fixed Manager ${emp} scheduled on ${s} instead of OFF on weekend/holiday (${isoDate})`);
-        } else if (!isOff && s !== 'MID' && s !== 'ABS') {
+          fixedStaffViolationCount++;
+        } else if (!isOff && s !== 'MID' && s !== 'ABS' && s !== 'H8') {
           empViolations.push(`Fixed Manager ${emp} scheduled on ${s} instead of MID on ${isoDate}`);
+          fixedStaffViolationCount++;
         }
       }
 
-      // Check Weekday M/A Rule adherence (Tir: Mon-Fri M or A, weekends & Romanian holidays OFF)
+      // Check Weekday M/A Rule adherence (Tir: Mon-Fri M or A, weekends & Romanian holidays OFF; parity M/A kept permissive for ABS readjustments)
       if (isFixedWeekdayMA && !isExcluded) {
         const dayOfWeek = new Date(`${isoDate}T00:00:00`).getDay();
         const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
         const isOff = isWeekend || ROMANIAN_HOLIDAYS.has(isoDate) || FIXED_STAFF_EXEMPT_OFF_DATES.has(isoDate);
         if (isOff && s !== 'OFF') {
           empViolations.push(`Weekday staff ${emp} scheduled on ${s} instead of OFF on weekend/holiday (${isoDate})`);
-        } else if (!isOff && s !== 'M' && s !== 'A' && s !== 'ABS') {
+          fixedStaffViolationCount++;
+        } else if (!isOff && s !== 'M' && s !== 'A' && s !== 'ABS' && s !== 'H8') {
           empViolations.push(`Weekday staff ${emp} scheduled on ${s} instead of M/A on ${isoDate}`);
+          fixedStaffViolationCount++;
         }
       }
     });
 
-    // Check Pure Blocks (M and A can be combined freely in the same block, but Day and Night cannot be combined without rest days)
-    if (!isNonRotating && !isExcluded) {
-      const empHistory = (priorRoster && targetYear !== undefined && targetMonth !== undefined)
-        ? getEmployeeHistoryTail(priorRoster, emp, targetYear, targetMonth, 5)
-        : [];
-      const activeTail = getActiveTailBlock(empHistory);
-      const tailType = activeTail.length > 0 ? activeTail[activeTail.length - 1] : null;
-
-      let currentBlockType: string | null = tailType;
-      const isDayShift = (s: string) => s === 'M' || s === 'A' || s === 'MID';
-
-      dateColumns.forEach(({ isoDate }) => {
-        const shift = shiftKey(rows[emp]?.[isoDate] ?? 'OFF');
-        if (shift !== 'OFF' && shift !== 'H8' && shift !== 'HUP' && shift !== 'ABS' && shift !== 'AD') {
-          if (currentBlockType === null) {
-            currentBlockType = shift;
-          } else if (currentBlockType !== shift) {
-            if (isDayShift(currentBlockType) && isDayShift(shift)) {
-              currentBlockType = shift;
-            } else {
-              empViolations.push(
-                `Mixed shift block on ${isoDate}: cannot combine ${currentBlockType} and ${shift} in the same block without rest days`
-              );
-              mixedBlockViolationCount++;
-              currentBlockType = shift;
-            }
+    // Night turnaround rest check (48h / >=2 rest days after N across boundary & in-month)
+    if (!isExcluded) {
+      const checkSeq = [...empHistory.slice(-2), ...empMonthShifts];
+      const histOffset = Math.min(2, empHistory.length);
+      for (let i = 0; i < checkSeq.length; i++) {
+        if (checkSeq[i] !== 'N') continue;
+        if (i + 1 >= histOffset && i + 1 < checkSeq.length) {
+          const next = checkSeq[i + 1];
+          if (next === 'M' || next === 'A' || next === 'MID') {
+            const nextIso = dateColumns[i + 1 - histOffset].isoDate;
+            empViolations.push(`Night shift followed directly by ${next} on ${nextIso} without rest`);
+            nightRestViolationCount++;
           }
-        } else {
-          currentBlockType = null;
         }
-      });
+        if (i + 2 >= histOffset && i + 2 < checkSeq.length) {
+          const next = checkSeq[i + 1];
+          const next2 = checkSeq[i + 2];
+          if (isRestCode(next) && (next2 === 'M' || next2 === 'A' || next2 === 'MID' || next2 === 'N')) {
+            const next2Iso = dateColumns[i + 2 - histOffset].isoDate;
+            empViolations.push(`Night shift followed by only 1 rest day before ${next2} on ${next2Iso} (minimum 2 rest days required)`);
+            nightRestViolationCount++;
+          }
+        }
+      }
+    }
+
+    // Rotating block structure, internal min length (>= 3), and A -> M -> N -> A sequence checks
+    if (!isNonRotating && !isExcluded) {
+      const hasHistory = empHistory.length > 0;
+      const activeTailWork = getActiveTailBlock(empHistory);
+      const activeTailRest = activeTailWork.length === 0 ? getActiveTailRest(empHistory) : [];
+      const activeTail = activeTailWork.length > 0 ? activeTailWork : activeTailRest;
+
+      interface ValBlock {
+        type: 'WORK' | 'REST';
+        shift: string;
+        len: number;
+        startCol: number;
+      }
+      const blocks: ValBlock[] = [];
+      const appendToBlocks = (code: string, colIdx: number) => {
+        const r = isRestCode(code);
+        const t: 'WORK' | 'REST' = r ? 'REST' : 'WORK';
+        const sh = r ? 'OFF' : code;
+        const cur = blocks[blocks.length - 1];
+        if (cur && cur.type === t && (t === 'REST' || cur.shift === sh)) {
+          cur.len++;
+        } else {
+          blocks.push({ type: t, shift: sh, len: 1, startCol: colIdx });
+        }
+      };
+
+      activeTail.forEach((s) => appendToBlocks(s, -1));
+      empMonthShifts.forEach((s, idx) => appendToBlocks(s, idx));
+
+      // Adjacent WORK blocks without rest days (mixed Day/Night or back-to-back different work shifts)
+      for (let bi = 0; bi < blocks.length - 1; bi++) {
+        if (blocks[bi].type === 'WORK' && blocks[bi + 1].type === 'WORK') {
+          const nextStart = Math.max(0, blocks[bi + 1].startCol);
+          const isoDate = dateColumns[nextStart]?.isoDate ?? '';
+          empViolations.push(
+            `Mixed shift block on ${isoDate}: cannot combine ${blocks[bi].shift} and ${blocks[bi + 1].shift} in the same block without rest days`
+          );
+          mixedBlockViolationCount++;
+        }
+      }
+
+      // Internal work blocks must be 3..5 days (exempt Day 1 without prior history and trailing month-end block)
+      for (let bi = 0; bi < blocks.length; bi++) {
+        const b = blocks[bi];
+        if (b.type === 'WORK') {
+          const isUnboundedStart = bi === 0 && !hasHistory;
+          if (!isUnboundedStart && bi < blocks.length - 1 && b.len < 3) {
+            const isoDate = dateColumns[Math.max(0, b.startCol)]?.isoDate ?? '';
+            empViolations.push(
+              `Short work block (${b.shift}, ${b.len} day${b.len === 1 ? '' : 's'}) starting ${isoDate}: internal blocks require 3-5 consecutive days`
+            );
+            streakViolationCount++;
+          }
+        }
+      }
+
+      // Rotating sequence A -> M -> N -> A across boundary and in-month work blocks
+      const EXPECTED_NEXT_SHIFT: Record<string, string> = { A: 'M', M: 'N', N: 'A' };
+      const workBlocks = blocks.filter((b) => b.type === 'WORK');
+      let lastHistoryWorkShift: string | null = null;
+      for (let hi = empHistory.length - 1; hi >= 0; hi--) {
+        if (!isRestCode(empHistory[hi])) {
+          lastHistoryWorkShift = empHistory[hi];
+          break;
+        }
+      }
+
+      if (activeTailWork.length === 0 && lastHistoryWorkShift && workBlocks.length > 0) {
+        const expectedFirst = EXPECTED_NEXT_SHIFT[lastHistoryWorkShift];
+        const firstBlock = workBlocks[0];
+        if ((expectedFirst && firstBlock.shift !== expectedFirst) || firstBlock.shift === lastHistoryWorkShift) {
+          const isoDate = dateColumns[Math.max(0, firstBlock.startCol)]?.isoDate ?? '';
+          empViolations.push(
+            `Shift sequence violation on ${isoDate}: expected ${expectedFirst ?? 'next shift'} after ${lastHistoryWorkShift}, got ${firstBlock.shift}`
+          );
+          mixedBlockViolationCount++;
+        }
+      }
+
+      for (let wi = 0; wi < workBlocks.length - 1; wi++) {
+        const cur = workBlocks[wi];
+        const nxt = workBlocks[wi + 1];
+        const expectedNext = EXPECTED_NEXT_SHIFT[cur.shift];
+        if (cur.shift === nxt.shift || (expectedNext && nxt.shift !== expectedNext)) {
+          const isoDate = dateColumns[Math.max(0, nxt.startCol)]?.isoDate ?? '';
+          empViolations.push(
+            `Shift sequence violation on ${isoDate}: expected ${expectedNext ?? 'next shift'} after ${cur.shift}, got ${nxt.shift}`
+          );
+          mixedBlockViolationCount++;
+        }
+      }
     }
 
     const totalWorkingDays = counts.M + counts.A + counts.N + counts.MID;
@@ -2277,7 +2408,8 @@ export function validateScheduleCompliance(
     nightRestViolationCount +
     excessiveRestViolationCount +
     mixedBlockViolationCount +
-    workDaysMismatchCount;
+    workDaysMismatchCount +
+    fixedStaffViolationCount;
 
   return {
     isFullyCompliant: totalViolations === 0,
@@ -2289,6 +2421,7 @@ export function validateScheduleCompliance(
     excessiveRestViolationCount,
     mixedBlockViolationCount,
     workDaysMismatchCount,
+    fixedStaffViolationCount,
     dailyCoverage,
     employeeStats,
     warnings
