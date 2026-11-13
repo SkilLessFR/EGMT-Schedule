@@ -11,6 +11,12 @@ const knownShiftCodes = new Set(['MID', 'OFF', 'M', 'A', 'N', 'H8']);
 function toIso(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
+function maxIsoDate(dateColumns) {
+  return (dateColumns ?? []).reduce(
+    (max, col) => (col?.isoDate && col.isoDate > max ? col.isoDate : max),
+    ''
+  );
+}
 function parseHeaderDate(text, year) {
   const match = text.match(dateHeaderPattern);
   if (!match) return null;
@@ -154,20 +160,22 @@ let finalSchedule = {
   fileNames: [] // Track all files merged into this schedule
 };
 
+let existingMonth;
+let existingYear;
+
 // 1. If an existing schedule exists, read it first
 if (fs.existsSync(output)) {
   try {
     const existingRaw = fs.readFileSync(output, 'utf8');
     if (existingRaw.trim()) {
       const existingData = JSON.parse(existingRaw);
-      
-      // Keep structural metadata from the existing file or fallback
-      finalSchedule.month = newSchedule.month ?? existingData.month;
-      finalSchedule.year = newSchedule.year ?? existingData.year;
+
+      existingMonth = existingData.month;
+      existingYear = existingData.year;
       finalSchedule.employees = Array.isArray(existingData.employees) ? existingData.employees : [];
       finalSchedule.rows = existingData.rows && typeof existingData.rows === 'object' ? existingData.rows : {};
       finalSchedule.dateColumns = Array.isArray(existingData.dateColumns) ? existingData.dateColumns : [];
-      
+
       // Preserve history of files imported
       if (Array.isArray(existingData.fileNames)) {
         finalSchedule.fileNames = existingData.fileNames;
@@ -185,9 +193,33 @@ if (!finalSchedule.fileNames.includes(currentFileName)) {
   finalSchedule.fileNames.push(currentFileName);
 }
 
-// 3. Merge Employees (using Set to prevent duplicate names)
-const employeeSet = new Set([...finalSchedule.employees, ...newSchedule.employees]);
-finalSchedule.employees = Array.from(employeeSet);
+// 3. Merge Employees (latest month is authoritative; older imports keep existing roster)
+const existingMaxDate = maxIsoDate(finalSchedule.dateColumns);
+const incomingMaxDate = maxIsoDate(newSchedule.dateColumns);
+const existingHasNewerDates = Boolean(existingMaxDate && (!incomingMaxDate || existingMaxDate > incomingMaxDate));
+
+if (existingHasNewerDates) {
+  finalSchedule.month = existingMonth ?? newSchedule.month;
+  finalSchedule.year = existingYear ?? newSchedule.year;
+} else {
+  finalSchedule.month = newSchedule.month ?? existingMonth;
+  finalSchedule.year = newSchedule.year ?? existingYear;
+}
+
+const authoritativeEmployees =
+  existingHasNewerDates && finalSchedule.employees.length > 0
+    ? finalSchedule.employees
+    : newSchedule.employees.length > 0
+      ? newSchedule.employees
+      : finalSchedule.employees;
+finalSchedule.employees = Array.from(new Set(authoritativeEmployees));
+
+const activeEmployeeSet = new Set(finalSchedule.employees);
+for (const employee of Object.keys(finalSchedule.rows)) {
+  if (!activeEmployeeSet.has(employee)) {
+    delete finalSchedule.rows[employee];
+  }
+}
 
 // 4. Merge Rows (Shifts per employee)
 const incomingDateSet = new Set(newSchedule.dateColumns.map(d => d.isoDate));
