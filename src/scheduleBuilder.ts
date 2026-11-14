@@ -14,7 +14,12 @@ export type {
   ValidationOptions
 };
 import { shiftKey, ROMANIAN_HOLIDAYS } from './scheduleUtils';
-import { getTierConfig, isCoverageFeasibleForTier } from './relaxation';
+import {
+  getTierConfig,
+  isCoverageFeasibleForTier,
+  tierCovPenalty,
+  canSatisfyDailyCapacityForTier
+} from './relaxation';
 
 export const FIXED_MID_EMPLOYEES = [
   'Palade Alexandru-Ionut'
@@ -222,6 +227,8 @@ export interface ReadjustmentProposal {
   }>;
   updatedRows: Record<string, Record<string, string>>;
   validation: ScheduleValidationReport;
+  tier?: ComplianceTier;
+  relaxations?: RelaxationRecord[];
 }
 
 export interface GeneratedScheduleResult {
@@ -295,6 +302,50 @@ function getEmployeeHistoryTail(
     // HUP is a disciplinary break; H8 is holiday; neither is a continuous work streak
     if (k === 'HUP' || k === 'H8' || k === 'ABS' || k === 'AD') return 'OFF';
     return k;
+  });
+}
+
+/**
+ * Extracts raw contiguous <= 6-day prior history ending on day before target month,
+ * preserving ABS/H8/CM codes to match validateScheduleCompliance boundary checks.
+ */
+function extractRawHistoryTail(
+  roster: RosterData | null,
+  employee: string,
+  year: number,
+  month: number,
+  count: number = 6
+): string[] {
+  if (!roster) return [];
+  const targetStartIso = `${year}-${String(month + 1).padStart(2, '0')}-01`;
+  const knownDates = new Set<string>();
+  for (const dc of roster.dateColumns || []) {
+    if (dc?.isoDate) knownDates.add(dc.isoDate);
+  }
+  if (roster.rows) {
+    for (const rEmp of Object.keys(roster.rows)) {
+      const empRow = roster.rows[rEmp];
+      if (empRow && typeof empRow === 'object') {
+        for (const iso of Object.keys(empRow)) knownDates.add(iso);
+      }
+    }
+  }
+  const [y, m, d] = targetStartIso.split('-').map(Number);
+  const tailIsos: string[] = [];
+  for (let offset = 1; offset <= count; offset++) {
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    dt.setUTCDate(dt.getUTCDate() - offset);
+    const prevIso = dt.toISOString().slice(0, 10);
+    if (knownDates.has(prevIso)) {
+      tailIsos.unshift(prevIso);
+    } else {
+      break;
+    }
+  }
+  return tailIsos.map((iso) => {
+    const raw = roster.rows?.[employee]?.[iso];
+    const s = raw ? shiftKey(String(raw)) : 'OFF';
+    return s === '' ? 'OFF' : s;
   });
 }
 
@@ -1657,6 +1708,17 @@ export function generateBalancedSchedule(
   targetMonth: number,
   options: ScheduleBuilderOptions = {}
 ): GeneratedScheduleResult {
+  const startTimeMs = performance.now();
+  const timeBudgetMs = options.timeBudgetMs ?? 8000;
+  const minTier: ComplianceTier = options.minTier ?? 0;
+  const maxTier: ComplianceTier = options.maxTier ?? 3;
+  const activeTiers: ComplianceTier[] = ([0, 1, 2, 3] as ComplianceTier[]).filter(
+    (t) => t >= minTier && t <= maxTier
+  );
+  if (activeTiers.length === 0) activeTiers.push(maxTier);
+  const safetyMarginMs = Math.min(150, Math.floor(timeBudgetMs * 0.1));
+  const totalDeadlineMs = startTimeMs + Math.max(50, timeBudgetMs - safetyMarginMs);
+
   const seed = options.seed ?? Math.floor(Math.random() * 1000000);
   const targetWorkingDays =
     options.targetWorkingDays ?? countLegalWorkingDaysInMonth(targetMonth, targetYear);
@@ -1914,6 +1976,7 @@ export function generateBalancedSchedule(
 
   let bestResultRows: Record<string, Record<string, string>> = {};
   let bestReport: ScheduleValidationReport | null = null;
+  let bestRelaxations: RelaxationRecord[] = [];
   let bestScoreValue = Infinity;
   let bestHandoffSafe = false;
   let finalSeed = seed;
@@ -1999,10 +2062,12 @@ export function generateBalancedSchedule(
   const seenAssignments = new Set<string>();
 
   const rotatingHistories: Record<string, string[]> = {};
+  const rotatingRawHistories: Record<string, string[]> = {};
   const rotatingAnchors: Record<string, string | null> = {};
   rotatingEmployees.forEach((emp) => {
     const hist = getEmployeeHistoryTail(roster, emp, targetYear, targetMonth, 6);
     rotatingHistories[emp] = hist;
+    rotatingRawHistories[emp] = extractRawHistoryTail(roster, emp, targetYear, targetMonth, 6);
     rotatingAnchors[emp] = hist.length > 0 ? roster?.rows?.[emp]?.[targetStartIso] ?? null : null;
   });
 
@@ -2043,10 +2108,21 @@ export function generateBalancedSchedule(
       rep.mixedBlockViolationCount +
       rep.workDaysMismatchCount +
       (rep.fixedStaffViolationCount ?? 0);
-    return legalHard * 1000 + rep.nightOverstaffedDaysCount * 20 + rep.understaffedDaysCount * 10 + (handoffSafe ? 0 : 1);
+    return (
+      legalHard * 10000 +
+      rep.nightOverstaffedDaysCount * 200 +
+      rep.understaffedDaysCount * 100 +
+      (handoffSafe ? 0 : 500)
+    );
   };
 
+  const stage2DeadlineMs = startTimeMs + Math.min(250, Math.floor(timeBudgetMs * 0.15));
+  let stage2FoundTier2Safe = false;
+
   for (const sOffset of SEED_OFFSETS) {
+    if (bestReport && (stage2FoundTier2Safe || performance.now() >= stage2DeadlineMs || performance.now() >= totalDeadlineMs)) {
+      break;
+    }
     const effSeed = seed + sOffset;
     const allCandidates: CandidateConfig[] = [];
 
@@ -2103,11 +2179,14 @@ export function generateBalancedSchedule(
     // Sort candidates by boundary cost ascending (strictly legal combinations first)
     allCandidates.sort((a, b) => a.cost - b.cost);
 
-    // Stage 2: Equalize and validate distinct candidate configurations (early exit on fully compliant)
+    // Stage 2: Equalize and validate distinct candidate configurations (early exit on minTier compliant + handoffSafe)
     const configLimit = sOffset === 0 ? 48 : 24;
     let tested = 0;
 
     for (const config of allCandidates) {
+      if (bestReport && (stage2FoundTier2Safe || performance.now() >= stage2DeadlineMs || performance.now() >= totalDeadlineMs)) {
+        break;
+      }
       if (seenAssignments.has(config.signature)) continue;
       seenAssignments.add(config.signature);
       if (++tested > configLimit) break;
@@ -2165,6 +2244,7 @@ export function generateBalancedSchedule(
         targetMonth,
         options.excludedEmployees ?? []
       );
+      const candRelax: RelaxationRecord[] = [];
       const testReport = validateScheduleCompliance(
         candidateRows,
         dateColumns,
@@ -2172,36 +2252,144 @@ export function generateBalancedSchedule(
         targetYear,
         targetMonth,
         targetWorkingDays,
-        options.excludedEmployees ?? []
+        options.excludedEmployees ?? [],
+        { tier: minTier, relaxations: candRelax }
       );
 
-      const curHandoffSafe = testReport.isFullyCompliant ? isMonthEndHandoffSafe(candidateRows) : false;
-      const curScore = scoreReport(testReport, curHandoffSafe);
+      const curHandoffSafe = isMonthEndHandoffSafe(candidateRows);
+      const tier2Rep =
+        minTier === 2
+          ? testReport
+          : validateScheduleCompliance(
+              candidateRows,
+              dateColumns,
+              roster,
+              targetYear,
+              targetMonth,
+              targetWorkingDays,
+              options.excludedEmployees ?? [],
+              { tier: 2 }
+            );
+      let hardCheckViol = 0;
+      if (!tier2Rep.isFullyCompliant && minTier < 3) {
+        const hardRep =
+          minTier === 3
+            ? testReport
+            : validateScheduleCompliance(
+                candidateRows,
+                dateColumns,
+                roster,
+                targetYear,
+                targetMonth,
+                targetWorkingDays,
+                options.excludedEmployees ?? [],
+                { tier: 3 }
+              );
+        hardCheckViol = hardRep.totalViolations;
+      }
+      const curScore =
+        hardCheckViol * 10000000 +
+        (tier2Rep.isFullyCompliant ? 0 : 100000) +
+        scoreReport(tier2Rep, curHandoffSafe) * 10 +
+        scoreReport(testReport, curHandoffSafe);
 
       if (!bestReport || curScore < bestScoreValue) {
         bestResultRows = candidateRows;
         bestReport = testReport;
+        bestRelaxations = candRelax;
         bestScoreValue = curScore;
         bestHandoffSafe = curHandoffSafe;
         finalSeed = config.attemptSeed;
         if (testReport.isFullyCompliant && curHandoffSafe) {
           break;
         }
+        if (minTier < 2 && tier2Rep.isFullyCompliant && curHandoffSafe) {
+          stage2FoundTier2Safe = true;
+          break;
+        }
       }
     }
 
-    if (bestReport?.isFullyCompliant && bestHandoffSafe) {
+    if ((bestReport?.isFullyCompliant && bestHandoffSafe) || stage2FoundTier2Safe) {
       break;
     }
   }
 
-  // Stage 3: Exact Legal-Trajectory DP + Large Neighborhood Search (fallback when cyclic templates don't reach compliant+safe)
-  if (!(bestReport?.isFullyCompliant && bestHandoffSafe) && rotatingEmployees.length > 0 && targetWorkingDays > 0 && targetWorkingDays <= daysCount) {
+  if (bestReport?.isFullyCompliant && bestHandoffSafe) {
+    return {
+      month: targetMonth,
+      year: targetYear,
+      daysCount,
+      targetWorkingDays,
+      dateColumns,
+      rows: bestResultRows,
+      validation: bestReport,
+      seed: finalSeed,
+      excludedEmployees: options.excludedEmployees ?? [],
+      tier: minTier,
+      relaxations: bestRelaxations,
+      needsManualReview: false,
+      elapsedMs: Math.round(performance.now() - startTimeMs)
+    };
+  }
+
+  const stage2BestRows = bestReport ? bestResultRows : null;
+  const stage2BestSeed = finalSeed;
+
+  const tryStage2AtTier = (t: ComplianceTier): GeneratedScheduleResult | null => {
+    if (!stage2BestRows) return null;
+    const s2Relax: RelaxationRecord[] = [];
+    const s2Rep = validateScheduleCompliance(
+      stage2BestRows,
+      dateColumns,
+      roster,
+      targetYear,
+      targetMonth,
+      targetWorkingDays,
+      options.excludedEmployees ?? [],
+      { tier: t, relaxations: s2Relax }
+    );
+    if (s2Rep.isFullyCompliant) {
+      return {
+        month: targetMonth,
+        year: targetYear,
+        daysCount,
+        targetWorkingDays,
+        dateColumns,
+        rows: stage2BestRows,
+        validation: s2Rep,
+        seed: stage2BestSeed,
+        excludedEmployees: options.excludedEmployees ?? [],
+        tier: t,
+        relaxations: s2Relax,
+        needsManualReview: false,
+        elapsedMs: Math.round(performance.now() - startTimeMs)
+      };
+    }
+    return null;
+  };
+
+  interface FallbackAttempt {
+    rows: Record<string, Record<string, string>>;
+    seed: number;
+    handoffSafe: boolean;
+  }
+  const fallbackAttempts: FallbackAttempt[] = [];
+  if (stage2BestRows) {
+    fallbackAttempts.push({
+      rows: stage2BestRows,
+      seed: stage2BestSeed,
+      handoffSafe: bestHandoffSafe
+    });
+  }
+
+  // Stage 3: Exact Legal-Trajectory DP + Large Neighborhood Search across active tiers
+  if (rotatingEmployees.length > 0 && targetWorkingDays > 0 && targetWorkingDays <= daysCount) {
     const ACT_SHIFT = ['A', 'M', 'N', 'OFF'] as const;
     const NEXT_SH = [1, 2, 0]; // A(0)->M(1), M(1)->N(2), N(2)->A(0)
     const shToIdx = (s: string) => (s === 'A' ? 0 : s === 'M' ? 1 : s === 'N' ? 2 : 3);
-    const numStatesPerDay = (targetWorkingDays + 1) * 4 * 13;
-    const encState = (w: number, sh: number, ml: number) => (w * 4 + sh) * 13 + ml;
+    const numStatesPerDay = (targetWorkingDays + 1) * 4 * 13 * 2;
+    const encState = (w: number, sh: number, ml: number, sb: number) => ((w * 4 + sh) * 13 + ml) * 2 + sb;
 
     interface DagEdge {
       act: number;
@@ -2216,7 +2404,12 @@ export function generateBalancedSchedule(
       cNext: Int32Array[];
     }
 
-    const buildEmpDag = (history: string[], minNonNightRest: number): EmpDag => {
+    const buildEmpDag = (
+      history: string[],
+      minNonNightRest: number,
+      allowShortBlock2: boolean,
+      adjLeaveBefore: boolean
+    ): EmpDag => {
       const hasHistory = history.length > 0;
       const activeTailWork = getActiveTailBlock(history);
       const activeTailRest = activeTailWork.length === 0 ? getActiveTailRest(history) : [];
@@ -2237,33 +2430,39 @@ export function generateBalancedSchedule(
         let sameLen = 0;
         for (let i = activeTailWork.length - 1; i >= 0 && activeTailWork[i] === curShift; i--) sameLen++;
         if (totalWorkTail < 5 && targetWorkingDays >= 1) {
-          startEdges.push({ act: curIdx, nextState: encState(1, curIdx, totalWorkTail), pen: 0 });
+          const nextMl = adjLeaveBefore ? 5 + totalWorkTail : totalWorkTail;
+          startEdges.push({ act: curIdx, nextState: encState(1, curIdx, nextMl, 0), pen: 0 });
         }
-        if (sameLen >= 3) {
-          startEdges.push({ act: 3, nextState: encState(0, curIdx, 10), pen: 0 });
+        if (sameLen >= 3 || adjLeaveBefore) {
+          startEdges.push({ act: 3, nextState: encState(0, curIdx, 10, 0), pen: 0 });
         }
       } else if (hasHistory) {
         const restLen = activeTailRest.length;
         const lastIdx = lastHistWork ? shToIdx(lastHistWork) : 3;
         if (restLen < 3) {
-          startEdges.push({ act: 3, nextState: encState(0, lastIdx, 10 + restLen), pen: 0 });
+          startEdges.push({ act: 3, nextState: encState(0, lastIdx, 10 + restLen, 0), pen: 0 });
         }
-        if (targetWorkingDays >= 1 && (lastIdx === 3 || restLen >= (lastIdx === 2 ? 2 : minNonNightRest))) {
-          const pen = lastIdx !== 3 && lastIdx !== 2 && restLen === 1 ? 15 : 0;
+        const reqRest = lastIdx === 2 ? 2 : (adjLeaveBefore ? 1 : minNonNightRest);
+        if (targetWorkingDays >= 1 && (lastIdx === 3 || restLen >= reqRest)) {
+          const pen = lastIdx !== 3 && lastIdx !== 2 && restLen === 1 && !adjLeaveBefore ? 15 : 0;
+          const firstMl = adjLeaveBefore ? 5 : 0;
           if (lastIdx === 3) {
             for (const ns of [0, 1, 2]) {
-              startEdges.push({ act: ns, nextState: encState(1, ns, 0), pen: 0 });
+              startEdges.push({ act: ns, nextState: encState(1, ns, firstMl, 0), pen: 0 });
             }
           } else {
             const ns = NEXT_SH[lastIdx];
-            startEdges.push({ act: ns, nextState: encState(1, ns, 0), pen });
+            startEdges.push({ act: ns, nextState: encState(1, ns, firstMl, 0), pen });
+            if (adjLeaveBefore) {
+              startEdges.push({ act: lastIdx, nextState: encState(1, lastIdx, firstMl, 0), pen: 0 });
+            }
           }
         }
       } else {
-        startEdges.push({ act: 3, nextState: encState(0, 3, 10), pen: 0 });
+        startEdges.push({ act: 3, nextState: encState(0, 3, 10, 0), pen: 0 });
         if (targetWorkingDays >= 1) {
           for (const ns of [0, 1, 2]) {
-            startEdges.push({ act: ns, nextState: encState(1, ns, 5), pen: 0 });
+            startEdges.push({ act: ns, nextState: encState(1, ns, 5, 0), pen: 0 });
           }
         }
       }
@@ -2283,8 +2482,10 @@ export function generateBalancedSchedule(
       }
 
       const stepTransitions = (state: number): Array<{ act: number; nextState: number; pen: number }> => {
-        const ml = state % 13;
-        const tmp = (state - ml) / 13;
+        const sb = state & 1;
+        const t0 = state >> 1;
+        const ml = t0 % 13;
+        const tmp = (t0 - ml) / 13;
         const sh = tmp % 4;
         const w = (tmp - sh) / 4;
         const out: Array<{ act: number; nextState: number; pen: number }> = [];
@@ -2293,25 +2494,27 @@ export function generateBalancedSchedule(
           const isUnb = ml >= 5;
           const len = isUnb ? ml - 4 : ml + 1;
           if (len < 5 && w + 1 <= targetWorkingDays) {
-            out.push({ act: sh, nextState: encState(w + 1, sh, ml + 1), pen: 0 });
+            out.push({ act: sh, nextState: encState(w + 1, sh, ml + 1, sb), pen: 0 });
           }
           if (len >= 3 || isUnb) {
-            out.push({ act: 3, nextState: encState(w, sh, 10), pen: 0 });
+            out.push({ act: 3, nextState: encState(w, sh, 10, sb), pen: 0 });
+          } else if (allowShortBlock2 && len === 2 && sb === 0) {
+            out.push({ act: 3, nextState: encState(w, sh, 10, 1), pen: 25 });
           }
         } else {
           const len = ml - 9;
           if (len < 3) {
-            out.push({ act: 3, nextState: encState(w, sh, ml + 1), pen: 0 });
+            out.push({ act: 3, nextState: encState(w, sh, ml + 1, sb), pen: 0 });
           }
           if (w + 1 <= targetWorkingDays) {
             if (sh === 3) {
               for (const ns of [0, 1, 2]) {
-                out.push({ act: ns, nextState: encState(w + 1, ns, 0), pen: 0 });
+                out.push({ act: ns, nextState: encState(w + 1, ns, 0, sb), pen: 0 });
               }
             } else if (len >= (sh === 2 ? 2 : minNonNightRest)) {
               const ns = NEXT_SH[sh];
               const pen = sh !== 2 && len === 1 ? 15 : 0;
-              out.push({ act: ns, nextState: encState(w + 1, ns, 0), pen });
+              out.push({ act: ns, nextState: encState(w + 1, ns, 0, sb), pen });
             }
           }
         }
@@ -2334,11 +2537,13 @@ export function generateBalancedSchedule(
       const reachNext = new Int32Array(numStatesPerDay).fill(-1);
       let termIdx = 0;
       for (const st of activeStates[daysCount]) {
-        const ml = st % 13;
-        const tmp = (st - ml) / 13;
+        const sb = st & 1;
+        const t0 = st >> 1;
+        const ml = t0 % 13;
+        const tmp = (t0 - ml) / 13;
         const sh = tmp % 4;
         const w = (tmp - sh) / 4;
-        if (w === targetWorkingDays) {
+        if (w === targetWorkingDays && (sb === 0 || allowShortBlock2)) {
           reachNext[st] = termIdx++;
         }
       }
@@ -2394,17 +2599,6 @@ export function generateBalancedSchedule(
       return { layers, feasible: true, maxNodes, cAct, cNext };
     };
 
-    const covPenalty = (m: number, a: number, n: number, dayWeight: number = 1) => {
-      const hard =
-        (m < 1 ? 1500 * dayWeight * (1 - m) : 0) +
-        (a < 2 ? 1500 * dayWeight * (2 - a) : 0) +
-        (n !== 2 ? 1800 * dayWeight * Math.abs(n - 2) : 0);
-      const soft =
-        (m > 1 ? 10 * (m - 1) + (m > 2 ? 25 * (m - 2) : 0) : 0) +
-        (a > 2 ? 10 * (a - 2) + (a > 3 ? 25 * (a - 3) : 0) : 0);
-      return hard + soft;
-    };
-
     const dayCostScratch = new Float64Array(daysCount * 4);
     let dpNextBuf = new Float64Array(512);
     let dpCurBuf = new Float64Array(512);
@@ -2415,7 +2609,8 @@ export function generateBalancedSchedule(
       otherA: Int32Array,
       otherN: Int32Array,
       dayWeights: Float64Array | null,
-      noise: Float64Array | null
+      noise: Float64Array | null,
+      tier: ComplianceTier
     ): number[] => {
       if (dag.maxNodes > dpNextBuf.length) {
         dpNextBuf = new Float64Array(dag.maxNodes + 64);
@@ -2427,10 +2622,10 @@ export function generateBalancedSchedule(
         const n0 = otherN[d];
         const dw = dayWeights ? dayWeights[d] : 1;
         const base = d * 4;
-        dayCostScratch[base + 0] = covPenalty(m0, a0 + 1, n0, dw) + (noise ? noise[base + 0] : 0);
-        dayCostScratch[base + 1] = covPenalty(m0 + 1, a0, n0, dw) + (noise ? noise[base + 1] : 0);
-        dayCostScratch[base + 2] = covPenalty(m0, a0, n0 + 1, dw) + (noise ? noise[base + 2] : 0);
-        dayCostScratch[base + 3] = covPenalty(m0, a0, n0, dw) + (noise ? noise[base + 3] : 0);
+        dayCostScratch[base + 0] = tierCovPenalty(m0, a0 + 1, n0, dw, tier) + (noise ? noise[base + 0] : 0);
+        dayCostScratch[base + 1] = tierCovPenalty(m0 + 1, a0, n0, dw, tier) + (noise ? noise[base + 1] : 0);
+        dayCostScratch[base + 2] = tierCovPenalty(m0, a0, n0 + 1, dw, tier) + (noise ? noise[base + 2] : 0);
+        dayCostScratch[base + 3] = tierCovPenalty(m0, a0, n0, dw, tier) + (noise ? noise[base + 3] : 0);
       }
 
       const { layers, cAct: dpChoicesAct, cNext: dpChoicesNext } = dag;
@@ -2571,7 +2766,13 @@ export function generateBalancedSchedule(
       return sign === 1 ? dpNext[0] : -dpNext[0];
     };
 
-    const evalCovWeighted = (mArr: Int32Array, aArr: Int32Array, nArr: Int32Array, dayWeights: Float64Array | null) => {
+    const evalCovWeighted = (
+      mArr: Int32Array,
+      aArr: Int32Array,
+      nArr: Int32Array,
+      dayWeights: Float64Array | null,
+      tier: ComplianceTier
+    ) => {
       let hard = 0;
       let total = 0;
       let weightedTotal = 0;
@@ -2579,10 +2780,10 @@ export function generateBalancedSchedule(
         const m = mArr[d];
         const a = aArr[d] + fixedAfternoonCoverage[d];
         const n = nArr[d];
-        if (m < 1 || a < 2 || n !== 2) hard++;
-        const baseP = covPenalty(m, a, n, 1);
+        if (!isCoverageFeasibleForTier(m, a, n, tier)) hard++;
+        const baseP = tierCovPenalty(m, a, n, 1, tier);
         total += baseP;
-        weightedTotal += dayWeights ? covPenalty(m, a, n, dayWeights[d]) : baseP;
+        weightedTotal += dayWeights ? tierCovPenalty(m, a, n, dayWeights[d], tier) : baseP;
       }
       return { hard, total, weightedTotal };
     };
@@ -2616,27 +2817,28 @@ export function generateBalancedSchedule(
     const canDoShift = (dayActMasks: Uint8Array[], eIdx: number, d: number, act: number): boolean =>
       (dayActMasks[eIdx][d] & (1 << act)) !== 0;
 
-    const hasSufficientDagCapacity = (dags: EmpDag[], dayActMasks?: Uint8Array[]): boolean => {
-      const masks = dayActMasks ?? buildDayActMasks(dags);
+    const hasSufficientDagCapacity = (
+      dags: EmpDag[],
+      dayActMasks: Uint8Array[],
+      tier: ComplianceTier
+    ): boolean => {
+      const availM = new Int32Array(daysCount);
+      const availTotalA = new Int32Array(daysCount);
+      const availN = new Int32Array(daysCount);
       for (let d = 0; d < daysCount; d++) {
-        let availA = 0;
-        let availM = 0;
-        let availN = 0;
-        for (let i = 0; i < masks.length; i++) {
-          const mk = masks[i][d];
-          if (mk & 1) availA++;
-          if (mk & 2) availM++;
-          if (mk & 4) availN++;
+        let mCnt = 0;
+        let aCnt = fixedAfternoonCoverage[d];
+        let nCnt = 0;
+        for (let i = 0; i < dayActMasks.length; i++) {
+          const mk = dayActMasks[i][d];
+          if (mk & 1) aCnt++;
+          if (mk & 2) mCnt++;
+          if (mk & 4) nCnt++;
         }
-        if (availM < 1 || availA + fixedAfternoonCoverage[d] < 2 || availN < 2) return false;
+        availM[d] = mCnt;
+        availTotalA[d] = aCnt;
+        availN[d] = nCnt;
       }
-      const needM = daysCount;
-      let needRotA = 0;
-      for (let d = 0; d < daysCount; d++) {
-        if (fixedAfternoonCoverage[d] < 2) needRotA += 2 - fixedAfternoonCoverage[d];
-      }
-      const needN = daysCount * 2;
-      const totalSlots = dags.length * targetWorkingDays;
       let sumMinA = 0, sumMaxA = 0, sumMinM = 0, sumMaxM = 0, sumMinN = 0, sumMaxN = 0;
       for (let i = 0; i < dags.length; i++) {
         sumMinA += solveStage3ExtremeCount(dags[i], 0, 1);
@@ -2646,11 +2848,21 @@ export function generateBalancedSchedule(
         sumMinN += solveStage3ExtremeCount(dags[i], 2, 1);
         sumMaxN += solveStage3ExtremeCount(dags[i], 2, -1);
       }
-      if (sumMaxM < needM || sumMaxA < needRotA || sumMaxN < needN || sumMinN > needN) return false;
-      if (sumMinM + needRotA + needN > totalSlots) return false;
-      if (sumMinA + needM + needN > totalSlots) return false;
-      if (sumMinN + needM + needRotA > totalSlots) return false;
-      return true;
+      return canSatisfyDailyCapacityForTier({
+        tier,
+        daysCount,
+        totalRotSlots: dags.length * targetWorkingDays,
+        availM,
+        availTotalA,
+        availN,
+        fixedMaxA: fixedAfternoonCoverage,
+        sumMinRotA: sumMinA,
+        sumMaxRotA: sumMaxA,
+        sumMinM,
+        sumMaxM,
+        sumMinN,
+        sumMaxN
+      });
     };
 
     const selectStage3RuinGroup = (
@@ -2660,33 +2872,40 @@ export function generateBalancedSchedule(
       curA: Int32Array,
       curN: Int32Array,
       paths: number[][],
-      dayActMasks: Uint8Array[]
+      dayActMasks: Uint8Array[],
+      tier: ComplianceTier
     ): number[] => {
       shuffleStage3(empPool);
       if (nextRand() < 0.2) {
         return empPool.slice(0, k);
       }
+      const cfg = getTierConfig(tier);
+      const minReqM = cfg.allowCoverageGapMA ? 0 : 1;
+      const minReqA = cfg.allowCoverageGapMA ? 1 : 2;
+      const maxReqN = cfg.allowNightOver2 ? 3 : 2;
       const needAct =
         curN[focusDay] < 2
           ? 2
-          : curM[focusDay] < 1
+          : curM[focusDay] < minReqM
             ? 1
-            : curA[focusDay] + fixedAfternoonCoverage[focusDay] < 2
+            : curA[focusDay] + fixedAfternoonCoverage[focusDay] < minReqA
               ? 0
-              : -1;
+              : curN[focusDay] > maxReqN
+                ? -1
+                : -2;
       const helpers: number[] = [];
       const capable: number[] = [];
       const others: number[] = [];
       for (let idx = 0; idx < empPool.length; idx++) {
         const e = empPool[idx];
-        if (needAct !== -1) {
+        if (needAct >= 0) {
           if (canDoShift(dayActMasks, e, focusDay, needAct)) {
             if (paths[e][focusDay] !== needAct) helpers.push(e);
             else capable.push(e);
           } else {
             others.push(e);
           }
-        } else if (paths[e][focusDay] === 2 && (dayActMasks[e][focusDay] & ~4) !== 0) {
+        } else if (needAct === -1 && paths[e][focusDay] === 2 && (dayActMasks[e][focusDay] & ~4) !== 0) {
           helpers.push(e);
         } else {
           others.push(e);
@@ -2704,27 +2923,173 @@ export function generateBalancedSchedule(
     };
 
     const R = rotatingEmployees.length;
-    const priorBestPaths = rotatingEmployees.map((emp) =>
-      dateColumns.map(({ isoDate }) => shToIdx(shiftKey(bestResultRows[emp]?.[isoDate] ?? 'OFF')))
-    );
+    const LEAVE_CODES = new Set(['ABS', 'H8', 'CM']);
+    const stage3EmpData = rotatingEmployees.map((emp) => {
+      const rawHist = rotatingRawHistories[emp] ?? [];
+      const sanitizedHist = rawHist.map((s) =>
+        s === 'HUP' || s === 'H8' || s === 'ABS' || s === 'AD' || s === 'CM' ? 'OFF' : s
+      );
+      const activeTailWork = getActiveTailBlock(sanitizedHist);
+      const idxBefore = rawHist.length - 1 - activeTailWork.length;
+      const adjLeaveBefore = idxBefore >= 0 && LEAVE_CODES.has(rawHist[idxBefore]);
+      return { sanitizedHist, adjLeaveBefore };
+    });
+
+    const priorBestPaths = stage2BestRows
+      ? rotatingEmployees.map((emp) =>
+          dateColumns.map(({ isoDate }) => shToIdx(shiftKey(stage2BestRows[emp]?.[isoDate] ?? 'OFF')))
+        )
+      : [];
     const dayWeights = new Float64Array(daysCount);
     const noise = new Float64Array(daysCount * 4);
     const empPool = Array.from({ length: R }, (_, i) => i);
 
-    for (const minRest of [2, 1]) {
-      if (bestReport?.isFullyCompliant && bestHandoffSafe) break;
-      if (bestReport?.isFullyCompliant && minRest === 1) break;
-      const dags = rotatingEmployees.map((emp) => buildEmpDag(rotatingHistories[emp], minRest));
-      if (dags.some((g) => !g.feasible)) continue;
-      const dayActMasks = buildDayActMasks(dags);
-      if (!hasSufficientDagCapacity(dags, dayActMasks)) continue;
+    let hasDagFallback = false;
+    const addQuickDagFallback = (dags: EmpDag[], tier: ComplianceTier, fallbackSeed: number) => {
+      if (hasDagFallback || dags.some((g) => !g.feasible)) return;
+      const curM = new Int32Array(daysCount);
+      const curA = new Int32Array(daysCount);
+      const curN = new Int32Array(daysCount);
+      const paths: number[][] = new Array(R);
+      const order = Array.from({ length: R }, (_, i) => i);
+      shuffleStage3(order);
+      for (let oi = 0; oi < R; oi++) {
+        const eIdx = order[oi];
+        for (let k = 0; k < noise.length; k++) noise[k] = nextRand() * 6;
+        const p = solveBestPath(dags[eIdx], curM, curA, curN, null, noise, tier);
+        paths[eIdx] = p;
+        addPath(p, 1, curM, curA, curN);
+      }
+      for (let sweep = 0; sweep < 2; sweep++) {
+        let changed = false;
+        for (let oi = 0; oi < R; oi++) {
+          const eIdx = order[(oi + sweep) % R];
+          const oldP = paths[eIdx];
+          const before = evalCovWeighted(curM, curA, curN, null, tier).weightedTotal;
+          addPath(oldP, -1, curM, curA, curN);
+          const newP = solveBestPath(dags[eIdx], curM, curA, curN, null, null, tier);
+          addPath(newP, 1, curM, curA, curN);
+          const after = evalCovWeighted(curM, curA, curN, null, tier).weightedTotal;
+          if (after < before) {
+            paths[eIdx] = newP;
+            changed = true;
+          } else if (after > before) {
+            addPath(newP, -1, curM, curA, curN);
+            addPath(oldP, 1, curM, curA, curN);
+          } else {
+            paths[eIdx] = newP;
+          }
+        }
+        if (!changed) break;
+      }
+      const candidateRows = buildRowsFromPaths(paths);
+      fallbackAttempts.push({
+        rows: candidateRows,
+        seed: fallbackSeed,
+        handoffSafe: isMonthEndHandoffSafe(candidateRows)
+      });
+      hasDagFallback = true;
+    };
 
-      const canSeedStage2 = !bestReport?.isFullyCompliant && priorBestPaths.every((p, idx) => isStage3PathValid(dags[idx], p));
-      const numRestarts = minRest === 2 ? 6 : 5;
+    for (let ti = 0; ti < activeTiers.length; ti++) {
+      const tier = activeTiers[ti];
+      const cfg = getTierConfig(tier);
+      const dags = stage3EmpData.map(({ sanitizedHist, adjLeaveBefore }) =>
+        buildEmpDag(sanitizedHist, cfg.minRest, cfg.allowShortBlock2, cfg.allowShortBlock2 && adjLeaveBefore)
+      );
+      if (dags.some((g) => !g.feasible)) {
+        const s2Hit = tryStage2AtTier(tier);
+        if (s2Hit) return s2Hit;
+        continue;
+      }
+
+      const nowMs = performance.now();
+      if (nowMs >= totalDeadlineMs) {
+        addQuickDagFallback(dags, tier, seed);
+        for (let tj = ti; tj < activeTiers.length; tj++) {
+          const s2Hit = tryStage2AtTier(activeTiers[tj]);
+          if (s2Hit) return s2Hit;
+        }
+        break;
+      }
+
+      const remBudgetMs = Math.max(0, totalDeadlineMs - nowMs);
+      const remShares = activeTiers
+        .slice(ti)
+        .reduce((sum, t) => sum + getTierConfig(t).budgetShare, 0);
+      const tierAllocMs = remShares > 0 ? (remBudgetMs * cfg.budgetShare) / remShares : remBudgetMs;
+      const tierDeadlineMs = Math.min(totalDeadlineMs, nowMs + tierAllocMs);
+
+      const dayActMasks = buildDayActMasks(dags);
+      if (!hasSufficientDagCapacity(dags, dayActMasks, tier)) {
+        if (ti === activeTiers.length - 1 || !hasDagFallback) {
+          addQuickDagFallback(dags, tier, seed);
+        }
+        const s2Hit = tryStage2AtTier(tier);
+        if (s2Hit) return s2Hit;
+        continue;
+      }
+
+      const canSeedStage2 =
+        priorBestPaths.length === R &&
+        priorBestPaths.every((p, idx) => isStage3PathValid(dags[idx], p));
+      const numRestarts = tier === 0 ? 6 : tier === 1 ? 3 : 10;
       let compliantRestarts = 0;
+      let tierBestWinner: {
+        rows: Record<string, Record<string, string>>;
+        report: ScheduleValidationReport;
+        relaxations: RelaxationRecord[];
+        handoffSafe: boolean;
+        seed: number;
+        score: number;
+      } | null = null;
+
+      if (stage2BestRows) {
+        const s2Relax: RelaxationRecord[] = [];
+        const s2Rep = validateScheduleCompliance(
+          stage2BestRows,
+          dateColumns,
+          roster,
+          targetYear,
+          targetMonth,
+          targetWorkingDays,
+          options.excludedEmployees ?? [],
+          { tier, relaxations: s2Relax }
+        );
+        if (s2Rep.isFullyCompliant) {
+          const s2Safe = isMonthEndHandoffSafe(stage2BestRows);
+          tierBestWinner = {
+            rows: stage2BestRows,
+            report: s2Rep,
+            relaxations: s2Relax,
+            handoffSafe: s2Safe,
+            seed: stage2BestSeed,
+            score: (s2Safe ? 0 : 10000) + s2Relax.length * 10
+          };
+          if (s2Safe) {
+            return {
+              month: targetMonth,
+              year: targetYear,
+              daysCount,
+              targetWorkingDays,
+              dateColumns,
+              rows: tierBestWinner.rows,
+              validation: tierBestWinner.report,
+              seed: tierBestWinner.seed,
+              excludedEmployees: options.excludedEmployees ?? [],
+              tier,
+              relaxations: tierBestWinner.relaxations,
+              needsManualReview: false,
+              elapsedMs: Math.round(performance.now() - startTimeMs)
+            };
+          }
+        }
+      }
+
       for (let restart = 0; restart < numRestarts; restart++) {
-        if (bestReport?.isFullyCompliant && bestHandoffSafe) break;
-        if (bestReport?.isFullyCompliant && compliantRestarts >= 3) break;
+        if (performance.now() >= tierDeadlineMs) break;
+        if (tierBestWinner?.handoffSafe) break;
+        if (tierBestWinner && (compliantRestarts >= 3 || restart >= 4)) break;
 
         dayWeights.fill(1);
         let paths: number[][] = new Array(R);
@@ -2748,7 +3113,7 @@ export function generateBalancedSchedule(
             } else {
               for (let k = 0; k < noise.length; k++) noise[k] = nextRand() * (restart === 0 ? 10 : 8);
             }
-            const p = solveBestPath(dags[eIdx], curM, curA, curN, null, noise);
+            const p = solveBestPath(dags[eIdx], curM, curA, curN, null, noise, tier);
             paths[eIdx] = p;
             addPath(p, 1, curM, curA, curN);
           }
@@ -2762,11 +3127,11 @@ export function generateBalancedSchedule(
             for (let oi = 0; oi < R; oi++) {
               const eIdx = order[(oi + sweep) % R];
               const oldP = paths[eIdx];
-              const before = evalCovWeighted(curM, curA, curN, wArr).weightedTotal;
+              const before = evalCovWeighted(curM, curA, curN, wArr, tier).weightedTotal;
               addPath(oldP, -1, curM, curA, curN);
-              const newP = solveBestPath(dags[eIdx], curM, curA, curN, wArr, null);
+              const newP = solveBestPath(dags[eIdx], curM, curA, curN, wArr, null, tier);
               addPath(newP, 1, curM, curA, curN);
-              const after = evalCovWeighted(curM, curA, curN, wArr).weightedTotal;
+              const after = evalCovWeighted(curM, curA, curN, wArr, tier).weightedTotal;
               if (after < before) {
                 paths[eIdx] = newP;
                 changed = true;
@@ -2786,7 +3151,7 @@ export function generateBalancedSchedule(
         }
 
         // Multi-employee Ruin-and-Recreate Simulated Annealing + Guided Local Search dayWeights
-        let curEval = evalCovWeighted(curM, curA, curN, dayWeights);
+        let curEval = evalCovWeighted(curM, curA, curN, dayWeights, tier);
         let bestRestartHard = curEval.hard;
         let bestRestartTotal = curEval.total;
         let bestRestartPaths = paths.map((p) => p);
@@ -2795,9 +3160,11 @@ export function generateBalancedSchedule(
         const cool = 0.994;
         const saSteps = curEval.hard > 0 ? 1500 : 0;
         for (let step = 0; step < saSteps && bestRestartHard > 0; step++) {
+          if ((step & 15) === 0 && performance.now() >= tierDeadlineMs) break;
+
           const badDays: number[] = [];
           for (let d = 0; d < daysCount; d++) {
-            if (curM[d] < 1 || curA[d] + fixedAfternoonCoverage[d] < 2 || curN[d] !== 2) {
+            if (!isCoverageFeasibleForTier(curM[d], curA[d] + fixedAfternoonCoverage[d], curN[d], tier)) {
               badDays.push(d);
             }
           }
@@ -2811,12 +3178,12 @@ export function generateBalancedSchedule(
             if (step % 210 === 0) {
               for (let d = 0; d < daysCount; d++) dayWeights[d] = 1 + (dayWeights[d] - 1) * 0.5;
             }
-            curEval = evalCovWeighted(curM, curA, curN, dayWeights);
+            curEval = evalCovWeighted(curM, curA, curN, dayWeights, tier);
           }
 
           const focusDay = badDays[Math.floor(nextRand() * badDays.length)];
           const k = Math.min(R, step % 3 === 0 ? 3 : 2);
-          const ruinGroup = selectStage3RuinGroup(focusDay, k, curM, curA, curN, paths, dayActMasks);
+          const ruinGroup = selectStage3RuinGroup(focusDay, k, curM, curA, curN, paths, dayActMasks, tier);
 
           const savedSub: number[][] = ruinGroup.map((idx) => paths[idx]);
 
@@ -2835,16 +3202,16 @@ export function generateBalancedSchedule(
             } else {
               for (let nk = 0; nk < noise.length; nk++) noise[nk] = nextRand() * (4 + noiseAmp * 0.25);
             }
-            const newP = solveBestPath(dags[eIdx], curM, curA, curN, dayWeights, noise);
+            const newP = solveBestPath(dags[eIdx], curM, curA, curN, dayWeights, noise, tier);
             paths[eIdx] = newP;
             addPath(newP, 1, curM, curA, curN);
           }
 
-          let nextEval = evalCovWeighted(curM, curA, curN, dayWeights);
+          let nextEval = evalCovWeighted(curM, curA, curN, dayWeights, tier);
           const improvedRecord = nextEval.hard < bestRestartHard;
           if (improvedRecord) {
             runSweeps(2, true);
-            nextEval = evalCovWeighted(curM, curA, curN, dayWeights);
+            nextEval = evalCovWeighted(curM, curA, curN, dayWeights, tier);
           }
 
           const delta = nextEval.weightedTotal - curEval.weightedTotal;
@@ -2884,6 +3251,7 @@ export function generateBalancedSchedule(
         runSweeps(2, false);
 
         const candidateRows = buildRowsFromPaths(paths);
+        const candRelax: RelaxationRecord[] = [];
         const testReport = validateScheduleCompliance(
           candidateRows,
           dateColumns,
@@ -2891,36 +3259,119 @@ export function generateBalancedSchedule(
           targetYear,
           targetMonth,
           targetWorkingDays,
-          options.excludedEmployees ?? []
+          options.excludedEmployees ?? [],
+          { tier, relaxations: candRelax }
         );
-        const curHandoffSafe = testReport.isFullyCompliant ? isMonthEndHandoffSafe(candidateRows) : false;
-        const curScore = scoreReport(testReport, curHandoffSafe);
+        const curHandoffSafe = isMonthEndHandoffSafe(candidateRows);
+        fallbackAttempts.push({
+          rows: candidateRows,
+          seed: seed + restart,
+          handoffSafe: curHandoffSafe
+        });
+        hasDagFallback = true;
 
-        if (testReport.isFullyCompliant) compliantRestarts++;
-
-        if (!bestReport || curScore < bestScoreValue) {
-          bestResultRows = candidateRows;
-          bestReport = testReport;
-          bestScoreValue = curScore;
-          bestHandoffSafe = curHandoffSafe;
-          finalSeed = seed + restart;
-          if (testReport.isFullyCompliant && curHandoffSafe) {
-            break;
+        if (testReport.isFullyCompliant) {
+          compliantRestarts++;
+          const wScore = (curHandoffSafe ? 0 : 10000) + candRelax.length * 10;
+          if (!tierBestWinner || wScore < tierBestWinner.score) {
+            tierBestWinner = {
+              rows: candidateRows,
+              report: testReport,
+              relaxations: candRelax,
+              handoffSafe: curHandoffSafe,
+              seed: seed + restart,
+              score: wScore
+            };
+            if (curHandoffSafe) break;
           }
         }
       }
-      // If minRest = 2 found a fully compliant solution (even if handoffSafe was false), do not downgrade to 1-day rests
-      if (bestReport?.isFullyCompliant) break;
+
+      if (!hasDagFallback) {
+        addQuickDagFallback(dags, tier, seed);
+      }
+
+      if (tierBestWinner) {
+        return {
+          month: targetMonth,
+          year: targetYear,
+          daysCount,
+          targetWorkingDays,
+          dateColumns,
+          rows: tierBestWinner.rows,
+          validation: tierBestWinner.report,
+          seed: tierBestWinner.seed,
+          excludedEmployees: options.excludedEmployees ?? [],
+          tier,
+          relaxations: tierBestWinner.relaxations,
+          needsManualReview: false,
+          elapsedMs: Math.round(performance.now() - startTimeMs)
+        };
+      }
+
+      const s2Hit = tryStage2AtTier(tier);
+      if (s2Hit) return s2Hit;
     }
   }
-  const validation = bestReport ?? validateScheduleCompliance(
-    bestResultRows,
+
+  // No active tier achieved totalViolations === 0 (or Stage 3 skipped):
+  // pick best attempt prioritizing 0 hard H1-H8 violations, then lowest totalViolations at maxTier.
+  let chosenFallback: FallbackAttempt | null = null;
+  let chosenScore = Infinity;
+  for (const att of fallbackAttempts) {
+    const hardRep = validateScheduleCompliance(
+      att.rows,
+      dateColumns,
+      roster,
+      targetYear,
+      targetMonth,
+      targetWorkingDays,
+      options.excludedEmployees ?? [],
+      { tier: 3 }
+    );
+    const maxRep = maxTier === 3
+      ? hardRep
+      : validateScheduleCompliance(
+          att.rows,
+          dateColumns,
+          roster,
+          targetYear,
+          targetMonth,
+          targetWorkingDays,
+          options.excludedEmployees ?? [],
+          { tier: maxTier }
+        );
+    const hardLegal =
+      hardRep.streakViolationCount +
+      hardRep.nightRestViolationCount +
+      hardRep.excessiveRestViolationCount +
+      hardRep.mixedBlockViolationCount +
+      hardRep.workDaysMismatchCount +
+      (hardRep.fixedStaffViolationCount ?? 0);
+    const covTier3 = hardRep.understaffedDaysCount + hardRep.nightOverstaffedDaysCount;
+    const sc =
+      hardLegal * 1e9 +
+      covTier3 * 1e5 +
+      maxRep.totalViolations * 100 +
+      (att.handoffSafe ? 0 : 1);
+    if (!chosenFallback || sc < chosenScore) {
+      chosenFallback = att;
+      chosenScore = sc;
+    }
+  }
+
+  const finalRows = chosenFallback?.rows ?? bestResultRows;
+  const finalOutSeed = chosenFallback?.seed ?? finalSeed;
+  const finalRelax: RelaxationRecord[] = [];
+  const validation = validateScheduleCompliance(
+    finalRows,
     dateColumns,
     roster,
     targetYear,
     targetMonth,
     targetWorkingDays,
-    options.excludedEmployees ?? []
+    options.excludedEmployees ?? [],
+    { tier: maxTier, relaxations: finalRelax }
   );
 
   return {
@@ -2929,10 +3380,14 @@ export function generateBalancedSchedule(
     daysCount,
     targetWorkingDays,
     dateColumns,
-    rows: bestResultRows,
+    rows: finalRows,
     validation,
-    seed: finalSeed,
-    excludedEmployees: options.excludedEmployees ?? []
+    seed: finalOutSeed,
+    excludedEmployees: options.excludedEmployees ?? [],
+    tier: maxTier,
+    relaxations: finalRelax,
+    needsManualReview: !validation.isFullyCompliant,
+    elapsedMs: Math.round(performance.now() - startTimeMs)
   };
 }
 
@@ -4084,7 +4539,7 @@ export function calculateAbsReadjustments(
     return shiftKey(src[emp]?.[iso] ?? 'OFF');
   };
 
-  // Penalty evaluation function using validateScheduleCompliance
+  // Penalty evaluation function using validateScheduleCompliance (strict Tier 0 in Sections 1-4)
   const evaluatePenalty = (testRows: Record<string, Record<string, string>>) => {
     const rep = validateScheduleCompliance(
       testRows,
@@ -4092,7 +4547,9 @@ export function calculateAbsReadjustments(
       priorRoster,
       targetYear,
       targetMonth,
-      targetWorkingDays
+      targetWorkingDays,
+      [],
+      { tier: 0 }
     );
     const penalty =
       rep.totalViolations * 1000 +
@@ -4454,34 +4911,7 @@ export function calculateAbsReadjustments(
         }
       }
 
-      // Category 2: George Tir (if weekday & not holiday)
-      if (FIXED_WEEKDAY_MA_EMPLOYEES.length > 0) {
-        const dayOfWeek = col.date.getDay();
-        const isWk = dayOfWeek === 0 || dayOfWeek === 6;
-        const isHol = ROMANIAN_HOLIDAYS.has(isoDate);
-        if (!isWk && !isHol) {
-          for (const gt of FIXED_WEEKDAY_MA_EMPLOYEES) {
-            if (getShift(workingRows, gt, isoDate) === 'A') {
-              const changes: CandidatePlan['changes'] = [
-                {
-                  isoDate,
-                  employee: gt,
-                  fromShift: 'A',
-                  toShift: 'M',
-                  reason: `Fixed weekday M/A colleague switched from Afternoon to Morning to cover sick colleague.`,
-                  absColleague: absNames
-                }
-              ];
-              const test = cloneRows(workingRows);
-              test[gt][isoDate] = 'M';
-              const { penalty, rep } = evaluatePenalty(test);
-              plans.push({ changes, penalty, violations: rep.totalViolations });
-            }
-          }
-        }
-      }
-
-      // Category 3: OFF staff
+      // Category 2: OFF staff
       const eligibleOff = offStaff.filter((emp) => getShift(workingRows, emp, prevIso) !== 'N');
       eligibleOff.sort((a, b) => {
         if (a.includes('Urzica')) return -1;
@@ -4597,34 +5027,7 @@ export function calculateAbsReadjustments(
         }
       }
 
-      // Category 2: George Tir (if weekday & not holiday)
-      if (FIXED_WEEKDAY_MA_EMPLOYEES.length > 0) {
-        const dayOfWeek = col.date.getDay();
-        const isWk = dayOfWeek === 0 || dayOfWeek === 6;
-        const isHol = ROMANIAN_HOLIDAYS.has(isoDate);
-        if (!isWk && !isHol) {
-          for (const gt of FIXED_WEEKDAY_MA_EMPLOYEES) {
-            if (getShift(workingRows, gt, isoDate) === 'M') {
-              const changes: CandidatePlan['changes'] = [
-                {
-                  isoDate,
-                  employee: gt,
-                  fromShift: 'M',
-                  toShift: 'A',
-                  reason: `Fixed weekday M/A colleague switched from Morning to Afternoon to cover sick colleague.`,
-                  absColleague: absNames
-                }
-              ];
-              const test = cloneRows(workingRows);
-              test[gt][isoDate] = 'A';
-              const { penalty, rep } = evaluatePenalty(test);
-              plans.push({ changes, penalty, violations: rep.totalViolations });
-            }
-          }
-        }
-      }
-
-      // Category 3: OFF staff
+      // Category 2: OFF staff (keep fixed weekday M/A parity intact)
       const eligibleOff = offStaff.filter((emp) => getShift(workingRows, emp, prevIso) !== 'N');
       for (const emp of eligibleOff) {
         const preChanges: CandidatePlan['changes'] = [
@@ -4684,15 +5087,19 @@ export function calculateAbsReadjustments(
   }
 
   // ---------------------------------------------------------------------------
-  // 4. GLOBAL REBALANCING POST-PASS (Eliminate any remaining warnings)
+  // 4. GLOBAL REBALANCING POST-PASS (Eliminate any remaining warnings at Tier 0)
   // ---------------------------------------------------------------------------
+  let finalTier: ComplianceTier = 0;
+  let finalRelaxations: RelaxationRecord[] = [];
   let currentValidation = validateScheduleCompliance(
     workingRows,
     dateColumns,
     priorRoster,
     targetYear,
     targetMonth,
-    targetWorkingDays
+    targetWorkingDays,
+    [],
+    { tier: 0 }
   );
 
   let improved = true;
@@ -4727,7 +5134,9 @@ export function calculateAbsReadjustments(
               priorRoster,
               targetYear,
               targetMonth,
-              targetWorkingDays
+              targetWorkingDays,
+              [],
+              { tier: 0 }
             );
 
             if (testRep.totalViolations < currentValidation.totalViolations) {
@@ -4755,9 +5164,13 @@ export function calculateAbsReadjustments(
   }
 
   // ---------------------------------------------------------------------------
-  // 5. EXACT MINIMAL-DIFF DP+SA FALLBACK REPAIR (when heuristics leave violations)
+  // 5. EXACT MINIMAL-DIFF DP+SA FALLBACK REPAIR ACROSS TIERS [0, 1, 2, 3]
   // ---------------------------------------------------------------------------
   if (currentValidation.totalViolations > 0 && rotatingEmployees.length > 0) {
+    const s5StartMs = performance.now();
+    const s5BudgetMs = 3500;
+    const s5DeadlineMs = s5StartMs + s5BudgetMs - 100;
+    const absTiers: ComplianceTier[] = [0, 1, 2, 3];
     const daysCount = dateColumns.length;
     const GEN_NEXT = [1, 2, 0]; // A(0)->M(1), M(1)->N(2), N(2)->A(0)
     const shToGen = (s: string) => (s === 'A' ? 0 : s === 'M' ? 1 : s === 'N' ? 2 : s === 'ABS' ? 4 : (s === 'H8' || s === 'HUP') ? 5 : 3);
@@ -4788,17 +5201,10 @@ export function calculateAbsReadjustments(
     if (firstGlobalAbsIdx === daysCount) firstGlobalAbsIdx = 0;
     const hasDistinctEmpAbsStarts = empFirstAbsIndices.some((idx) => idx > firstGlobalAbsIdx);
 
-    // Extract raw history from priorRoster preserving ABS/H8/OFF/work sequence
+    // Extract raw 6-day contiguous history from priorRoster preserving ABS/H8/CM/OFF/work sequence
     const empHistories: Record<string, string[]> = {};
     for (const emp of rotatingEmployees) {
-      const h: string[] = [];
-      if (priorRoster && priorRoster.dateColumns.length > 0) {
-        const tailCols = priorRoster.dateColumns.slice(-7);
-        for (const tc of tailCols) {
-          h.push(shiftKey(priorRoster.rows[emp]?.[tc.isoDate] ?? 'OFF'));
-        }
-      }
-      empHistories[emp] = h;
+      empHistories[emp] = extractRawHistoryTail(priorRoster, emp, targetYear, targetMonth, 6);
     }
 
     interface GenEdge {
@@ -4824,19 +5230,8 @@ export function calculateAbsReadjustments(
       const origActs = origCodes.map((c) => (c === 'A' ? 0 : 3));
       const layers: GenEdge[][][] = new Array(daysCount);
       for (let d = 0; d < daysCount; d++) {
-        const col = dateColumns[d];
-        const isWorkWeekday = !isFixedStaffOffDate(col.date, col.isoDate);
-        const orig = origCodes[d];
-        const edges: GenEdge[] = [];
-        if (isWorkWeekday && orig === 'M') {
-          edges.push({ act: 3, nextNode: 0, penA: 0, penB: 0 });
-          const flipPenA = d < firstGlobalAbsIdx ? 35 : 4;
-          const flipPenB = d < firstGlobalAbsIdx ? 400 : 40;
-          edges.push({ act: 0, nextNode: 0, penA: flipPenA, penB: flipPenB });
-        } else {
-          edges.push({ act: orig === 'A' ? 0 : 3, nextNode: 0, penA: 0, penB: 0 });
-        }
-        layers[d] = [edges];
+        // Lock Tir strictly to origActs[d] to preserve H6 ISO-week M/A parity and leave/off days
+        layers[d] = [[{ act: origActs[d], nextNode: 0, penA: 0, penB: 0 }]];
       }
       return {
         emp,
@@ -4851,10 +5246,13 @@ export function calculateAbsReadjustments(
       };
     };
 
+    const LEAVE_CODES = new Set(['ABS', 'H8', 'CM']);
+
     const buildGeneralDag = (
       emp: string,
       empIdx: number,
       minNonNightRest: number,
+      allowShortBlock2: boolean,
       lockMode: 'globalPre' | 'empPre' | 'none'
     ): GenDag => {
       const origCodes = dateColumns.map(({ isoDate }) => shiftKey(rows[emp]?.[isoDate] ?? 'OFF'));
@@ -4907,12 +5305,18 @@ export function calculateAbsReadjustments(
         return { penA: restPen + 3 + tie, penB: restPen * 2 + 45 + tie };
       };
 
-      const numStates = (effectiveTarget + 1) * 4 * 13 * 4;
-      const enc = (w: number, sh: number, ml: number, offS: number) => (((w * 4 + sh) * 13 + ml) * 4 + offS);
+      const numStates = (effectiveTarget + 1) * 4 * 13 * 4 * 2;
+      const enc = (w: number, sh: number, ml: number, offS: number, sb: number) =>
+        (((w * 4 + sh) * 13 + ml) * 4 + offS) * 2 + sb;
 
-      const history = empHistories[emp] ?? [];
+      const rawHistory = empHistories[emp] ?? [];
+      const history = rawHistory.map((s) =>
+        s === 'HUP' || s === 'H8' || s === 'ABS' || s === 'AD' || s === 'CM' ? 'OFF' : s
+      );
       const activeTailWork = getActiveTailBlock(history);
       const activeTailRest = activeTailWork.length === 0 ? getActiveTailRest(history) : [];
+      const idxBefore = rawHistory.length - 1 - activeTailWork.length;
+      const adjLeaveBefore = idxBefore >= 0 && LEAVE_CODES.has(rawHistory[idxBefore]);
       let lastHistWork: string | null = null;
       for (let i = history.length - 1; i >= 0; i--) {
         if (history[i] === 'A' || history[i] === 'M' || history[i] === 'N') {
@@ -4932,63 +5336,68 @@ export function calculateAbsReadjustments(
         if (curIdx <= 2) {
           if (totalWorkTail < 5 && 1 <= effectiveTarget && allowed0.includes(curIdx)) {
             const p = edgePens(0, curIdx, 0);
-            startEdges.push({ act: curIdx, nextState: enc(1, curIdx, totalWorkTail, 0), ...p });
+            const nextMl = adjLeaveBefore ? 5 + totalWorkTail : totalWorkTail;
+            startEdges.push({ act: curIdx, nextState: enc(1, curIdx, nextMl, 0, 0), ...p });
           }
-          if (sameLen >= 3) {
+          if (sameLen >= 3 || adjLeaveBefore) {
             if (allowed0.includes(3)) {
-              startEdges.push({ act: 3, nextState: enc(0, curIdx, 10, 1), ...edgePens(0, 3, 0) });
+              startEdges.push({ act: 3, nextState: enc(0, curIdx, 10, 1, 0), ...edgePens(0, 3, 0) });
             }
-            if (allowed0.includes(4)) {
-              startEdges.push({ act: 4, nextState: enc(0, curIdx, 10, 0), ...edgePens(0, 4, 0) });
-            }
-            if (allowed0.includes(5)) {
-              startEdges.push({ act: 5, nextState: enc(0, curIdx, 10, 0), ...edgePens(0, 5, 0) });
-            }
+          }
+          if (allowed0.includes(4)) {
+            startEdges.push({ act: 4, nextState: enc(0, curIdx, 10, 0, 0), ...edgePens(0, 4, 0) });
+          }
+          if (allowed0.includes(5)) {
+            startEdges.push({ act: 5, nextState: enc(0, curIdx, 10, 0, 0), ...edgePens(0, 5, 0) });
           }
         }
       } else if (history.length > 0) {
         const restLen = activeTailRest.length;
         const lastIdx = lastHistWork ? shToGen(lastHistWork) : 3;
-        const initOffS = Math.min(3, restLen);
         const initMl = Math.min(12, 10 + restLen);
         if (restLen < 3 && allowed0.includes(3)) {
-          startEdges.push({ act: 3, nextState: enc(0, lastIdx, initMl, restLen + 1), ...edgePens(0, 3, 0) });
+          startEdges.push({ act: 3, nextState: enc(0, lastIdx, initMl, restLen + 1, 0), ...edgePens(0, 3, 0) });
         }
         if (allowed0.includes(4)) {
-          startEdges.push({ act: 4, nextState: enc(0, lastIdx, initMl, initOffS), ...edgePens(0, 4, 0) });
+          startEdges.push({ act: 4, nextState: enc(0, lastIdx, initMl, 0, 0), ...edgePens(0, 4, 0) });
         }
         if (allowed0.includes(5)) {
-          startEdges.push({ act: 5, nextState: enc(0, lastIdx, initMl, 0), ...edgePens(0, 5, 0) });
+          startEdges.push({ act: 5, nextState: enc(0, lastIdx, initMl, 0, 0), ...edgePens(0, 5, 0) });
         }
-        if (1 <= effectiveTarget && (lastIdx === 3 || restLen >= (lastIdx === 2 ? 2 : minNonNightRest))) {
-          const rPen = lastIdx !== 3 && lastIdx !== 2 && restLen === 1 ? 15 : 0;
+        const reqRest = lastIdx === 2 ? 2 : (adjLeaveBefore ? 1 : minNonNightRest);
+        if (1 <= effectiveTarget && (lastIdx === 3 || restLen >= reqRest)) {
+          const rPen = lastIdx !== 3 && lastIdx !== 2 && restLen === 1 && !adjLeaveBefore ? 15 : 0;
+          const firstMl = adjLeaveBefore ? 5 : 0;
           if (lastIdx === 3) {
             for (const ns of [0, 1, 2]) {
               if (allowed0.includes(ns)) {
-                startEdges.push({ act: ns, nextState: enc(1, ns, 0, 0), ...edgePens(0, ns, 0) });
+                startEdges.push({ act: ns, nextState: enc(1, ns, firstMl, 0, 0), ...edgePens(0, ns, 0) });
               }
             }
           } else {
             const ns = GEN_NEXT[lastIdx];
             if (allowed0.includes(ns)) {
-              startEdges.push({ act: ns, nextState: enc(1, ns, 0, 0), ...edgePens(0, ns, rPen) });
+              startEdges.push({ act: ns, nextState: enc(1, ns, firstMl, 0, 0), ...edgePens(0, ns, rPen) });
+            }
+            if (adjLeaveBefore && allowed0.includes(lastIdx)) {
+              startEdges.push({ act: lastIdx, nextState: enc(1, lastIdx, firstMl, 0, 0), ...edgePens(0, lastIdx, 0) });
             }
           }
         }
       } else {
         if (allowed0.includes(3)) {
-          startEdges.push({ act: 3, nextState: enc(0, 3, 10, 1), ...edgePens(0, 3, 0) });
+          startEdges.push({ act: 3, nextState: enc(0, 3, 10, 1, 0), ...edgePens(0, 3, 0) });
         }
         if (allowed0.includes(4)) {
-          startEdges.push({ act: 4, nextState: enc(0, 3, 10, 0), ...edgePens(0, 4, 0) });
+          startEdges.push({ act: 4, nextState: enc(0, 3, 10, 0, 0), ...edgePens(0, 4, 0) });
         }
         if (allowed0.includes(5)) {
-          startEdges.push({ act: 5, nextState: enc(0, 3, 10, 0), ...edgePens(0, 5, 0) });
+          startEdges.push({ act: 5, nextState: enc(0, 3, 10, 0, 0), ...edgePens(0, 5, 0) });
         }
         if (1 <= effectiveTarget) {
           for (const ns of [0, 1, 2]) {
             if (allowed0.includes(ns)) {
-              startEdges.push({ act: ns, nextState: enc(1, ns, 5, 0), ...edgePens(0, ns, 0) });
+              startEdges.push({ act: ns, nextState: enc(1, ns, 5, 0, 0), ...edgePens(0, ns, 0) });
             }
           }
         }
@@ -5008,56 +5417,66 @@ export function calculateAbsReadjustments(
       }
 
       const stepTransitions = (d: number, st: number) => {
-        const offS = st % 4;
-        const t1 = (st - offS) / 4;
+        const sb = st & 1;
+        const t0 = st >> 1;
+        const offS = t0 % 4;
+        const t1 = (t0 - offS) / 4;
         const ml = t1 % 13;
         const t2 = (t1 - ml) / 13;
         const sh = t2 % 4;
         const w = (t2 - sh) / 4;
         const allowed = dayAllowed[d];
+        const prevWasLeave = origActs[d - 1] === 4 || origActs[d - 1] === 5;
         const out: Array<{ act: number; nextState: number; penA: number; penB: number }> = [];
 
         if (ml < 10) {
           const isUnb = ml >= 5;
           const len = isUnb ? ml - 4 : ml + 1;
           if (len < 5 && w + 1 <= effectiveTarget && allowed.includes(sh)) {
-            out.push({ act: sh, nextState: enc(w + 1, sh, ml + 1, 0), ...edgePens(d, sh, 0) });
+            out.push({ act: sh, nextState: enc(w + 1, sh, ml + 1, 0, sb), ...edgePens(d, sh, 0) });
           }
           if (len >= 3 || isUnb) {
             if (allowed.includes(3)) {
-              out.push({ act: 3, nextState: enc(w, sh, 10, 1), ...edgePens(d, 3, 0) });
+              out.push({ act: 3, nextState: enc(w, sh, 10, 1, sb), ...edgePens(d, 3, 0) });
             }
-            if (allowed.includes(4)) {
-              out.push({ act: 4, nextState: enc(w, sh, 10, 0), ...edgePens(d, 4, 0) });
-            }
-            if (allowed.includes(5)) {
-              out.push({ act: 5, nextState: enc(w, sh, 10, 0), ...edgePens(d, 5, 0) });
-            }
+          } else if (allowShortBlock2 && len === 2 && sb === 0 && allowed.includes(3)) {
+            out.push({ act: 3, nextState: enc(w, sh, 10, 1, 1), ...edgePens(d, 3, 25) });
+          }
+          // Ending work block immediately before ABS/H8 is always exempt (adjAfter)
+          if (allowed.includes(4)) {
+            out.push({ act: 4, nextState: enc(w, sh, 10, 0, sb), ...edgePens(d, 4, 0) });
+          }
+          if (allowed.includes(5)) {
+            out.push({ act: 5, nextState: enc(w, sh, 10, 0, sb), ...edgePens(d, 5, 0) });
           }
         } else {
           const restLen = ml - 9;
           const nextMl = Math.min(12, ml + 1);
           if (offS < 3 && allowed.includes(3)) {
-            out.push({ act: 3, nextState: enc(w, sh, nextMl, offS + 1), ...edgePens(d, 3, 0) });
+            out.push({ act: 3, nextState: enc(w, sh, nextMl, offS + 1, sb), ...edgePens(d, 3, 0) });
           }
           if (allowed.includes(4)) {
-            out.push({ act: 4, nextState: enc(w, sh, nextMl, offS), ...edgePens(d, 4, 0) });
+            out.push({ act: 4, nextState: enc(w, sh, nextMl, 0, sb), ...edgePens(d, 4, 0) });
           }
           if (allowed.includes(5)) {
-            out.push({ act: 5, nextState: enc(w, sh, nextMl, 0), ...edgePens(d, 5, 0) });
+            out.push({ act: 5, nextState: enc(w, sh, nextMl, 0, sb), ...edgePens(d, 5, 0) });
           }
           if (w + 1 <= effectiveTarget) {
+            const nextMlStart = prevWasLeave ? 5 : 0;
             if (sh === 3) {
               for (const ns of [0, 1, 2]) {
                 if (allowed.includes(ns)) {
-                  out.push({ act: ns, nextState: enc(w + 1, ns, 0, 0), ...edgePens(d, ns, 0) });
+                  out.push({ act: ns, nextState: enc(w + 1, ns, nextMlStart, 0, sb), ...edgePens(d, ns, 0) });
                 }
               }
-            } else if (restLen >= (sh === 2 ? 2 : minNonNightRest)) {
+            } else if (restLen >= (sh === 2 ? 2 : (prevWasLeave ? 1 : minNonNightRest))) {
               const ns = GEN_NEXT[sh];
               if (allowed.includes(ns)) {
-                const rPen = sh !== 2 && restLen === 1 ? 15 : 0;
-                out.push({ act: ns, nextState: enc(w + 1, ns, 0, 0), ...edgePens(d, ns, rPen) });
+                const rPen = sh !== 2 && restLen === 1 && !prevWasLeave ? 15 : 0;
+                out.push({ act: ns, nextState: enc(w + 1, ns, nextMlStart, 0, sb), ...edgePens(d, ns, rPen) });
+              }
+              if (prevWasLeave && allowed.includes(sh)) {
+                out.push({ act: sh, nextState: enc(w + 1, sh, nextMlStart, 0, sb), ...edgePens(d, sh, 0) });
               }
             }
           }
@@ -5080,13 +5499,15 @@ export function calculateAbsReadjustments(
       const reachNext = new Int32Array(numStates).fill(-1);
       let termIdx = 0;
       for (const st of activeStates[daysCount]) {
-        const offS = st % 4;
-        const t1 = (st - offS) / 4;
+        const sb = st & 1;
+        const t0 = st >> 1;
+        const offS = t0 % 4;
+        const t1 = (t0 - offS) / 4;
         const ml = t1 % 13;
         const t2 = (t1 - ml) / 13;
         const sh = t2 % 4;
         const w = (t2 - sh) / 4;
-        if (w === effectiveTarget) {
+        if (w === effectiveTarget && (sb === 0 || allowShortBlock2)) {
           reachNext[st] = termIdx++;
         }
       }
@@ -5147,24 +5568,14 @@ export function calculateAbsReadjustments(
     let dpCurGen = new Float64Array(512);
     const dayCostGen = new Float64Array(daysCount * 4);
 
-    const covPenaltyA = (m: number, a: number, n: number, dw: number = 1, useSoft: boolean = false) => {
-      const hard =
-        (m < 1 ? 1500 * dw * (1 - m) : 0) +
-        (a < 2 ? 1500 * dw * (2 - a) : 0) +
-        (n !== 2 ? 1800 * dw * Math.abs(n - 2) : 0);
-      if (!useSoft) return hard;
-      const soft =
-        (m > 1 ? 10 * (m - 1) + (m > 2 ? 25 * (m - 2) : 0) : 0) +
-        (a > 2 ? 10 * (a - 2) + (a > 3 ? 25 * (a - 3) : 0) : 0);
-      return hard + soft;
-    };
+    const covPenaltyA = (m: number, a: number, n: number, dw: number = 1, _useSoft: boolean = false, tier: ComplianceTier = 0) =>
+      tierCovPenalty(m, a, n, dw, tier);
 
-    const covPenaltyB = (m: number, a: number, n: number) => {
-      return (
-        (m < 1 ? 100000 * (1 - m) : 0) +
-        (a < 2 ? 100000 * (2 - a) : 0) +
-        (n !== 2 ? 120000 * Math.abs(n - 2) : 0)
-      );
+    const covPenaltyB = (m: number, a: number, n: number, tier: ComplianceTier = 0) => {
+      if (!isCoverageFeasibleForTier(m, a, n, tier)) {
+        return tierCovPenalty(m, a, n, 100, tier);
+      }
+      return (tier >= 1 && n === 3 ? 5000 : 0) + (tier >= 3 && (m === 0 || a === 1) ? 15000 : 0);
     };
 
     // mode: 0 = gentle minimal-edit Phase A1, 1 = deep Stage-3 FastSA Phase A2, 2 = strict minimal-diff Phase B
@@ -5175,7 +5586,8 @@ export function calculateAbsReadjustments(
       otherN: Int32Array,
       dayWeights: Float64Array | null,
       noise: Float64Array | null,
-      mode: 0 | 1 | 2
+      mode: 0 | 1 | 2,
+      tier: ComplianceTier
     ): number[] => {
       if (dag.maxNodes > dpNextGen.length) {
         dpNextGen = new Float64Array(dag.maxNodes + 64);
@@ -5189,8 +5601,8 @@ export function calculateAbsReadjustments(
           const n0 = otherN[d];
           const dw = dayWeights ? dayWeights[d] : 1;
           const base = d * 4;
-          dayCostGen[base + 0] = (mode === 2 ? covPenaltyB(m0, a0 + 1, n0) : covPenaltyA(m0, a0 + 1, n0, dw, useSoft)) + (noise ? noise[base + 0] : 0);
-          dayCostGen[base + 3] = (mode === 2 ? covPenaltyB(m0, a0, n0) : covPenaltyA(m0, a0, n0, dw, useSoft)) + (noise ? noise[base + 3] : 0);
+          dayCostGen[base + 0] = (mode === 2 ? covPenaltyB(m0, a0 + 1, n0, tier) : covPenaltyA(m0, a0 + 1, n0, dw, useSoft, tier)) + (noise ? noise[base + 0] : 0);
+          dayCostGen[base + 3] = (mode === 2 ? covPenaltyB(m0, a0, n0, tier) : covPenaltyA(m0, a0, n0, dw, useSoft, tier)) + (noise ? noise[base + 3] : 0);
         }
       } else {
         for (let d = 0; d < daysCount; d++) {
@@ -5200,15 +5612,15 @@ export function calculateAbsReadjustments(
           const dw = dayWeights ? dayWeights[d] : 1;
           const base = d * 4;
           if (mode === 2) {
-            dayCostGen[base + 0] = covPenaltyB(m0, a0 + 1, n0);
-            dayCostGen[base + 1] = covPenaltyB(m0 + 1, a0, n0);
-            dayCostGen[base + 2] = covPenaltyB(m0, a0, n0 + 1);
-            dayCostGen[base + 3] = covPenaltyB(m0, a0, n0);
+            dayCostGen[base + 0] = covPenaltyB(m0, a0 + 1, n0, tier);
+            dayCostGen[base + 1] = covPenaltyB(m0 + 1, a0, n0, tier);
+            dayCostGen[base + 2] = covPenaltyB(m0, a0, n0 + 1, tier);
+            dayCostGen[base + 3] = covPenaltyB(m0, a0, n0, tier);
           } else {
-            dayCostGen[base + 0] = covPenaltyA(m0, a0 + 1, n0, dw, useSoft) + (noise ? noise[base + 0] : 0);
-            dayCostGen[base + 1] = covPenaltyA(m0 + 1, a0, n0, dw, useSoft) + (noise ? noise[base + 1] : 0);
-            dayCostGen[base + 2] = covPenaltyA(m0, a0, n0 + 1, dw, useSoft) + (noise ? noise[base + 2] : 0);
-            dayCostGen[base + 3] = covPenaltyA(m0, a0, n0, dw, useSoft) + (noise ? noise[base + 3] : 0);
+            dayCostGen[base + 0] = covPenaltyA(m0, a0 + 1, n0, dw, useSoft, tier) + (noise ? noise[base + 0] : 0);
+            dayCostGen[base + 1] = covPenaltyA(m0 + 1, a0, n0, dw, useSoft, tier) + (noise ? noise[base + 1] : 0);
+            dayCostGen[base + 2] = covPenaltyA(m0, a0, n0 + 1, dw, useSoft, tier) + (noise ? noise[base + 2] : 0);
+            dayCostGen[base + 3] = covPenaltyA(m0, a0, n0, dw, useSoft, tier) + (noise ? noise[base + 3] : 0);
           }
         }
       }
@@ -5276,7 +5688,16 @@ export function calculateAbsReadjustments(
       }
     };
 
-    const evalGenCov = (dags: GenDag[], paths: number[][], mArr: Int32Array, aArr: Int32Array, nArr: Int32Array, dayWeights: Float64Array | null, mode: 0 | 1 | 2) => {
+    const evalGenCov = (
+      dags: GenDag[],
+      paths: number[][],
+      mArr: Int32Array,
+      aArr: Int32Array,
+      nArr: Int32Array,
+      dayWeights: Float64Array | null,
+      mode: 0 | 1 | 2,
+      tier: ComplianceTier
+    ) => {
       let hard = 0;
       let weightedTotal = 0;
       let total = 0;
@@ -5287,10 +5708,10 @@ export function calculateAbsReadjustments(
         const m = mArr[d];
         const a = aArr[d];
         const n = nArr[d];
-        if (m < 1 || a < 2 || n !== 2) hard++;
-        const baseP = mode === 2 ? covPenaltyB(m, a, n) : covPenaltyA(m, a, n, 1, useSoft);
+        if (!isCoverageFeasibleForTier(m, a, n, tier)) hard++;
+        const baseP = mode === 2 ? covPenaltyB(m, a, n, tier) : covPenaltyA(m, a, n, 1, useSoft, tier);
         total += baseP;
-        weightedTotal += mode === 2 ? baseP : (dayWeights ? covPenaltyA(m, a, n, dayWeights[d], useSoft) : baseP);
+        weightedTotal += mode === 2 ? baseP : (dayWeights ? covPenaltyA(m, a, n, dayWeights[d], useSoft, tier) : baseP);
       }
       for (let i = 0; i < dags.length; i++) {
         const dg = dags[i];
@@ -5324,7 +5745,7 @@ export function calculateAbsReadjustments(
           const iso = dateColumns[d].isoDate;
           const act = p[d];
           if (dg.isFixedTir) {
-            candidate[dg.emp][iso] = act === 0 ? 'A' : dg.origCodes[d];
+            candidate[dg.emp][iso] = dg.origCodes[d];
           } else {
             if (act === 0) candidate[dg.emp][iso] = 'A';
             else if (act === 1) candidate[dg.emp][iso] = 'M';
@@ -5401,12 +5822,16 @@ export function calculateAbsReadjustments(
 
     let bestRepairedRows: Record<string, Record<string, string>> | null = null;
     let bestRepairedValidation = currentValidation;
+    let bestRepairedTier: ComplianceTier = 0;
+    let bestRepairedRelaxations: RelaxationRecord[] = [];
+    let bestRepairedHardTotal = Infinity;
     let bestRepairedDiffCost = Infinity;
+    let foundCompliantTier = false;
 
     const solverEmps = [...rotatingEmployees, ...fixedMaEmps];
     const G = solverEmps.length;
 
-    const hasSufficientGenCapacity = (dags: GenDag[]): boolean => {
+    const hasSufficientGenCapacity = (dags: GenDag[], tier: ComplianceTier): boolean => {
       const fixedMaxA = new Int32Array(daysCount);
       const availM = new Int32Array(daysCount);
       const availA = new Int32Array(daysCount);
@@ -5448,22 +5873,22 @@ export function calculateAbsReadjustments(
         }
       }
 
-      for (let d = 0; d < daysCount; d++) {
-        if (availM[d] < 1 || availA[d] < 2 || availN[d] < 2) return false;
-      }
-
-      const needM = daysCount;
-      const needTotalA = daysCount * 2;
-      const needN = daysCount * 2;
-      let needRotA = 0;
-      for (let d = 0; d < daysCount; d++) {
-        if (fixedMaxA[d] < 2) needRotA += 2 - fixedMaxA[d];
-      }
-      if (sumMaxM < needM || sumMaxRotA + sumMaxFixedA < needTotalA || sumMaxN < needN || sumMinN > needN) return false;
-      if (sumMinM + needRotA + needN > totalRotSlots) return false;
-      if (sumMinRotA + needM + needN > totalRotSlots) return false;
-      if (sumMinN + needM + needRotA > totalRotSlots) return false;
-      return true;
+      return canSatisfyDailyCapacityForTier({
+        tier,
+        daysCount,
+        totalRotSlots,
+        availM,
+        availTotalA: availA,
+        availN,
+        fixedMaxA,
+        sumMinRotA,
+        sumMaxRotA,
+        sumMaxFixedA,
+        sumMinM,
+        sumMaxM,
+        sumMinN,
+        sumMaxN
+      });
     };
 
     const gNoise = new Float64Array(daysCount * 4);
@@ -5509,7 +5934,8 @@ export function calculateAbsReadjustments(
       k: number,
       curM: Int32Array,
       curA: Int32Array,
-      curN: Int32Array
+      curN: Int32Array,
+      tier: ComplianceTier
     ): number[] => {
       if (genRand() < 0.2) {
         shuffleGen(gPool);
@@ -5520,10 +5946,14 @@ export function calculateAbsReadjustments(
       s5Unlocked.length = 0;
       s5Locked.length = 0;
 
+      const cfg = getTierConfig(tier);
+      const minReqM = cfg.allowCoverageGapMA ? 0 : 1;
+      const minReqA = cfg.allowCoverageGapMA ? 1 : 2;
+      const maxReqN = cfg.allowNightOver2 ? 3 : 2;
       const nVal = curN[focusDay];
       const mVal = curM[focusDay];
       const aVal = curA[focusDay];
-      const needAct = nVal < 2 ? 2 : mVal < 1 ? 1 : aVal < 2 ? 0 : (nVal > 2 ? -1 : -2);
+      const needAct = nVal < 2 ? 2 : mVal < minReqM ? 1 : aVal < minReqA ? 0 : (nVal > maxReqN ? -1 : -2);
 
       for (let e = 0; e < G; e++) {
         const dg = dags[e];
@@ -5564,31 +5994,68 @@ export function calculateAbsReadjustments(
       ? ['globalPre', 'empPre', 'none']
       : ['globalPre', 'none'];
 
-    for (const lockMode of lockModes) {
-      if (bestRepairedValidation.totalViolations === 0) break;
-      for (const minRest of [2, 1]) {
-        if (bestRepairedValidation.totalViolations === 0) break;
+    for (let ti = 0; ti < absTiers.length; ti++) {
+      if (foundCompliantTier) break;
+      const nowMs = performance.now();
+      if (nowMs >= s5DeadlineMs) break;
 
+      const tier = absTiers[ti];
+      const cfg = getTierConfig(tier);
+      const remBudgetMs = Math.max(0, s5DeadlineMs - nowMs);
+      const s5Share = tier === 0 ? 0.25 : tier === 1 ? 0.15 : tier === 2 ? 0.40 : 0.20;
+      const remShares = absTiers
+        .slice(ti)
+        .reduce((sum, t) => sum + (t === 0 ? 0.25 : t === 1 ? 0.15 : t === 2 ? 0.40 : 0.20), 0);
+      const tierAllocMs = remShares > 0 ? (remBudgetMs * s5Share) / remShares : remBudgetMs;
+      let tierDeadlineMs = Math.min(s5DeadlineMs, nowMs + tierAllocMs);
+
+      let tierBestRows: Record<string, Record<string, string>> | null = null;
+      let tierBestValidation: ScheduleValidationReport | null = null;
+      let tierBestRelaxations: RelaxationRecord[] = [];
+      let tierBestDiffCost = Infinity;
+
+      for (const lockMode of lockModes) {
+        if (performance.now() >= tierDeadlineMs) break;
+        if (tierBestValidation?.totalViolations === 0) break;
+
+        let fallbackToNoneCount = 0;
         const dags: GenDag[] = solverEmps.map((emp, eIdx) => {
           if (fixedMaEmps.includes(emp)) return buildTirGenDag(emp);
-          let dg = buildGeneralDag(emp, eIdx, minRest, lockMode);
+          let dg = buildGeneralDag(emp, eIdx, cfg.minRest, cfg.allowShortBlock2, lockMode);
           if (!dg.feasible && lockMode === 'globalPre') {
-            dg = buildGeneralDag(emp, eIdx, minRest, 'empPre');
-            if (!dg.feasible) dg = buildGeneralDag(emp, eIdx, minRest, 'none');
+            dg = buildGeneralDag(emp, eIdx, cfg.minRest, cfg.allowShortBlock2, 'empPre');
+            if (!dg.feasible) {
+              dg = buildGeneralDag(emp, eIdx, cfg.minRest, cfg.allowShortBlock2, 'none');
+              fallbackToNoneCount++;
+            }
           } else if (!dg.feasible && lockMode === 'empPre') {
-            dg = buildGeneralDag(emp, eIdx, minRest, 'none');
+            dg = buildGeneralDag(emp, eIdx, cfg.minRest, cfg.allowShortBlock2, 'none');
+            fallbackToNoneCount++;
           }
           return dg;
         });
 
-        if (dags.some((g) => !g.feasible) || !hasSufficientGenCapacity(dags)) continue;
+        if (dags.some((g) => !g.feasible) || !hasSufficientGenCapacity(dags, tier)) continue;
+        if (lockMode !== 'none' && fallbackToNoneCount > Math.floor(G / 2)) continue;
 
         const genDayActMasks = buildGenDayActMasks(dags);
-
         const origPathsValid = dags.map((dg) => isGenPathValid(dg, dg.origActs));
-        const numRestarts = lockMode === 'none' ? (minRest === 2 ? 4 : 8) : 2;
+        const validOrigCount = origPathsValid.filter(Boolean).length;
+        if (cfg.minRest === 2 && validOrigCount < Math.max(2, G - 3)) {
+          tierDeadlineMs = Math.min(tierDeadlineMs, performance.now() + 250);
+        }
+        const numRestarts =
+          lockMode === 'none'
+            ? cfg.minRest === 2
+              ? validOrigCount < Math.max(2, G - 3)
+                ? 1
+                : 4
+              : 8
+            : 2;
 
         for (let restart = 0; restart < numRestarts; restart++) {
+          if (performance.now() >= tierDeadlineMs) break;
+
           gDayWeights.fill(1);
           const curM = new Int32Array(daysCount);
           const curA = new Int32Array(daysCount);
@@ -5612,7 +6079,7 @@ export function calculateAbsReadjustments(
             for (let oi = 0; oi < G; oi++) {
               const i = order[oi];
               if (!origPathsValid[i]) {
-                paths[i] = solveGenPath(dags[i], curM, curA, curN, null, null, 0);
+                paths[i] = solveGenPath(dags[i], curM, curA, curN, null, null, 0, tier);
                 addGenPath(dags[i], paths[i], 1, curM, curA, curN);
               }
             }
@@ -5625,7 +6092,7 @@ export function calculateAbsReadjustments(
               } else {
                 for (let k = 0; k < gNoise.length; k++) gNoise[k] = genRand() * 8;
               }
-              paths[i] = solveGenPath(dags[i], curM, curA, curN, null, gNoise, 1);
+              paths[i] = solveGenPath(dags[i], curM, curA, curN, null, gNoise, 1, tier);
               addGenPath(dags[i], paths[i], 1, curM, curA, curN);
             }
           } else {
@@ -5643,7 +6110,7 @@ export function calculateAbsReadjustments(
               const i = order[oi];
               if (paths[i].length === 0) {
                 for (let k = 0; k < gNoise.length; k++) gNoise[k] = genRand() * (oi < 3 ? 120 : 12);
-                paths[i] = solveGenPath(dags[i], curM, curA, curN, null, gNoise, 0);
+                paths[i] = solveGenPath(dags[i], curM, curA, curN, null, gNoise, 0, tier);
                 addGenPath(dags[i], paths[i], 1, curM, curA, curN);
               }
             }
@@ -5656,12 +6123,12 @@ export function calculateAbsReadjustments(
               for (let oi = 0; oi < G; oi++) {
                 const eIdx = order[(oi + sweep) % G];
                 const oldP = paths[eIdx];
-                const before = evalGenCov(dags, paths, curM, curA, curN, wArr, mode).weightedTotal;
+                const before = evalGenCov(dags, paths, curM, curA, curN, wArr, mode, tier).weightedTotal;
                 addGenPath(dags[eIdx], oldP, -1, curM, curA, curN);
-                const newP = solveGenPath(dags[eIdx], curM, curA, curN, wArr, null, mode);
+                const newP = solveGenPath(dags[eIdx], curM, curA, curN, wArr, null, mode, tier);
                 paths[eIdx] = newP;
                 addGenPath(dags[eIdx], newP, 1, curM, curA, curN);
-                const after = evalGenCov(dags, paths, curM, curA, curN, wArr, mode).weightedTotal;
+                const after = evalGenCov(dags, paths, curM, curA, curN, wArr, mode, tier).weightedTotal;
                 if (after < before) {
                   changed = true;
                 } else if (after > before) {
@@ -5676,7 +6143,7 @@ export function calculateAbsReadjustments(
 
           runGenSweeps(deepOnlyRestart ? 3 : 4, false, initMode);
 
-          let curEval = evalGenCov(dags, paths, curM, curA, curN, gDayWeights, initMode);
+          let curEval = evalGenCov(dags, paths, curM, curA, curN, gDayWeights, initMode, tier);
           let bestRH = curEval.hard;
           let bestRT = curEval.total;
           let bestRPaths = paths.map((p) => p);
@@ -5687,6 +6154,8 @@ export function calculateAbsReadjustments(
             let temp = deepOnlyRestart ? 1600 : 300;
             let cool = deepOnlyRestart ? 0.994 : 0.985;
             for (let step = 0; step < saSteps && bestRH > 0; step++) {
+              if ((step & 15) === 0 && performance.now() >= tierDeadlineMs) break;
+
               if (!deepOnlyRestart && step === gentleSteps) {
                 paths = bestRPaths.map((p) => p);
                 curM.fill(0);
@@ -5694,7 +6163,7 @@ export function calculateAbsReadjustments(
                 curN.fill(0);
                 for (let i = 0; i < G; i++) addGenPath(dags[i], paths[i], 1, curM, curA, curN);
                 gDayWeights.fill(1);
-                curEval = evalGenCov(dags, paths, curM, curA, curN, gDayWeights, 1);
+                curEval = evalGenCov(dags, paths, curM, curA, curN, gDayWeights, 1, tier);
                 temp = 1600;
                 cool = 0.994;
               } else if (step === (deepOnlyRestart ? 1000 : 1150) || (deepOnlyRestart && step === 1550)) {
@@ -5704,7 +6173,7 @@ export function calculateAbsReadjustments(
 
               const badDays: number[] = [];
               for (let d = 0; d < daysCount; d++) {
-                if (curM[d] < 1 || curA[d] < 2 || curN[d] !== 2) badDays.push(d);
+                if (!isCoverageFeasibleForTier(curM[d], curA[d], curN[d], tier)) badDays.push(d);
               }
               if (badDays.length === 0) break;
 
@@ -5713,12 +6182,12 @@ export function calculateAbsReadjustments(
                 if (step % 210 === 0) {
                   for (let d = 0; d < daysCount; d++) gDayWeights[d] = 1 + (gDayWeights[d] - 1) * 0.5;
                 }
-                curEval = evalGenCov(dags, paths, curM, curA, curN, gDayWeights, stepMode);
+                curEval = evalGenCov(dags, paths, curM, curA, curN, gDayWeights, stepMode, tier);
               }
 
               const focusDay = badDays[Math.floor(genRand() * badDays.length)];
               const k = stepMode === 0 ? Math.min(G, 2) : Math.min(G, step % 2 === 0 ? 3 : 2);
-              const ruinGroup = selectSection5RuinGroup(dags, genDayActMasks, paths, focusDay, k, curM, curA, curN);
+              const ruinGroup = selectSection5RuinGroup(dags, genDayActMasks, paths, focusDay, k, curM, curA, curN, tier);
 
               const savedSub = ruinGroup.map((idx) => paths[idx]);
               for (let gi = 0; gi < ruinGroup.length; gi++) {
@@ -5736,16 +6205,16 @@ export function calculateAbsReadjustments(
                 } else {
                   for (let nk = 0; nk < gNoise.length; nk++) gNoise[nk] = genRand() * (2 + noiseAmp * 0.25);
                 }
-                const newP = solveGenPath(dags[eIdx], curM, curA, curN, gDayWeights, gNoise, stepMode);
+                const newP = solveGenPath(dags[eIdx], curM, curA, curN, gDayWeights, gNoise, stepMode, tier);
                 paths[eIdx] = newP;
                 addGenPath(dags[eIdx], newP, 1, curM, curA, curN);
               }
 
-              let nextEval = evalGenCov(dags, paths, curM, curA, curN, gDayWeights, stepMode);
+              let nextEval = evalGenCov(dags, paths, curM, curA, curN, gDayWeights, stepMode, tier);
               const improvedRec = nextEval.hard < bestRH;
               if (improvedRec) {
                 runGenSweeps(2, true, stepMode);
-                nextEval = evalGenCov(dags, paths, curM, curA, curN, gDayWeights, stepMode);
+                nextEval = evalGenCov(dags, paths, curM, curA, curN, gDayWeights, stepMode, tier);
               }
               const delta = nextEval.weightedTotal - curEval.weightedTotal;
               const accept = improvedRec || delta <= 0 || genRand() < Math.exp(-delta / Math.max(1, temp));
@@ -5780,6 +6249,7 @@ export function calculateAbsReadjustments(
 
           // Pairwise 2-employee zero-noise minimization across modified employees
           for (let pass = 0; pass < 2; pass++) {
+            if (performance.now() >= tierDeadlineMs) break;
             let pairImproved = false;
             const changedEmps: number[] = [];
             for (let i = 0; i < G; i++) {
@@ -5791,10 +6261,12 @@ export function calculateAbsReadjustments(
               }
             }
             for (let aIdx = 0; aIdx < changedEmps.length; aIdx++) {
+              if (performance.now() >= tierDeadlineMs) break;
               for (let bIdx = aIdx + 1; bIdx < changedEmps.length; bIdx++) {
+                if (performance.now() >= tierDeadlineMs) break;
                 const i1 = changedEmps[aIdx];
                 const i2 = changedEmps[bIdx];
-                const baseScore = evalGenCov(dags, paths, curM, curA, curN, null, 2);
+                const baseScore = evalGenCov(dags, paths, curM, curA, curN, null, 2, tier);
                 const old1 = paths[i1];
                 const old2 = paths[i2];
 
@@ -5803,14 +6275,14 @@ export function calculateAbsReadjustments(
                   const s2 = paths[second];
                   addGenPath(dags[first], s1, -1, curM, curA, curN);
                   addGenPath(dags[second], s2, -1, curM, curA, curN);
-                  const n1 = solveGenPath(dags[first], curM, curA, curN, null, null, 2);
+                  const n1 = solveGenPath(dags[first], curM, curA, curN, null, null, 2, tier);
                   paths[first] = n1;
                   addGenPath(dags[first], n1, 1, curM, curA, curN);
-                  const n2 = solveGenPath(dags[second], curM, curA, curN, null, null, 2);
+                  const n2 = solveGenPath(dags[second], curM, curA, curN, null, null, 2, tier);
                   paths[second] = n2;
                   addGenPath(dags[second], n2, 1, curM, curA, curN);
 
-                  const nextScore = evalGenCov(dags, paths, curM, curA, curN, null, 2);
+                  const nextScore = evalGenCov(dags, paths, curM, curA, curN, null, 2, tier);
                   if (nextScore.hard <= baseScore.hard && nextScore.weightedTotal < baseScore.weightedTotal) {
                     pairImproved = true;
                     break;
@@ -5829,36 +6301,124 @@ export function calculateAbsReadjustments(
             runGenSweeps(4, false, 2);
           }
 
-          const finalEval = evalGenCov(dags, paths, curM, curA, curN, null, 2);
+          const finalEval = evalGenCov(dags, paths, curM, curA, curN, null, 2, tier);
           const candidateRows = buildRowsFromGenPaths(dags, paths);
+          const candRelax: RelaxationRecord[] = [];
           const candidateRep = validateScheduleCompliance(
             candidateRows,
             dateColumns,
             priorRoster,
             targetYear,
             targetMonth,
-            targetWorkingDays
+            targetWorkingDays,
+            [],
+            { tier, relaxations: candRelax }
           );
 
-          const isBetter =
-            candidateRep.totalViolations < bestRepairedValidation.totalViolations ||
-            (candidateRep.totalViolations === bestRepairedValidation.totalViolations &&
+          const isBetterInTier =
+            !tierBestValidation ||
+            candidateRep.totalViolations < tierBestValidation.totalViolations ||
+            (candidateRep.totalViolations === tierBestValidation.totalViolations &&
+              finalEval.editPenB < tierBestDiffCost);
+
+          if (isBetterInTier) {
+            tierBestRows = candidateRows;
+            tierBestValidation = candidateRep;
+            tierBestRelaxations = candRelax;
+            tierBestDiffCost = finalEval.editPenB;
+          }
+
+          const hardRep = tier === 3
+            ? candidateRep
+            : validateScheduleCompliance(
+                candidateRows,
+                dateColumns,
+                priorRoster,
+                targetYear,
+                targetMonth,
+                targetWorkingDays,
+                [],
+                { tier: 3 }
+              );
+          const isBetterFallback =
+            !bestRepairedRows ||
+            hardRep.totalViolations < bestRepairedHardTotal ||
+            (hardRep.totalViolations === bestRepairedHardTotal &&
+              candidateRep.totalViolations < bestRepairedValidation.totalViolations) ||
+            (hardRep.totalViolations === bestRepairedHardTotal &&
+              candidateRep.totalViolations === bestRepairedValidation.totalViolations &&
               finalEval.editPenB < bestRepairedDiffCost);
 
-          if (isBetter) {
+          if (isBetterFallback) {
             bestRepairedRows = candidateRows;
             bestRepairedValidation = candidateRep;
+            bestRepairedTier = tier;
+            bestRepairedRelaxations = candRelax;
+            bestRepairedHardTotal = hardRep.totalViolations;
             bestRepairedDiffCost = finalEval.editPenB;
-            if (candidateRep.totalViolations === 0) break;
           }
+
+          if (candidateRep.totalViolations === 0) break;
         }
+      }
+
+      if (tierBestRows && tierBestValidation && tierBestValidation.totalViolations === 0) {
+        bestRepairedRows = tierBestRows;
+        bestRepairedValidation = tierBestValidation;
+        bestRepairedTier = tier;
+        bestRepairedRelaxations = tierBestRelaxations;
+        foundCompliantTier = true;
+        break;
       }
     }
 
-    if (bestRepairedRows && bestRepairedValidation.totalViolations < currentValidation.totalViolations) {
+    if (bestRepairedRows && !foundCompliantTier) {
+      let resolved = false;
+      for (const t of absTiers) {
+        const tRelax: RelaxationRecord[] = [];
+        const tRep = validateScheduleCompliance(
+          bestRepairedRows,
+          dateColumns,
+          priorRoster,
+          targetYear,
+          targetMonth,
+          targetWorkingDays,
+          [],
+          { tier: t, relaxations: tRelax }
+        );
+        if (tRep.totalViolations === 0) {
+          bestRepairedTier = t;
+          bestRepairedRelaxations = tRelax;
+          bestRepairedValidation = tRep;
+          foundCompliantTier = true;
+          resolved = true;
+          break;
+        }
+      }
+      if (!resolved) {
+        const t3Relax: RelaxationRecord[] = [];
+        const t3Rep = validateScheduleCompliance(
+          bestRepairedRows,
+          dateColumns,
+          priorRoster,
+          targetYear,
+          targetMonth,
+          targetWorkingDays,
+          [],
+          { tier: 3, relaxations: t3Relax }
+        );
+        bestRepairedTier = 3;
+        bestRepairedRelaxations = t3Relax;
+        bestRepairedValidation = t3Rep;
+      }
+    }
+
+    if (bestRepairedRows && (foundCompliantTier || bestRepairedValidation.totalViolations < currentValidation.totalViolations)) {
       for (const emp of allEmployees) {
         workingRows[emp] = { ...bestRepairedRows[emp] };
       }
+      finalTier = bestRepairedTier;
+      finalRelaxations = bestRepairedRelaxations;
       currentValidation = bestRepairedValidation;
       adjustments.length = 0;
       unresolvedDeficits.length = 0;
@@ -5882,6 +6442,38 @@ export function calculateAbsReadjustments(
             });
           }
         }
+
+        // Recompute unresolvedDeficits cleanly if any coverage gaps remain
+        const rotM = rotatingEmployees.filter((e) => shiftKey(workingRows[e]?.[iso] ?? 'OFF') === 'M').length;
+        const totalA = allEmployees.filter((e) => shiftKey(workingRows[e]?.[iso] ?? 'OFF') === 'A').length;
+        const totalN = allEmployees.filter((e) => shiftKey(workingRows[e]?.[iso] ?? 'OFF') === 'N').length;
+        if (rotM < 1) {
+          unresolvedDeficits.push({
+            isoDate: iso,
+            shift: 'M',
+            needed: 1 - rotM,
+            available: rotM,
+            reason: `Rotating Morning below 1 on ${iso} after Tier ${finalTier} repair.`
+          });
+        }
+        if (totalA < 2) {
+          unresolvedDeficits.push({
+            isoDate: iso,
+            shift: 'A',
+            needed: 2 - totalA,
+            available: totalA,
+            reason: `Afternoon below 2 on ${iso} after Tier ${finalTier} repair.`
+          });
+        }
+        if (totalN < 2) {
+          unresolvedDeficits.push({
+            isoDate: iso,
+            shift: 'N',
+            needed: 2 - totalN,
+            available: totalN,
+            reason: `Night below 2 on ${iso} after Tier ${finalTier} repair.`
+          });
+        }
       }
     }
   }
@@ -5892,7 +6484,9 @@ export function calculateAbsReadjustments(
     adjustments,
     unresolvedDeficits,
     updatedRows: workingRows,
-    validation: currentValidation
+    validation: currentValidation,
+    tier: finalTier,
+    relaxations: finalRelaxations
   };
 }
 
