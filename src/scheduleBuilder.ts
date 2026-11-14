@@ -5469,6 +5469,97 @@ export function calculateAbsReadjustments(
     const gNoise = new Float64Array(daysCount * 4);
     const gDayWeights = new Float64Array(daysCount);
     const gPool = Array.from({ length: G }, (_, i) => i);
+    const s5Helpers: number[] = [];
+    const s5Capable: number[] = [];
+    const s5Unlocked: number[] = [];
+    const s5Locked: number[] = [];
+
+    const buildGenDayActMasks = (dags: GenDag[]): Uint8Array[] =>
+      dags.map((dg) => {
+        const masks = new Uint8Array(daysCount);
+        for (let d = 0; d < daysCount; d++) {
+          let mask = 0;
+          const layer = dg.layers[d];
+          for (let u = 0; u < layer.length; u++) {
+            const edges = layer[u];
+            for (let ei = 0; ei < edges.length; ei++) {
+              mask |= 1 << edges[ei].act;
+            }
+          }
+          masks[d] = mask;
+        }
+        return masks;
+      });
+
+    const appendRandomFromBucket = (bucket: number[], out: number[], limit: number): void => {
+      let rem = bucket.length;
+      while (out.length < limit && rem > 0) {
+        const r = Math.floor(genRand() * rem);
+        out.push(bucket[r]);
+        bucket[r] = bucket[rem - 1];
+        rem--;
+      }
+    };
+
+    const selectSection5RuinGroup = (
+      dags: GenDag[],
+      genDayActMasks: Uint8Array[],
+      paths: number[][],
+      focusDay: number,
+      k: number,
+      curM: Int32Array,
+      curA: Int32Array,
+      curN: Int32Array
+    ): number[] => {
+      if (genRand() < 0.2) {
+        shuffleGen(gPool);
+        return gPool.slice(0, k);
+      }
+      s5Helpers.length = 0;
+      s5Capable.length = 0;
+      s5Unlocked.length = 0;
+      s5Locked.length = 0;
+
+      const nVal = curN[focusDay];
+      const mVal = curM[focusDay];
+      const aVal = curA[focusDay];
+      const needAct = nVal < 2 ? 2 : mVal < 1 ? 1 : aVal < 2 ? 0 : (nVal > 2 ? -1 : -2);
+
+      for (let e = 0; e < G; e++) {
+        const dg = dags[e];
+        const mask = genDayActMasks[e][focusDay];
+        // Defer rotating employees locked to ABS/H8 (acts 4/5) and Tir when focusDay needs M/N or Tir cannot hold/toggle A
+        const isAct45Locked = !dg.isFixedTir && (mask & ~((1 << 4) | (1 << 5))) === 0;
+        const isTirExcluded = dg.isFixedTir && (needAct !== 0 || (mask & 1) === 0 || mask === 1);
+        if (isAct45Locked || isTirExcluded) {
+          s5Locked.push(e);
+          continue;
+        }
+        if (needAct >= 0) {
+          if ((mask & (1 << needAct)) !== 0) {
+            if (paths[e][focusDay] !== needAct) s5Helpers.push(e);
+            else s5Capable.push(e);
+          } else {
+            s5Unlocked.push(e);
+          }
+        } else if (needAct === -1) {
+          if (paths[e][focusDay] === 2 && (mask & ~((1 << 2) | (1 << 4) | (1 << 5))) !== 0) {
+            s5Helpers.push(e);
+          } else {
+            s5Unlocked.push(e);
+          }
+        } else {
+          s5Unlocked.push(e);
+        }
+      }
+
+      const group: number[] = [];
+      appendRandomFromBucket(s5Helpers, group, k);
+      appendRandomFromBucket(s5Capable, group, k);
+      appendRandomFromBucket(s5Unlocked, group, k);
+      appendRandomFromBucket(s5Locked, group, k);
+      return group;
+    };
     const lockModes: Array<'globalPre' | 'empPre' | 'none'> = hasDistinctEmpAbsStarts
       ? ['globalPre', 'empPre', 'none']
       : ['globalPre', 'none'];
@@ -5491,6 +5582,8 @@ export function calculateAbsReadjustments(
         });
 
         if (dags.some((g) => !g.feasible) || !hasSufficientGenCapacity(dags)) continue;
+
+        const genDayActMasks = buildGenDayActMasks(dags);
 
         const origPathsValid = dags.map((dg) => isGenPathValid(dg, dg.origActs));
         const numRestarts = lockMode === 'none' ? (minRest === 2 ? 4 : 8) : 2;
@@ -5625,8 +5718,7 @@ export function calculateAbsReadjustments(
 
               const focusDay = badDays[Math.floor(genRand() * badDays.length)];
               const k = stepMode === 0 ? Math.min(G, 2) : Math.min(G, step % 2 === 0 ? 3 : 2);
-              shuffleGen(gPool);
-              const ruinGroup = gPool.slice(0, k);
+              const ruinGroup = selectSection5RuinGroup(dags, genDayActMasks, paths, focusDay, k, curM, curA, curN);
 
               const savedSub = ruinGroup.map((idx) => paths[idx]);
               for (let gi = 0; gi < ruinGroup.length; gi++) {
