@@ -7,9 +7,14 @@ import {
   Download,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   AlertTriangle,
   CheckCircle2,
   Shield,
+  ShieldAlert,
+  Sparkles,
+  Info,
   Lock,
   Clock,
   X,
@@ -27,12 +32,189 @@ import {
   loadHistoricalSchedule,
   FIXED_MID_EMPLOYEES,
   FIXED_WEEKDAY_MA_EMPLOYEES,
+  type ComplianceTier,
+  type RelaxationRecord,
+  type ScheduleBuilderOptions,
   type GeneratedScheduleResult,
   type ScheduleValidationReport,
   type ReadjustmentProposal
 } from './scheduleBuilder';
 import { shiftKey, shiftColors, shiftSolid, initials, GLASS_CARD } from './scheduleUtils';
 import { mergeRosters } from './parser';
+
+export const RELAXED_CELL_RING_CLASS =
+  'border-2 border-dashed border-amber-500 dark:border-amber-400 ring-2 ring-amber-400/40';
+
+export type ScheduleComplianceStatusKind = 'compliant' | 'relaxed' | 'review';
+
+export interface ResolvedScheduleComplianceState {
+  tier: ComplianceTier;
+  relaxations: RelaxationRecord[];
+  needsManualReview: boolean;
+  requiresReview: boolean;
+  warnings: string[];
+  status: ScheduleComplianceStatusKind;
+  statusTitle: string;
+  hasNightOver2Relaxation: boolean;
+  isNightTargetRelaxed: boolean;
+  relaxedNightTargetLabel: string;
+}
+
+function getMaxTierFromRelaxations(relaxations: RelaxationRecord[]): ComplianceTier {
+  return relaxations.reduce<ComplianceTier>((maxT, r) => (r.tier > maxT ? r.tier : maxT), 0);
+}
+
+/**
+ * Resolves unified compliance state (Tier 0..3, relaxations, and manual-review flag),
+ * staying backward-compatible when tier/relaxations/needsManualReview are undefined.
+ */
+export function resolveScheduleComplianceState(
+  scheduleData: GeneratedScheduleResult | null,
+  validation: ScheduleValidationReport
+): ResolvedScheduleComplianceState {
+  const warnings = validation.warnings ?? [];
+  const relaxations: RelaxationRecord[] = scheduleData?.relaxations ?? [];
+  const inferredTier = getMaxTierFromRelaxations(relaxations);
+  const tier: ComplianceTier = scheduleData?.tier ?? inferredTier;
+  const needsManualReview =
+    scheduleData?.needsManualReview !== undefined
+      ? scheduleData.needsManualReview
+      : !validation.isFullyCompliant || warnings.length > 0;
+  const requiresReview = needsManualReview || warnings.length > 0;
+  const status: ScheduleComplianceStatusKind = requiresReview
+    ? 'review'
+    : tier > 0 || relaxations.length > 0
+      ? 'relaxed'
+      : 'compliant';
+
+  const statusTitle =
+    status === 'compliant'
+      ? 'Fully compliant'
+      : status === 'relaxed'
+        ? `Compliant with ${relaxations.length} approved relaxation${relaxations.length === 1 ? '' : 's'} (Tier ${tier})`
+        : 'Needs manager review';
+
+  const hasNightOver2Relaxation = relaxations.some((r) => r.rule === 'NIGHT_OVER_2');
+  const isNightTargetRelaxed = tier >= 1 || hasNightOver2Relaxation;
+  const relaxedNightTargetLabel = isNightTargetRelaxed ? 'N = 2 (3 relaxed)' : 'N = 2';
+
+  return {
+    tier,
+    relaxations,
+    needsManualReview,
+    requiresReview,
+    warnings,
+    status,
+    statusTitle,
+    hasNightOver2Relaxation,
+    isNightTargetRelaxed,
+    relaxedNightTargetLabel
+  };
+}
+
+function noteMentionsMorning(note: string): boolean {
+  return /\bmorning\b|\brotm\b/i.test(note) || /\bM\b(?=\s*[=:<(/0-9]|$)/.test(note);
+}
+
+function noteMentionsAfternoon(note: string): boolean {
+  return /\bafternoon\b|\btotala\b/i.test(note) || /\bA\b(?=\s*[=:<(/0-9]|$)/.test(note);
+}
+
+export interface RelaxationLookup {
+  getCellRelaxations: (emp: string, isoDate: string, shiftCode: string) => RelaxationRecord[];
+  getDayHeaderRelaxations: (isoDate: string) => RelaxationRecord[];
+  getMorningFooterRelaxations: (isoDate: string) => RelaxationRecord[];
+  getAfternoonFooterRelaxations: (isoDate: string) => RelaxationRecord[];
+  getNightFooterRelaxations: (isoDate: string) => RelaxationRecord[];
+}
+
+/**
+ * Indexes RelaxationRecord entries so every cell, day header, and footer coverage cell
+ * can trace back to exact or day-wide relaxations.
+ */
+export function buildRelaxationLookup(
+  relaxations: RelaxationRecord[],
+  dailyCoverage: Record<string, ScheduleValidationReport['dailyCoverage'][string]>
+): RelaxationLookup {
+  const byCell = new Map<string, RelaxationRecord[]>();
+  const byDateAll = new Map<string, RelaxationRecord[]>();
+  const dayWideByDate = new Map<string, RelaxationRecord[]>();
+
+  for (const r of relaxations) {
+    const dateList = byDateAll.get(r.isoDate);
+    if (dateList) dateList.push(r);
+    else byDateAll.set(r.isoDate, [r]);
+
+    if (r.employee) {
+      const key = `${r.employee}::${r.isoDate}`;
+      const cellList = byCell.get(key);
+      if (cellList) cellList.push(r);
+      else byCell.set(key, [r]);
+    } else {
+      const dayWideList = dayWideByDate.get(r.isoDate);
+      if (dayWideList) dayWideList.push(r);
+      else dayWideByDate.set(r.isoDate, [r]);
+    }
+  }
+
+  return {
+    getCellRelaxations(emp: string, isoDate: string, shiftCode: string): RelaxationRecord[] {
+      const exact = byCell.get(`${emp}::${isoDate}`) ?? [];
+      const dayWide = dayWideByDate.get(isoDate) ?? [];
+      if (shiftCode !== 'N') return exact;
+      const nightWide = dayWide.filter((r) => r.rule === 'NIGHT_OVER_2');
+      return nightWide.length > 0 ? [...exact, ...nightWide] : exact;
+    },
+
+    getDayHeaderRelaxations(isoDate: string): RelaxationRecord[] {
+      return dayWideByDate.get(isoDate) ?? [];
+    },
+
+    getMorningFooterRelaxations(isoDate: string): RelaxationRecord[] {
+      const records = (byDateAll.get(isoDate) ?? []).filter((r) => r.rule === 'COVERAGE_GAP');
+      if (records.length === 0) return [];
+      const cov = dailyCoverage[isoDate];
+      const isMorningUnder = cov ? (cov.rotM !== undefined ? cov.rotM < 1 : cov.M < 1) : true;
+      if (!isMorningUnder) return [];
+      return records.filter((r) => noteMentionsMorning(r.note) || !noteMentionsAfternoon(r.note));
+    },
+
+    getAfternoonFooterRelaxations(isoDate: string): RelaxationRecord[] {
+      const records = (byDateAll.get(isoDate) ?? []).filter((r) => r.rule === 'COVERAGE_GAP');
+      if (records.length === 0) return [];
+      const cov = dailyCoverage[isoDate];
+      if (cov && cov.A === 0) return [];
+      const isAfternoonUnder = cov ? cov.A < 2 : true;
+      if (!isAfternoonUnder) return [];
+      return records.filter((r) => noteMentionsAfternoon(r.note) || !noteMentionsMorning(r.note));
+    },
+
+    getNightFooterRelaxations(isoDate: string): RelaxationRecord[] {
+      return (byDateAll.get(isoDate) ?? []).filter((r) => r.rule === 'NIGHT_OVER_2');
+    }
+  };
+}
+
+/**
+ * Determines whether a stricter-tier retry candidate should replace the active schedule.
+ */
+export function shouldAcceptStricterVariant(
+  current: GeneratedScheduleResult,
+  candidate: GeneratedScheduleResult
+): boolean {
+  const currentTier: ComplianceTier =
+    current.tier ?? getMaxTierFromRelaxations(current.relaxations ?? []);
+  const candidateTier: ComplianceTier =
+    candidate.tier ?? getMaxTierFromRelaxations(candidate.relaxations ?? []);
+  const candidateNeedsReview =
+    candidate.needsManualReview ??
+    (!candidate.validation.isFullyCompliant || candidate.validation.warnings.length > 0);
+  return (
+    candidateTier < currentTier &&
+    !candidateNeedsReview &&
+    candidate.validation.warnings.length === 0
+  );
+}
 
 function getWarningActionNote(warning: string): string | null {
   const normMatch = warning.match(/^(.+?):\s*worked\s+(\d+)\s+days\s*\(target is\s*(\d+)\s*days/i);
@@ -50,14 +232,31 @@ function getWarningActionNote(warning: string): string | null {
   return null;
 }
 
+function CoverageCountBadge({ count, isRelaxed }: { count: number; isRelaxed: boolean }) {
+  if (!isRelaxed) return <>{count}</>;
+  return (
+    <span
+      className={`inline-flex items-center justify-center min-w-[24px] h-6 px-1 rounded-lg bg-amber-500/15 text-amber-700 dark:text-amber-300 font-bold ${RELAXED_CELL_RING_CLASS}`}
+    >
+      {count}
+    </span>
+  );
+}
+
 interface ScheduleBuilderTabProps {
   roster: RosterData | null;
   onApplySchedule: (updatedRoster: RosterData, targetMonth: number, targetYear: number) => void;
+  initialSchedule?: GeneratedScheduleResult | null;
 }
 
-export default function ScheduleBuilderTab({ roster, onApplySchedule }: ScheduleBuilderTabProps) {
-  // Target month & year state (defaults to current month or next month)
+export default function ScheduleBuilderTab({
+  roster,
+  onApplySchedule,
+  initialSchedule = null
+}: ScheduleBuilderTabProps) {
+  // Target month & year state (defaults to initialSchedule, current roster tail, or current month)
   const [targetYear, setTargetYear] = useState<number>(() => {
+    if (initialSchedule) return initialSchedule.year;
     if (roster && roster.dateColumns.length > 0) {
       const last = roster.dateColumns[roster.dateColumns.length - 1];
       const d = new Date(`${last.isoDate}T00:00:00`);
@@ -67,6 +266,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
   });
 
   const [targetMonth, setTargetMonth] = useState<number>(() => {
+    if (initialSchedule) return initialSchedule.month;
     if (roster && roster.dateColumns.length > 0) {
       const last = roster.dateColumns[roster.dateColumns.length - 1];
       const d = new Date(`${last.isoDate}T00:00:00`);
@@ -81,16 +281,28 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
     [targetMonth, targetYear]
   );
 
+  // Current working generated schedule
+  const [scheduleData, setScheduleData] = useState<GeneratedScheduleResult | null>(initialSchedule);
+
   // Whether the selected month is an archived/historical record in the roster (set in stone)
   const isHistorical = useMemo(() => {
-    return isHistoricalMonthInRoster(roster, targetYear, targetMonth);
-  }, [roster, targetYear, targetMonth]);
+    return Boolean(scheduleData?.isHistorical) || isHistoricalMonthInRoster(roster, targetYear, targetMonth);
+  }, [scheduleData?.isHistorical, roster, targetYear, targetMonth]);
 
-  // Current working generated schedule
-  const [scheduleData, setScheduleData] = useState<GeneratedScheduleResult | null>(null);
-  const [currentSeed, setCurrentSeed] = useState<number>(() => Math.floor(Math.random() * 999999));
+  const [currentSeed, setCurrentSeed] = useState<number>(() =>
+    initialSchedule?.seed ?? Math.floor(Math.random() * 999999)
+  );
   const [appliedNotification, setAppliedNotification] = useState<string | null>(null);
-  const [excludedEmployees, setExcludedEmployees] = useState<Set<string>>(new Set());
+  const [stricterStatusNote, setStricterStatusNote] = useState<{
+    kind: 'success' | 'info';
+    message: string;
+  } | null>(null);
+  const [isRelaxationsOpen, setIsRelaxationsOpen] = useState<boolean>(true);
+  const [showAllWarnings, setShowAllWarnings] = useState<boolean>(false);
+  const [isTryingStricter, setIsTryingStricter] = useState<boolean>(false);
+  const [excludedEmployees, setExcludedEmployees] = useState<Set<string>>(
+    () => new Set(initialSchedule?.excludedEmployees ?? [])
+  );
 
   // Whether any employee in the schedule has ABS assigned
   const hasAbsShifts = useMemo(() => {
@@ -121,13 +333,98 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
     setIsReadjustModalOpen(true);
   };
 
+  // Live validation whenever schedule rows change
+  const validation: ScheduleValidationReport = useMemo(() => {
+    if (!scheduleData) {
+      return {
+        isFullyCompliant: true,
+        totalViolations: 0,
+        understaffedDaysCount: 0,
+        nightOverstaffedDaysCount: 0,
+        streakViolationCount: 0,
+        nightRestViolationCount: 0,
+        excessiveRestViolationCount: 0,
+        mixedBlockViolationCount: 0,
+        workDaysMismatchCount: 0,
+        dailyCoverage: {},
+        employeeStats: {},
+        warnings: []
+      };
+    }
+    if (scheduleData.validation) {
+      return scheduleData.validation;
+    }
+    return validateScheduleCompliance(
+      scheduleData.rows,
+      scheduleData.dateColumns,
+      roster,
+      targetYear,
+      targetMonth,
+      targetWorkingDays,
+      Array.from(excludedEmployees)
+    );
+  }, [scheduleData, roster, targetYear, targetMonth, targetWorkingDays, excludedEmployees]);
+
+  const complianceState = useMemo(
+    () => resolveScheduleComplianceState(scheduleData, validation),
+    [scheduleData, validation]
+  );
+
+  const relaxationLookup = useMemo(
+    () => buildRelaxationLookup(complianceState.relaxations, validation.dailyCoverage),
+    [complianceState.relaxations, validation.dailyCoverage]
+  );
+
+  const revalidateEditedSchedule = useCallback(
+    (
+      baseSchedule: GeneratedScheduleResult,
+      updatedRows: Record<string, Record<string, string>>,
+      precomputedValidation?: ScheduleValidationReport
+    ): GeneratedScheduleResult => {
+      const currentTier: ComplianceTier =
+        baseSchedule.tier ?? getMaxTierFromRelaxations(baseSchedule.relaxations ?? []);
+      if (precomputedValidation && currentTier === 0) {
+        return {
+          ...baseSchedule,
+          rows: updatedRows,
+          validation: precomputedValidation,
+          tier: 0,
+          relaxations: [],
+          needsManualReview:
+            !precomputedValidation.isFullyCompliant || precomputedValidation.warnings.length > 0
+        };
+      }
+      const nextRelaxations: RelaxationRecord[] = [];
+      const testReport = validateScheduleCompliance(
+        updatedRows,
+        baseSchedule.dateColumns,
+        roster,
+        targetYear,
+        targetMonth,
+        targetWorkingDays,
+        Array.from(excludedEmployees),
+        { tier: currentTier, relaxations: nextRelaxations }
+      );
+      const nextTier = getMaxTierFromRelaxations(nextRelaxations);
+      const nextNeedsReview = !testReport.isFullyCompliant || testReport.warnings.length > 0;
+      return {
+        ...baseSchedule,
+        rows: updatedRows,
+        validation: testReport,
+        tier: nextNeedsReview ? currentTier : nextTier,
+        relaxations: nextRelaxations,
+        needsManualReview: nextNeedsReview
+      };
+    },
+    [roster, targetYear, targetMonth, targetWorkingDays, excludedEmployees]
+  );
+
   const handleApplyReadjustments = () => {
     if (!readjustProposal || !scheduleData) return;
-    setScheduleData({
-      ...scheduleData,
-      rows: readjustProposal.updatedRows,
-      validation: readjustProposal.validation
-    });
+    setScheduleData(
+      revalidateEditedSchedule(scheduleData, readjustProposal.updatedRows, readjustProposal.validation)
+    );
+    setStricterStatusNote(null);
     setIsReadjustModalOpen(false);
     setAppliedNotification(`Applied ${readjustProposal.adjustments.length} shift readjustments to cover ABS!`);
     setTimeout(() => setAppliedNotification(null), 4000);
@@ -174,15 +471,16 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
 
   // Sync initial month and year once roster data loads if user hasn't explicitly navigated
   useEffect(() => {
-    if (!hasUserNavigated && roster && roster.dateColumns.length > 0) {
+    if (!initialSchedule && !hasUserNavigated && roster && roster.dateColumns.length > 0) {
       const last = roster.dateColumns[roster.dateColumns.length - 1];
       const d = new Date(`${last.isoDate}T00:00:00`);
       setTargetYear(d.getFullYear());
       setTargetMonth(d.getMonth());
     }
-  }, [roster, hasUserNavigated]);
+  }, [initialSchedule, roster, hasUserNavigated]);
 
   const [isGenerating, setIsGenerating] = useState(false);
+  const skipInitialGenerationRef = useRef(Boolean(initialSchedule));
 
   // Generate initial schedule or load historical schedule if already set in stone
   const runGeneration = useCallback(
@@ -193,6 +491,8 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
       exclusions: Set<string> = excludedEmployees
     ) => {
       setIsGenerating(true);
+      setStricterStatusNote(null);
+      setShowAllWarnings(false);
       setTimeout(() => {
         if (isHistoricalMonthInRoster(roster, y, m)) {
           setScheduleData(loadHistoricalSchedule(roster!, y, m));
@@ -213,40 +513,12 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
   );
 
   useEffect(() => {
+    if (skipInitialGenerationRef.current) {
+      skipInitialGenerationRef.current = false;
+      return;
+    }
     runGeneration(currentSeed, targetYear, targetMonth, excludedEmployees);
   }, [targetYear, targetMonth, targetWorkingDays, roster]);
-
-  // Live validation whenever schedule rows change
-  const validation: ScheduleValidationReport = useMemo(() => {
-    if (!scheduleData) {
-      return {
-        isFullyCompliant: true,
-        totalViolations: 0,
-        understaffedDaysCount: 0,
-        nightOverstaffedDaysCount: 0,
-        streakViolationCount: 0,
-        nightRestViolationCount: 0,
-        excessiveRestViolationCount: 0,
-        mixedBlockViolationCount: 0,
-        workDaysMismatchCount: 0,
-        dailyCoverage: {},
-        employeeStats: {},
-        warnings: []
-      };
-    }
-    if (scheduleData.validation) {
-      return scheduleData.validation;
-    }
-    return validateScheduleCompliance(
-      scheduleData.rows,
-      scheduleData.dateColumns,
-      roster,
-      targetYear,
-      targetMonth,
-      targetWorkingDays,
-      Array.from(excludedEmployees)
-    );
-  }, [scheduleData, roster, targetYear, targetMonth, targetWorkingDays, excludedEmployees]);
 
   // Employee list
   const employees = useMemo(() => {
@@ -259,6 +531,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
     if (isGenerating) return;
     setHasUserNavigated(true);
     setExcludedEmployees(new Set());
+    setStricterStatusNote(null);
     const prev = new Date(targetYear, targetMonth - 1, 1);
     setTargetMonth(prev.getMonth());
     setTargetYear(prev.getFullYear());
@@ -268,6 +541,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
     if (isGenerating) return;
     setHasUserNavigated(true);
     setExcludedEmployees(new Set());
+    setStricterStatusNote(null);
     const next = new Date(targetYear, targetMonth + 1, 1);
     setTargetMonth(next.getMonth());
     setTargetYear(next.getFullYear());
@@ -299,6 +573,52 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
     const nextSeed = Math.floor(Math.random() * 999999);
     setCurrentSeed(nextSeed);
     runGeneration(nextSeed, targetYear, targetMonth, excludedEmployees);
+  };
+
+  const handleTryStricterVariant = () => {
+    if (isHistorical || isGenerating || !scheduleData) return;
+    const activeTier = complianceState.tier;
+    if (activeTier <= 0) return;
+
+    const maxAllowedTier = (activeTier - 1) as ComplianceTier;
+    const nextSeed = Math.floor(Math.random() * 999999);
+    setIsGenerating(true);
+    setIsTryingStricter(true);
+    setStricterStatusNote(null);
+
+    setTimeout(() => {
+      const options: ScheduleBuilderOptions = {
+        seed: nextSeed,
+        targetWorkingDays: countLegalWorkingDaysInMonth(targetMonth, targetYear),
+        excludedEmployees: Array.from(excludedEmployees),
+        minTier: 0,
+        maxTier: maxAllowedTier
+      };
+      const res = generateBalancedSchedule(roster, targetYear, targetMonth, options);
+
+      if (shouldAcceptStricterVariant(scheduleData, res)) {
+        const appliedTier =
+          res.tier ?? getMaxTierFromRelaxations(res.relaxations ?? []);
+        setCurrentSeed(nextSeed);
+        setScheduleData(res);
+        setSelectedCells(new Set());
+        setBulkFeedback(null);
+        setShowAllWarnings(false);
+        setStricterStatusNote({
+          kind: 'success',
+          message: `Applied stricter Tier ${appliedTier} schedule (seed #${nextSeed}).`
+        });
+      } else {
+        const tierLabel = maxAllowedTier === 0 ? 'Tier 0' : `Tier 0–${maxAllowedTier}`;
+        setStricterStatusNote({
+          kind: 'info',
+          message: `No stricter compliant schedule (${tierLabel}) found within budget (seed #${nextSeed}). Keeping current Tier ${activeTier} schedule.`
+        });
+      }
+
+      setIsTryingStricter(false);
+      setIsGenerating(false);
+    }, 20);
   };
 
   // Finds the full contiguous shift block containing targetIsoDate for emp.
@@ -503,22 +823,8 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
       }
     });
 
-    const testReport = validateScheduleCompliance(
-      updatedRows,
-      scheduleData.dateColumns,
-      roster,
-      targetYear,
-      targetMonth,
-      targetWorkingDays,
-      Array.from(excludedEmployees)
-    );
-
-    setScheduleData({
-      ...scheduleData,
-      rows: updatedRows,
-      validation: testReport
-    });
-
+    setScheduleData(revalidateEditedSchedule(scheduleData, updatedRows));
+    setStricterStatusNote(null);
     setBulkFeedback(`Changed ${selectedCells.size} shift(s) to ${shiftCode}`);
     setTimeout(() => setBulkFeedback(null), 3000);
   };
@@ -580,22 +886,8 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
       }
     };
 
-    const testReport = validateScheduleCompliance(
-      updatedRows,
-      scheduleData.dateColumns,
-      roster,
-      targetYear,
-      targetMonth,
-      targetWorkingDays,
-      Array.from(excludedEmployees)
-    );
-
-    setScheduleData({
-      ...scheduleData,
-      rows: updatedRows,
-      validation: testReport
-    });
-
+    setScheduleData(revalidateEditedSchedule(scheduleData, updatedRows));
+    setStricterStatusNote(null);
     setEditingCell(null);
   };
 
@@ -750,18 +1042,18 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
           </div>
         </div>
 
-        {/* Card 3: Legal Compliance Status or Historical Record */}
+        {/* Card 3: Legal Compliance Status (3-state) or Historical Record */}
         {isHistorical ? (
           <div className={`p-4 ${GLASS_CARD} flex items-start gap-3`}>
             <div className="rounded-xl p-2 shrink-0 bg-amber-500/10 text-amber-500">
               <Lock className="size-5" />
             </div>
-            <div className="text-[12px]">
-              <div className="flex items-center justify-between">
+            <div className="text-[12px] flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2">
                 <p className="font-semibold text-zinc-800 dark:text-zinc-200 text-[13px]">
                   Archived Historical Record
                 </p>
-                <span className="font-semibold text-[10px] text-amber-600 dark:text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20">
+                <span className="font-semibold text-[10px] text-amber-600 dark:text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20 shrink-0">
                   Set in Stone
                 </span>
               </div>
@@ -770,22 +1062,62 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
               </p>
             </div>
           </div>
-        ) : (
-          <div className={`p-4 ${GLASS_CARD} flex items-start gap-3`}>
-            <div className={`rounded-xl p-2 shrink-0 ${validation.isFullyCompliant ? 'bg-emerald-500/10 text-emerald-500' : 'bg-amber-500/10 text-amber-500'}`}>
-              {validation.isFullyCompliant ? <CheckCircle2 className="size-5" /> : <AlertTriangle className="size-5" />}
+        ) : complianceState.status === 'compliant' ? (
+          <div className={`p-4 ${GLASS_CARD} border border-emerald-500/30 bg-emerald-500/[0.06] dark:bg-emerald-500/[0.08] flex items-start gap-3`}>
+            <div className="rounded-xl p-2 shrink-0 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+              <CheckCircle2 className="size-5" />
             </div>
-            <div className="text-[12px]">
-              <div className="flex items-center justify-between">
-                <p className="font-semibold text-zinc-800 dark:text-zinc-200 text-[13px]">
-                  {validation.isFullyCompliant ? '100% Legal & Balanced' : 'Action Needed'}
+            <div className="text-[12px] flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-semibold text-emerald-800 dark:text-emerald-200 text-[13px]">
+                  {complianceState.statusTitle}
                 </p>
-                <span className="font-mono text-[10px] text-zinc-400">Seed #{scheduleData?.seed}</span>
+                <span className="font-mono text-[10px] text-zinc-500 dark:text-zinc-400 shrink-0">
+                  Tier 0 · Seed #{scheduleData?.seed ?? '—'}
+                </span>
               </div>
-              <p className="text-zinc-500 dark:text-zinc-400 mt-0.5 leading-relaxed">
-                {validation.isFullyCompliant
-                  ? `All employees meet the monthly norm of ${targetWorkingDays} working days with compliant rests and coverage.`
-                  : `${validation.totalViolations} warning(s): review days with alerts.`}
+              <p className="text-zinc-600 dark:text-zinc-300 mt-0.5 leading-relaxed">
+                All employees meet the monthly norm of {targetWorkingDays} working days with strict rests and 24/7 coverage.
+              </p>
+            </div>
+          </div>
+        ) : complianceState.status === 'relaxed' ? (
+          <div className={`p-4 ${GLASS_CARD} border border-amber-500/35 bg-amber-500/[0.06] dark:bg-amber-500/[0.08] flex items-start gap-3`}>
+            <div className="rounded-xl p-2 shrink-0 bg-amber-500/15 text-amber-600 dark:text-amber-400">
+              <AlertTriangle className="size-5" />
+            </div>
+            <div className="text-[12px] flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-semibold text-amber-800 dark:text-amber-200 text-[13px]">
+                  {complianceState.statusTitle}
+                </p>
+                <span className="font-mono text-[10px] text-zinc-500 dark:text-zinc-400 shrink-0">
+                  Seed #{scheduleData?.seed ?? '—'}
+                </span>
+              </div>
+              <p className="text-zinc-600 dark:text-zinc-300 mt-0.5 leading-relaxed">
+                Hard rest/sequence rules remain satisfied; dashed amber cells mark approved Tier {complianceState.tier} relaxations.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className={`p-4 ${GLASS_CARD} border border-rose-500/40 bg-rose-500/[0.07] dark:bg-rose-500/[0.10] flex items-start gap-3`}>
+            <div className="rounded-xl p-2 shrink-0 bg-rose-500/15 text-rose-600 dark:text-rose-400">
+              <ShieldAlert className="size-5" />
+            </div>
+            <div className="text-[12px] flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-semibold text-rose-800 dark:text-rose-200 text-[13px]">
+                  {complianceState.statusTitle}
+                </p>
+                <span className="font-mono text-[10px] text-zinc-500 dark:text-zinc-400 shrink-0">
+                  {complianceState.tier > 0 ? `Tier ${complianceState.tier} · ` : ''}Seed #{scheduleData?.seed ?? '—'}
+                </span>
+              </div>
+              <p className="text-zinc-600 dark:text-zinc-300 mt-0.5 leading-relaxed">
+                {complianceState.warnings.length > 0
+                  ? `${complianceState.warnings.length} hard or coverage rule violation${complianceState.warnings.length === 1 ? '' : 's'} detected — inspect warnings below and adjust manually.`
+                  : 'Hard or coverage rules could not be fully satisfied within budget — inspect cells and adjust manually.'}
               </p>
             </div>
           </div>
@@ -797,26 +1129,55 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
         <div className="flex flex-wrap items-center gap-2">
           {/* Regenerate Variant Button Container */}
           <div className="flex flex-col gap-1.5">
-            <button
-              type="button"
-              disabled={isHistorical || isGenerating}
-              onClick={handleRegenerateVariant}
-              className={`flex items-center gap-2 rounded-xl font-semibold px-4 py-2 text-[13px] shadow transition-all ${
-                isHistorical || isGenerating
-                  ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 cursor-not-allowed opacity-60'
-                  : 'bg-blue-500 hover:bg-blue-600 text-white active:scale-98 cursor-pointer'
-              }`}
-              title={isHistorical ? 'Historical records are set in stone and cannot be regenerated' : 'Generate new balanced variant'}
-            >
-              {isHistorical ? (
-                <Lock className="size-4" />
-              ) : isGenerating ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <RotateCcw className="size-4" />
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={isHistorical || isGenerating}
+                onClick={handleRegenerateVariant}
+                className={`flex items-center gap-2 rounded-xl font-semibold px-4 py-2 text-[13px] shadow transition-all ${
+                  isHistorical || isGenerating
+                    ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 cursor-not-allowed opacity-60'
+                    : 'bg-blue-500 hover:bg-blue-600 text-white active:scale-98 cursor-pointer'
+                }`}
+                title={isHistorical ? 'Historical records are set in stone and cannot be regenerated' : 'Generate new balanced variant'}
+              >
+                {isHistorical ? (
+                  <Lock className="size-4" />
+                ) : isGenerating && !isTryingStricter ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <RotateCcw className="size-4" />
+                )}
+                <span>
+                  {isHistorical
+                    ? 'Locked: Set in Stone'
+                    : isGenerating && !isTryingStricter
+                      ? 'Generating...'
+                      : 'Regenerate Variant'}
+                </span>
+              </button>
+
+              {!isHistorical && scheduleData && complianceState.tier > 0 && (
+                <button
+                  type="button"
+                  disabled={isGenerating}
+                  onClick={handleTryStricterVariant}
+                  className={`flex items-center gap-1.5 rounded-xl font-semibold px-3.5 py-2 text-[13px] shadow transition-all ${
+                    isGenerating
+                      ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 cursor-not-allowed opacity-60'
+                      : 'bg-amber-500 hover:bg-amber-600 text-white active:scale-98 cursor-pointer'
+                  }`}
+                  title={`Attempt to generate a stricter schedule (Tier 0${complianceState.tier - 1 > 0 ? `–${complianceState.tier - 1}` : ''})`}
+                >
+                  {isTryingStricter ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Sparkles className="size-4" />
+                  )}
+                  <span>{isTryingStricter ? 'Trying Stricter...' : 'Try stricter variant'}</span>
+                </button>
               )}
-              <span>{isHistorical ? 'Locked: Set in Stone' : isGenerating ? 'Generating...' : 'Regenerate Variant'}</span>
-            </button>
+            </div>
 
             {/* Readjust Shifts Button (pops up beneath regenerate button when colleagues have ABS) */}
             {hasAbsShifts && !isHistorical && (
@@ -847,7 +1208,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
           <span className="hidden xl:inline text-[12px] text-zinc-400 dark:text-zinc-500 pl-2">
             {isHistorical
               ? 'Archived Monthly Roster Record'
-              : 'Blocks of 2, 3, 4, 5 days • Max 2 days rest (rarely 3)'}
+              : 'Blocks of 3–5 days (2 in Tier 2) • Rest 2–3 days'}
           </span>
         </div>
 
@@ -898,6 +1259,92 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
           </button>
         </div>
       </div>
+
+      {/* Stricter Variant Inline Status Note */}
+      {stricterStatusNote && (
+        <div
+          className={`rounded-2xl border px-3.5 py-2.5 text-[12px] flex items-center justify-between gap-2 ${
+            stricterStatusNote.kind === 'success'
+              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+              : 'border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-200'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            <Info className="size-4 shrink-0" />
+            <span className="font-medium">{stricterStatusNote.message}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setStricterStatusNote(null)}
+            className="opacity-70 hover:opacity-100 cursor-pointer"
+            title="Dismiss"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Relaxations Used Panel (never hides any relaxation) */}
+      {complianceState.relaxations.length > 0 && (
+        <div className={`p-4 ${GLASS_CARD} border border-amber-500/35 bg-amber-500/[0.06] dark:bg-amber-500/[0.08] space-y-3`}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-amber-700 dark:text-amber-300 font-bold text-[13px]">
+              <AlertTriangle className="size-4 shrink-0 text-amber-500" />
+              <span>Relaxations used ({complianceState.relaxations.length})</span>
+              <span className="rounded-full bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 text-[10px] font-bold text-amber-700 dark:text-amber-300">
+                Tier {complianceState.tier}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsRelaxationsOpen((prev) => !prev)}
+              className="flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-semibold text-amber-700 dark:text-amber-300 hover:bg-amber-500/15 transition-colors cursor-pointer"
+              aria-expanded={isRelaxationsOpen}
+            >
+              <span>
+                {isRelaxationsOpen
+                  ? 'Hide details'
+                  : `Show all ${complianceState.relaxations.length}`}
+              </span>
+              {isRelaxationsOpen ? (
+                <ChevronUp className="size-3.5" />
+              ) : (
+                <ChevronDown className="size-3.5" />
+              )}
+            </button>
+          </div>
+
+          {isRelaxationsOpen && (
+            <ul className="space-y-1.5 max-h-72 overflow-y-auto pr-1 text-[12px]">
+              {complianceState.relaxations.map((r, idx) => (
+                <li
+                  key={`${r.isoDate}-${r.rule}-${r.employee ?? 'coverage'}-${idx}`}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/20 bg-white/75 dark:bg-zinc-900/70 px-3 py-2"
+                >
+                  <div className="flex flex-wrap items-center gap-2 min-w-0">
+                    <span className="shrink-0 rounded-full bg-amber-500/20 border border-amber-500/35 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:text-amber-200">
+                      Tier {r.tier}
+                    </span>
+                    <span className="font-mono font-bold text-[11px] text-zinc-900 dark:text-zinc-100 shrink-0">
+                      {r.isoDate}
+                    </span>
+                    <span className="text-zinc-400">•</span>
+                    <span className="font-semibold text-zinc-800 dark:text-zinc-200 shrink-0">
+                      {r.employee ?? 'Coverage'}
+                    </span>
+                    <span className="rounded bg-amber-500/15 text-amber-800 dark:text-amber-300 px-1.5 py-0.5 font-mono text-[10px] font-bold shrink-0">
+                      {r.rule}
+                    </span>
+                    <span className="text-zinc-600 dark:text-zinc-300 text-[11px] break-words">
+                      {r.note}
+                    </span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {/* Quick Help & Status Bar */}
       <div className={`p-3 px-4 ${GLASS_CARD} flex flex-wrap items-center justify-between gap-2.5 text-[12px]`}>
@@ -952,20 +1399,33 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                   const dayNum = date.getDate();
                   const dayName = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][date.getDay()];
                   const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+                  const dayHeaderRelaxations = relaxationLookup.getDayHeaderRelaxations(isoDate);
+                  const hasDayRelaxation = dayHeaderRelaxations.length > 0;
+                  const headerTooltip = hasDayRelaxation
+                    ? `${isoDate} — Relaxations: ${dayHeaderRelaxations.map((r) => `${r.rule} (Tier ${r.tier}): ${r.note}`).join('; ')}`
+                    : `Click to select/deselect all shifts on ${isoDate}`;
 
                   return (
                     <th
                       key={isoDate}
                       onClick={(e) => handleToggleColumnSelection(isoDate, e.ctrlKey || e.metaKey)}
                       className={`min-w-[42px] max-w-[42px] p-1 text-center font-semibold transition-colors border-r border-zinc-950/5 dark:border-white/5 cursor-pointer ${
-                        isWeekend
-                          ? 'bg-zinc-950/[0.05] dark:bg-white/[0.05] text-zinc-500 hover:bg-zinc-950/10 dark:hover:bg-white/10'
-                          : 'text-zinc-700 dark:text-zinc-300 hover:bg-zinc-950/[0.03] dark:hover:bg-white/[0.03]'
+                        hasDayRelaxation
+                          ? 'bg-amber-500/10 text-amber-800 dark:text-amber-200 hover:bg-amber-500/15'
+                          : isWeekend
+                            ? 'bg-zinc-950/[0.05] dark:bg-white/[0.05] text-zinc-500 hover:bg-zinc-950/10 dark:hover:bg-white/10'
+                            : 'text-zinc-700 dark:text-zinc-300 hover:bg-zinc-950/[0.03] dark:hover:bg-white/[0.03]'
                       }`}
-                      title={`Click to select/deselect all shifts on ${isoDate}`}
+                      title={headerTooltip}
                     >
-                      <div className="text-[9px] uppercase tracking-tighter opacity-70">{dayName}</div>
-                      <div className="text-[12px] font-bold leading-tight">{dayNum}</div>
+                      <div
+                        className={`rounded-md py-0.5 ${
+                          hasDayRelaxation ? RELAXED_CELL_RING_CLASS : ''
+                        }`}
+                      >
+                        <div className="text-[9px] uppercase tracking-tighter opacity-70">{dayName}</div>
+                        <div className="text-[12px] font-bold leading-tight">{dayNum}</div>
+                      </div>
                     </th>
                   );
                 })}
@@ -1065,6 +1525,11 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                       const cellKey = `${emp}::${isoDate}`;
                       const isCellSelected = selectedCells.has(cellKey);
                       const isEditing = editingCell?.employee === emp && editingCell?.isoDate === isoDate;
+                      const cellRelaxations = relaxationLookup.getCellRelaxations(emp, isoDate, sKey);
+                      const isCellRelaxed = cellRelaxations.length > 0;
+                      const relaxationTitleSuffix = isCellRelaxed
+                        ? ` | Relaxations: ${cellRelaxations.map((r) => `Tier ${r.tier} ${r.rule}: ${r.note}`).join('; ')}`
+                        : '';
 
                       // Badge styles
                       const colors = shiftColors[sKey] ?? {
@@ -1083,11 +1548,13 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                               ? 'bg-blue-500/25 dark:bg-blue-500/35 ring-2 ring-blue-500 ring-inset z-20'
                               : isEditing
                                 ? 'z-30 ring-2 ring-blue-500/50 rounded-lg'
-                                : isWeekend
-                                  ? 'bg-zinc-950/[0.015] dark:bg-white/[0.015]'
-                                  : ''
+                                : isCellRelaxed
+                                  ? 'bg-amber-500/[0.06] dark:bg-amber-400/[0.08]'
+                                  : isWeekend
+                                    ? 'bg-zinc-950/[0.015] dark:bg-white/[0.015]'
+                                    : ''
                           }`}
-                          title={`${emp} on ${isoDate}: ${rawShift} (Click to edit, Shift+click to select block, drag to select range)`}
+                          title={`${emp} on ${isoDate}: ${rawShift}${relaxationTitleSuffix} (Click to edit, Shift+click to select block, drag to select range)`}
                         >
                           <div
                             className={`inline-flex items-center justify-center size-6 rounded-lg font-bold text-[10px] transition-transform ${
@@ -1098,9 +1565,11 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                               isCellSelected
                                 ? ''
                                 : sKey === 'OFF'
-                                  ? 'text-zinc-300 dark:text-zinc-600 hover:bg-zinc-950/5 dark:hover:bg-white/5'
+                                  ? isCellRelaxed
+                                    ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300'
+                                    : 'text-zinc-300 dark:text-zinc-600 hover:bg-zinc-950/5 dark:hover:bg-white/5'
                                   : `${colors.bg} ${colors.text} shadow-xs`
-                            }`}
+                            } ${!isCellSelected && isCellRelaxed ? RELAXED_CELL_RING_CLASS : ''}`}
                           >
                             {sKey === 'OFF' && !isCellSelected ? '·' : sKey}
                           </div>
@@ -1199,15 +1668,27 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                 {scheduleData?.dateColumns.map(({ isoDate }) => {
                   const cov = validation.dailyCoverage[isoDate];
                   const under = cov ? (cov.rotM !== undefined ? cov.rotM < 1 : cov.M < 1) : false;
+                  const morningRelaxations = relaxationLookup.getMorningFooterRelaxations(isoDate);
+                  const isRelaxed = morningRelaxations.length > 0;
+                  const isError = under && !isRelaxed;
+                  const baseTitle = cov ? `Total Morning: ${cov.M} (${cov.rotM ?? cov.M} rotating)` : 'Morning coverage';
+                  const title = isRelaxed
+                    ? `${baseTitle} — Relaxed: ${morningRelaxations.map((r) => r.note).join('; ')}`
+                    : baseTitle;
+
                   return (
                     <td
                       key={isoDate}
                       className={`p-1 text-center font-mono text-[11px] border-r border-zinc-950/5 dark:border-white/5 ${
-                        under ? 'bg-rose-500/20 text-rose-600 font-bold' : 'text-green-700 dark:text-green-400'
+                        isError
+                          ? 'bg-rose-500/20 text-rose-600 font-bold'
+                          : isRelaxed
+                            ? 'bg-amber-500/5'
+                            : 'text-green-700 dark:text-green-400'
                       }`}
-                      title={cov ? `Total Morning: ${cov.M} (${cov.rotM ?? cov.M} rotating)` : undefined}
+                      title={title}
                     >
-                      {cov?.M ?? 0}
+                      <CoverageCountBadge count={cov?.M ?? 0} isRelaxed={isRelaxed} />
                     </td>
                   );
                 })}
@@ -1224,14 +1705,26 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                 {scheduleData?.dateColumns.map(({ isoDate }) => {
                   const cov = validation.dailyCoverage[isoDate];
                   const under = cov ? cov.A < 2 : false;
+                  const afternoonRelaxations = relaxationLookup.getAfternoonFooterRelaxations(isoDate);
+                  const isRelaxed = afternoonRelaxations.length > 0;
+                  const isError = under && !isRelaxed;
+                  const title = isRelaxed
+                    ? `Afternoon: ${cov?.A ?? 0} — Relaxed: ${afternoonRelaxations.map((r) => r.note).join('; ')}`
+                    : undefined;
+
                   return (
                     <td
                       key={isoDate}
                       className={`p-1 text-center font-mono text-[11px] border-r border-zinc-950/5 dark:border-white/5 ${
-                        under ? 'bg-rose-500/20 text-rose-600 font-bold' : 'text-orange-700 dark:text-orange-400'
+                        isError
+                          ? 'bg-rose-500/20 text-rose-600 font-bold'
+                          : isRelaxed
+                            ? 'bg-amber-500/5'
+                            : 'text-orange-700 dark:text-orange-400'
                       }`}
+                      title={title}
                     >
-                      {cov?.A ?? 0}
+                      <CoverageCountBadge count={cov?.A ?? 0} isRelaxed={isRelaxed} />
                     </td>
                   );
                 })}
@@ -1247,20 +1740,43 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                 </td>
                 {scheduleData?.dateColumns.map(({ isoDate }) => {
                   const cov = validation.dailyCoverage[isoDate];
-                  const nightIssue = cov ? cov.N !== 2 : false;
+                  const nightRelaxations = relaxationLookup.getNightFooterRelaxations(isoDate);
+                  const isRelaxed =
+                    nightRelaxations.length > 0 ||
+                    (cov?.N === 3 &&
+                      complianceState.isNightTargetRelaxed &&
+                      !complianceState.requiresReview);
+                  const isError = cov
+                    ? cov.N < 2 || cov.N > 3 || (cov.N === 3 && !isRelaxed)
+                    : false;
+                  const title = isRelaxed
+                    ? `Night: ${cov?.N ?? 3} (relaxed from N = 2)${nightRelaxations.length > 0 ? ` — ${nightRelaxations.map((r) => r.note).join('; ')}` : ''}`
+                    : undefined;
+
                   return (
                     <td
                       key={isoDate}
                       className={`p-1 text-center font-mono text-[11px] border-r border-zinc-950/5 dark:border-white/5 ${
-                        nightIssue ? 'bg-rose-500/20 text-rose-600 font-bold' : 'text-purple-700 dark:text-purple-400'
+                        isError
+                          ? 'bg-rose-500/20 text-rose-600 font-bold'
+                          : isRelaxed
+                            ? 'bg-amber-500/5'
+                            : 'text-purple-700 dark:text-purple-400'
                       }`}
+                      title={title}
                     >
-                      {cov?.N ?? 0}
+                      <CoverageCountBadge count={cov?.N ?? 0} isRelaxed={isRelaxed} />
                     </td>
                   );
                 })}
-                <td className="sticky right-0 z-10 p-1 text-center bg-zinc-100 dark:bg-[#141414] border-l border-zinc-950/10 dark:border-white/10 font-bold text-purple-700 dark:text-purple-400">
-                  N = 2
+                <td
+                  className={`sticky right-0 z-10 p-1 text-center bg-zinc-100 dark:bg-[#141414] border-l border-zinc-950/10 dark:border-white/10 font-bold ${
+                    complianceState.isNightTargetRelaxed
+                      ? 'text-amber-700 dark:text-amber-300'
+                      : 'text-purple-700 dark:text-purple-400'
+                  }`}
+                >
+                  {complianceState.relaxedNightTargetLabel}
                 </td>
               </tr>
 
@@ -1289,20 +1805,33 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
         </div>
       </div>
 
-      {/* Warnings & Diagnostics Panel (if any) */}
+      {/* Warnings & Diagnostics Panel (true hard/coverage violations) */}
       {validation.warnings.length > 0 && (
-        <div className={`p-4 ${GLASS_CARD} border-amber-500/30 bg-amber-500/5 space-y-2`}>
-          <div className="flex items-center gap-2 text-amber-600 dark:text-amber-400 font-bold text-[13px]">
-            <AlertTriangle className="size-4.5" />
-            <span>Validation Warnings ({validation.warnings.length})</span>
+        <div className={`p-4 ${GLASS_CARD} border border-rose-500/35 bg-rose-500/[0.06] dark:bg-rose-500/[0.08] space-y-2`}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-rose-700 dark:text-rose-300 font-bold text-[13px]">
+              <AlertTriangle className="size-4 shrink-0 text-rose-500" />
+              <span>Validation Warnings ({validation.warnings.length})</span>
+            </div>
+            {validation.warnings.length > 8 && (
+              <button
+                type="button"
+                onClick={() => setShowAllWarnings((prev) => !prev)}
+                className="text-[11px] font-semibold text-rose-700 dark:text-rose-300 hover:underline cursor-pointer"
+              >
+                {showAllWarnings
+                  ? 'Show top 8'
+                  : `Show all ${validation.warnings.length}`}
+              </button>
+            )}
           </div>
           <ul className="space-y-1.5 text-[12px] text-zinc-700 dark:text-zinc-300">
-            {validation.warnings.slice(0, 8).map((w, i) => {
+            {(showAllWarnings ? validation.warnings : validation.warnings.slice(0, 8)).map((w, i) => {
               const actionNote = getWarningActionNote(w);
               return (
                 <li key={i} className="space-y-0.5">
                   <div className="flex items-start gap-1.5 font-mono text-[11px]">
-                    <span className="text-amber-500 font-bold">•</span>
+                    <span className="text-rose-500 font-bold">•</span>
                     <span>{w}</span>
                   </div>
                   {actionNote && (
@@ -1314,7 +1843,7 @@ export default function ScheduleBuilderTab({ roster, onApplySchedule }: Schedule
                 </li>
               );
             })}
-            {validation.warnings.length > 8 && (
+            {!showAllWarnings && validation.warnings.length > 8 && (
               <li className="font-semibold text-zinc-500 pl-3">
                 ...and {validation.warnings.length - 8} more warnings
               </li>
