@@ -380,10 +380,25 @@ export default function ScheduleBuilderTab({
     (
       baseSchedule: GeneratedScheduleResult,
       updatedRows: Record<string, Record<string, string>>,
-      precomputedValidation?: ScheduleValidationReport
+      precomputedValidation?: ScheduleValidationReport,
+      overrideTier?: ComplianceTier,
+      overrideRelaxations?: RelaxationRecord[]
     ): GeneratedScheduleResult => {
       const currentTier: ComplianceTier =
-        baseSchedule.tier ?? getMaxTierFromRelaxations(baseSchedule.relaxations ?? []);
+        overrideTier ?? baseSchedule.tier ?? getMaxTierFromRelaxations(baseSchedule.relaxations ?? []);
+      if (precomputedValidation && overrideRelaxations !== undefined) {
+        const nextTier = overrideTier ?? getMaxTierFromRelaxations(overrideRelaxations);
+        const nextNeedsReview =
+          !precomputedValidation.isFullyCompliant || precomputedValidation.warnings.length > 0;
+        return {
+          ...baseSchedule,
+          rows: updatedRows,
+          validation: precomputedValidation,
+          tier: nextNeedsReview ? currentTier : nextTier,
+          relaxations: overrideRelaxations,
+          needsManualReview: nextNeedsReview
+        };
+      }
       if (precomputedValidation && currentTier === 0) {
         return {
           ...baseSchedule,
@@ -423,7 +438,13 @@ export default function ScheduleBuilderTab({
   const handleApplyReadjustments = () => {
     if (!readjustProposal || !scheduleData) return;
     setScheduleData(
-      revalidateEditedSchedule(scheduleData, readjustProposal.updatedRows, readjustProposal.validation)
+      revalidateEditedSchedule(
+        scheduleData,
+        readjustProposal.updatedRows,
+        readjustProposal.validation,
+        readjustProposal.tier,
+        readjustProposal.relaxations
+      )
     );
     setStricterStatusNote(null);
     setIsReadjustModalOpen(false);
