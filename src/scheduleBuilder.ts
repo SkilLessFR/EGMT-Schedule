@@ -1,6 +1,18 @@
 // src/scheduleBuilder.ts
 import type ExcelJS from 'exceljs';
 import type { RosterData } from './types';
+import type {
+  ComplianceTier,
+  RelaxableRule,
+  RelaxationRecord,
+  ValidationOptions
+} from './scheduleTypes';
+export type {
+  ComplianceTier,
+  RelaxableRule,
+  RelaxationRecord,
+  ValidationOptions
+};
 import { shiftKey, ROMANIAN_HOLIDAYS } from './scheduleUtils';
 
 export const FIXED_MID_EMPLOYEES = [
@@ -31,7 +43,7 @@ export const ROMANIAN_HOLIDAYS_2026 = ROMANIAN_HOLIDAYS;
 export const FIXED_STAFF_EXEMPT_OFF_DATES = new Set<string>();
 
 export const MONTHLY_WORKING_DAYS_2026: Record<number, number> = {
-  0: 22, // Jan
+  0: 18, // Jan (22 weekdays minus Jan 1, 2, 6, 7 holidays)
   1: 20, // Feb
   2: 22, // Mar
   3: 20, // Apr
@@ -59,10 +71,12 @@ export function countLegalWorkingDaysInMonth(month: number, year: number): numbe
     if (ROMANIAN_HOLIDAYS.has(isoDate)) continue;
     count += 1;
   }
-  // Keep 24/7 rotating staff monthly norms within a mathematically feasible range
-  // (e.g. Jan 2027 has 3 weekday holidays dropping fixed weekday count to 18, which is over-constrained for 24/7 3..5-day blocks).
-  const minRotatingTarget = daysInMonth >= 30 ? 20 : 19;
-  return Math.max(minRotatingTarget, count);
+  return count;
+}
+
+function isFixedStaffOffDate(date: Date, isoDate: string): boolean {
+  const dow = date.getDay();
+  return dow === 0 || dow === 6 || ROMANIAN_HOLIDAYS.has(isoDate) || FIXED_STAFF_EXEMPT_OFF_DATES.has(isoDate);
 }
 
 /**
@@ -132,6 +146,9 @@ export interface ScheduleBuilderOptions {
   targetOffDays?: number;
   maxConsecutiveWork?: number;
   excludedEmployees?: string[];
+  timeBudgetMs?: number;
+  minTier?: ComplianceTier;
+  maxTier?: ComplianceTier;
 }
 
 export interface DayCoverage {
@@ -217,6 +234,10 @@ export interface GeneratedScheduleResult {
   seed: number;
   isHistorical?: boolean;
   excludedEmployees?: string[];
+  tier?: ComplianceTier;
+  relaxations?: RelaxationRecord[];
+  needsManualReview?: boolean;
+  elapsedMs?: number;
 }
 
 
@@ -431,9 +452,12 @@ export function evaluateOffsetCost(
     }
   }
 
-  // If employee already had >= 2 days of rest at end of previous month, they must NOT get OFF on Day 1
-  if (tailOffStreak >= 2 && firstShift === 'OFF') {
+  // If employee already had >= 3 days of rest at end of previous month, adding OFF on Day 1 exceeds 3 days.
+  // A 2-day tail rest + 1 OFF day on Day 1 yields a legal 3-day rest (soft preference against unless needed).
+  if (tailOffStreak >= 3 && firstShift === 'OFF') {
     cost += 10000000;
+  } else if (tailOffStreak === 2 && firstShift === 'OFF') {
+    cost += 100;
   }
 
   if (tailOffStreak > 0 && headOffStreak > 0) {
@@ -506,6 +530,8 @@ export function evaluateOffsetCost(
     const rawWorkDays = slotShifts.filter((s) => s !== 'OFF' && s !== 'H8' && s !== 'HUP').length;
     if (rawWorkDays < targetWorkingDays) {
       cost += 500 * (targetWorkingDays - rawWorkDays);
+    } else if (rawWorkDays > targetWorkingDays) {
+      cost += 60 * (rawWorkDays - targetWorkingDays);
     }
   }
 
@@ -679,15 +705,20 @@ export function equalizeExactWorkingDays(
         const isUnboundedStart = i === 0 && !hasHistory;
         if (!isUnboundedStart && i < blocks.length - 1 && b.len < 3) return false;
       } else {
-        // Rest period between two work blocks:
-        // After Night shift: strictly >= 2 days (48h mandatory rest)
-        // Max rest: at most 3 days
-        if (i > 0 && i < blocks.length - 1) {
-          const prevWork = blocks[i - 1];
-          if (prevWork && prevWork.shift === 'N' && b.len < 2) return false;
+        // Rest period between work blocks (and trailing month-end rest):
+        // After Night shift before returning to work: strictly >= 2 days (48h mandatory rest)
+        // Max rest: at most 3 days anywhere in month (including trailing OFF days)
+        if (i > 0) {
+          if (i < blocks.length - 1) {
+            const prevWork = blocks[i - 1];
+            if (prevWork && prevWork.shift === 'N' && b.len < 2) return false;
+          }
           if (b.len > 3) return false;
         }
-        // Rest bridging across month boundary
+        // Rest bridging across month boundary and leading rest in standalone months
+        if (i === 0 && activeTailRest.length === 0 && b.len > 3) {
+          return false;
+        }
         if (i === 0 && activeTailRest.length > 0 && i < blocks.length - 1) {
           if (lastHistoryWorkShift === 'N' && b.len < 2) return false;
           if (b.len > activeTailRest.length && b.len > 3) return false;
@@ -814,7 +845,7 @@ export function equalizeExactWorkingDays(
     const hist = employeeHistories[emp] ?? [];
     let tailStreak = 0;
     for (let i = hist.length - 1; i >= 0; i--) {
-      if (hist[i] !== 'OFF' && hist[i] !== 'H8' && hist[i] !== 'HUP') tailStreak++;
+      if (hist[i] !== 'OFF' && hist[i] !== 'H8' && hist[i] !== 'HUP' && hist[i] !== 'ABS' && hist[i] !== 'AD') tailStreak++;
       else break;
     }
     if (tailStreak === 0) continue;
@@ -822,12 +853,12 @@ export function equalizeExactWorkingDays(
     let headStreak = 0;
     for (let i = 0; i < Math.min(5, dateColumns.length); i++) {
       const s = rows[emp][dateColumns[i].isoDate];
-      if (s !== 'OFF' && s !== 'H8' && s !== 'HUP') headStreak++;
+      if (s !== 'OFF' && s !== 'H8' && s !== 'HUP' && s !== 'ABS' && s !== 'AD') headStreak++;
       else break;
     }
 
     if (tailStreak + headStreak > 5) {
-      const cutoff = 5 - tailStreak;
+      const cutoff = Math.max(0, 5 - tailStreak);
       for (let dayIdx = cutoff; dayIdx < headStreak; dayIdx++) {
         const isoDate = dateColumns[dayIdx].isoDate;
         const curShift = rows[emp][isoDate];
@@ -1383,10 +1414,8 @@ export function equalizeExactWorkingDays(
         for (const emp of rotating) {
           if (rows[emp][isoDate] !== 'OFF') continue;
 
-          // Target shift must be adjacent to an existing block of targetShift for this employee
-          const prev = getPrevNeighbor(emp, i);
-          const next = getNextNeighbor(emp, i);
-          if (prev !== targetShift && next !== targetShift) continue;
+          // Target shift must touch an existing block of targetShift or sit at an unbounded month edge
+          if (!canAttachStandaloneAdd(emp, i, targetShift)) continue;
 
           rows[emp][isoDate] = targetShift;
 
@@ -1449,9 +1478,7 @@ export function equalizeExactWorkingDays(
         // D2a: 1-employee block-slide (emp adds targetShift on isoDate, drops blocking d1 with surplus, slides d1->a2, drops surplus d2)
         for (const emp of rotating) {
           if (rows[emp][isoDate] !== 'OFF') continue;
-          const prev = getPrevNeighbor(emp, i);
-          const next = getNextNeighbor(emp, i);
-          if (prev !== targetShift && next !== targetShift) continue;
+          if (!canAttachStandaloneAdd(emp, i, targetShift)) continue;
 
           rows[emp][isoDate] = targetShift;
           const localStart = Math.max(0, i - 5);
@@ -1501,9 +1528,7 @@ export function equalizeExactWorkingDays(
         // emp1 adds targetShift on isoDate and drops midIso; emp2 adds midShift on midIso and drops surplusIso
         for (const emp1 of rotating) {
           if (rows[emp1][isoDate] !== 'OFF') continue;
-          const prev1 = getPrevNeighbor(emp1, i);
-          const next1 = getNextNeighbor(emp1, i);
-          if (prev1 !== targetShift && next1 !== targetShift) continue;
+          if (!canAttachStandaloneAdd(emp1, i, targetShift)) continue;
 
           rows[emp1][isoDate] = targetShift;
           for (let j = 0; j < dateColumns.length; j++) {
@@ -1548,9 +1573,7 @@ export function equalizeExactWorkingDays(
         // D2c: 2-employee relay where emp1 also slides an adjacent block (adds targetShift on isoDate, drops midIso, slides d1->a2; emp2 covers midIso and drops surplusIso)
         for (const emp1 of rotating) {
           if (rows[emp1][isoDate] !== 'OFF') continue;
-          const prev1 = getPrevNeighbor(emp1, i);
-          const next1 = getNextNeighbor(emp1, i);
-          if (prev1 !== targetShift && next1 !== targetShift) continue;
+          if (!canAttachStandaloneAdd(emp1, i, targetShift)) continue;
 
           rows[emp1][isoDate] = targetShift;
           const localStart = Math.max(0, i - 5);
@@ -1666,8 +1689,8 @@ export function generateBalancedSchedule(
 
   // Balanced 1:1:1 templates with 4-day blocks and 2-day rests across 18-day coprime cycles
   // Strict cyclic direction: A -> M -> N -> A (Afternoon -> Morning -> Night -> Afternoon)
-  // Perfectly balanced: 4 A, 4 M, 4 N, and 6 OFF (ratio 1:1:1:1.5)
-  const BALANCED_TEMPLATES = [
+  // Standard density (12/18 = 66.7% work -> ~20-21 work days in 30-31d)
+  const STANDARD_TEMPLATES = [
     // Template 0: A -> M -> N -> A
     [
       'A','A','A','A',
@@ -1696,6 +1719,69 @@ export function generateBalancedSchedule(
       'OFF','OFF'
     ]
   ];
+
+  // Lower-density 11/18 (61.1% work -> ~18-19 work days in 30-31d) templates preserving A/N=2 and M>=1 coverage
+  const LOW_DENSITY_TEMPLATES = [
+    [
+      'A','A','A','A',
+      'OFF','OFF',
+      'M','M','M',
+      'OFF','OFF','OFF',
+      'N','N','N','N',
+      'OFF','OFF'
+    ],
+    [
+      'M','M','M',
+      'OFF','OFF','OFF',
+      'N','N','N','N',
+      'OFF','OFF',
+      'A','A','A','A',
+      'OFF','OFF'
+    ],
+    [
+      'N','N','N','N',
+      'OFF','OFF',
+      'A','A','A','A',
+      'OFF','OFF',
+      'M','M','M',
+      'OFF','OFF','OFF'
+    ]
+  ];
+
+  // Larger rotating teams (>= 10) need 3-day N blocks per 18d cycle to avoid 3/2 Night overstaffing
+  const LARGE_TEAM_3N_TEMPLATES = [
+    [
+      'A','A','A','A',
+      'OFF','OFF',
+      'M','M','M','M',
+      'OFF','OFF',
+      'N','N','N',
+      'OFF','OFF','OFF'
+    ],
+    [
+      'M','M','M','M',
+      'OFF','OFF',
+      'N','N','N',
+      'OFF','OFF','OFF',
+      'A','A','A','A',
+      'OFF','OFF'
+    ],
+    [
+      'N','N','N',
+      'OFF','OFF','OFF',
+      'A','A','A','A',
+      'OFF','OFF',
+      'M','M','M','M',
+      'OFF','OFF'
+    ]
+  ];
+
+  const isLowWorkRatio = (targetWorkingDays / daysCount) < 0.644;
+  const BALANCED_TEMPLATES = rotatingEmployees.length >= 10
+    ? [...LARGE_TEAM_3N_TEMPLATES, ...(isLowWorkRatio ? LOW_DENSITY_TEMPLATES : []), ...STANDARD_TEMPLATES]
+    : isLowWorkRatio
+      ? [...LOW_DENSITY_TEMPLATES, ...STANDARD_TEMPLATES]
+      : STANDARD_TEMPLATES;
 
   // Pre-configured slot sets ensuring optimal coverage across variable team sizes
   const VALID_SLOT_SETS_6 = [
@@ -1740,6 +1826,8 @@ export function generateBalancedSchedule(
   const BASE_SLOT_SETS_9 = [
     [0, 2, 4, 6, 8, 10, 12, 14, 16],
     [1, 3, 5, 7, 9, 11, 13, 15, 17],
+    [0, 2, 4, 5, 8, 9, 12, 14, 16],
+    [0, 2, 4, 5, 8, 10, 12, 14, 16],
     [1, 2, 4, 5, 8, 10, 13, 14, 16],
     [1, 2, 4, 5, 8, 10, 13, 15, 16],
     [1, 2, 4, 5, 9, 10, 13, 14, 16],
@@ -1752,7 +1840,7 @@ export function generateBalancedSchedule(
 
   const VALID_SLOT_SETS_9: number[][] = [];
   for (const s of BASE_SLOT_SETS_9) {
-    for (let shift = 0; shift < 18; shift += 2) {
+    for (let shift = 0; shift < 18; shift += 1) {
       const rotated = s.map((x) => (x + shift) % 18).sort((a, b) => a - b);
       const key = rotated.join(',');
       if (!VALID_SLOT_SETS_9.some((existing) => existing.join(',') === key)) {
@@ -1825,7 +1913,75 @@ export function generateBalancedSchedule(
 
   let bestResultRows: Record<string, Record<string, string>> = {};
   let bestReport: ScheduleValidationReport | null = null;
+  let bestScoreValue = Infinity;
+  let bestHandoffSafe = false;
   let finalSeed = seed;
+
+  const nextMonthMinRotA = [1, 2, 3].map((dayOfMonth) => {
+    const d = new Date(targetYear, targetMonth + 1, dayOfMonth);
+    const y = d.getFullYear();
+    const m = d.getMonth() + 1;
+    const iso = `${y}-${String(m).padStart(2, '0')}-${String(dayOfMonth).padStart(2, '0')}`;
+    const dow = d.getDay();
+    const isOff = dow === 0 || dow === 6 || ROMANIAN_HOLIDAYS.has(iso) || FIXED_STAFF_EXEMPT_OFF_DATES.has(iso);
+    const fixedA = (!isOff && fixedWeekdayMAEmployees.length > 0 && getIsoWeekNumber(d) % 2 === 0)
+      ? fixedWeekdayMAEmployees.length
+      : 0;
+    return Math.max(0, 2 - fixedA);
+  });
+
+  const isMonthEndHandoffSafe = (rows: Record<string, Record<string, string>>): boolean => {
+    if (rotatingEmployees.length < 6) return true;
+    const isRest = (s: string) => s === 'OFF' || s === 'H8' || s === 'HUP' || s === 'ABS' || s === 'AD';
+    const tails = rotatingEmployees.map((emp) => {
+      const len = Math.min(6, dateColumns.length);
+      const tail: string[] = [];
+      for (let idx = dateColumns.length - len; idx < dateColumns.length; idx++) {
+        const s = shiftKey(rows[emp]?.[dateColumns[idx].isoDate] ?? 'OFF');
+        tail.push(isRest(s) ? 'OFF' : s);
+      }
+      let tailWorkStreak = 0;
+      let tailOffStreak = 0;
+      let tailWorkShift: string | null = null;
+      let lastWorkShift: string | null = null;
+      for (let i = tail.length - 1; i >= 0; i--) {
+        if (tail[i] !== 'OFF') {
+          if (!lastWorkShift) lastWorkShift = tail[i];
+          if (tailOffStreak === 0) {
+            tailWorkStreak++;
+            tailWorkShift = tail[i];
+          } else {
+            break;
+          }
+        } else {
+          if (tailWorkStreak > 0) break;
+          tailOffStreak++;
+        }
+      }
+      return { tailWorkShift, tailWorkStreak, tailOffStreak, lastWorkShift };
+    });
+
+    for (const k of [1, 2, 3]) {
+      let eligN = 0;
+      let eligA = 0;
+      let eligM = 0;
+      for (const t of tails) {
+        const canCover = (target: 'M' | 'A' | 'N', prevShift: 'M' | 'A' | 'N') => {
+          if (t.tailWorkShift === target && t.tailWorkStreak <= 5 - k) return true;
+          if (t.tailWorkShift === null && t.lastWorkShift === prevShift && t.tailOffStreak >= (k === 1 ? 2 : 1)) return true;
+          if (k === 3 && t.tailWorkShift === prevShift && t.tailWorkStreak >= 3) return true;
+          return false;
+        };
+        if (canCover('N', 'M')) eligN++;
+        if (canCover('A', 'N')) eligA++;
+        if (canCover('M', 'A')) eligM++;
+      }
+      if (eligN < 2 || eligA < nextMonthMinRotA[k - 1] || eligM < 1) {
+        return false;
+      }
+    }
+    return true;
+  };
 
   interface CandidateConfig {
     template: string[];
@@ -1851,12 +2007,19 @@ export function generateBalancedSchedule(
 
   const SEED_OFFSETS = [0, 1, 3, 5, 7, 10, 100];
 
+  const fixedAfternoonCoverage = dateColumns.map(({ date, isoDate }) => {
+    const dow = date.getDay();
+    const isOff = dow === 0 || dow === 6 || ROMANIAN_HOLIDAYS.has(isoDate) || FIXED_STAFF_EXEMPT_OFF_DATES.has(isoDate);
+    if (isOff || fixedWeekdayMAEmployees.length === 0) return 0;
+    return getIsoWeekNumber(date) % 2 === 0 ? fixedWeekdayMAEmployees.length : 0;
+  });
+
   const getSlotImbalancePenalty = (template: string[], slots: number[]): number => {
     const tLen = template.length;
     let penalty = 0;
-    for (let d = 0; d < tLen; d++) {
+    for (let d = 0; d < daysCount; d++) {
       let m = 0;
-      let a = 0;
+      let a = fixedAfternoonCoverage[d];
       let n = 0;
       for (const offset of slots) {
         const s = template[(offset + d) % tLen];
@@ -1864,11 +2027,22 @@ export function generateBalancedSchedule(
         else if (s === 'A') a++;
         else if (s === 'N') n++;
       }
-      if (m < 1) penalty += 1;
-      if (a < 2) penalty += 1;
+      if (m < 1) penalty += 1 - m;
+      if (a < 2) penalty += 2 - a;
       if (n !== 2) penalty += Math.abs(n - 2);
     }
     return penalty * 40;
+  };
+
+  const scoreReport = (rep: ScheduleValidationReport, handoffSafe: boolean) => {
+    const legalHard =
+      rep.streakViolationCount +
+      rep.nightRestViolationCount +
+      rep.excessiveRestViolationCount +
+      rep.mixedBlockViolationCount +
+      rep.workDaysMismatchCount +
+      (rep.fixedStaffViolationCount ?? 0);
+    return legalHard * 1000 + rep.nightOverstaffedDaysCount * 20 + rep.understaffedDaysCount * 10 + (handoffSafe ? 0 : 1);
   };
 
   for (const sOffset of SEED_OFFSETS) {
@@ -2000,32 +2174,658 @@ export function generateBalancedSchedule(
         options.excludedEmployees ?? []
       );
 
-      const scoreReport = (rep: ScheduleValidationReport) => {
-        const legalHard =
-          rep.streakViolationCount +
-          rep.nightRestViolationCount +
-          rep.excessiveRestViolationCount +
-          rep.mixedBlockViolationCount +
-          rep.workDaysMismatchCount +
-          (rep.fixedStaffViolationCount ?? 0);
-        return legalHard * 1000 + rep.nightOverstaffedDaysCount * 20 + rep.understaffedDaysCount * 10;
-      };
+      const curHandoffSafe = testReport.isFullyCompliant ? isMonthEndHandoffSafe(candidateRows) : false;
+      const curScore = scoreReport(testReport, curHandoffSafe);
 
-      const curScore = scoreReport(testReport);
-      const bestScore = bestReport ? scoreReport(bestReport) : Infinity;
-
-      if (testReport.isFullyCompliant || !bestReport || curScore < bestScore) {
+      if (!bestReport || curScore < bestScoreValue) {
         bestResultRows = candidateRows;
         bestReport = testReport;
+        bestScoreValue = curScore;
+        bestHandoffSafe = curHandoffSafe;
         finalSeed = config.attemptSeed;
-        if (testReport.isFullyCompliant) {
+        if (testReport.isFullyCompliant && curHandoffSafe) {
           break;
         }
       }
     }
 
-    if (bestReport?.isFullyCompliant) {
+    if (bestReport?.isFullyCompliant && bestHandoffSafe) {
       break;
+    }
+  }
+
+  // Stage 3: Exact Legal-Trajectory DP + Large Neighborhood Search (fallback when cyclic templates don't reach compliant+safe)
+  if (!(bestReport?.isFullyCompliant && bestHandoffSafe) && rotatingEmployees.length > 0 && targetWorkingDays > 0 && targetWorkingDays <= daysCount) {
+    const ACT_SHIFT = ['A', 'M', 'N', 'OFF'] as const;
+    const NEXT_SH = [1, 2, 0]; // A(0)->M(1), M(1)->N(2), N(2)->A(0)
+    const shToIdx = (s: string) => (s === 'A' ? 0 : s === 'M' ? 1 : s === 'N' ? 2 : 3);
+    const numStatesPerDay = (targetWorkingDays + 1) * 4 * 13;
+    const encState = (w: number, sh: number, ml: number) => (w * 4 + sh) * 13 + ml;
+
+    interface DagEdge {
+      act: number;
+      nextNode: number;
+      pen: number;
+    }
+    interface EmpDag {
+      layers: DagEdge[][][]; // layers[d][nodeIdx] -> outgoing edges to layers[d+1]
+      feasible: boolean;
+      maxNodes: number;
+      cAct: Int8Array[];
+      cNext: Int32Array[];
+    }
+
+    const buildEmpDag = (history: string[], minNonNightRest: number): EmpDag => {
+      const hasHistory = history.length > 0;
+      const activeTailWork = getActiveTailBlock(history);
+      const activeTailRest = activeTailWork.length === 0 ? getActiveTailRest(history) : [];
+      let lastHistWork: string | null = null;
+      for (let i = history.length - 1; i >= 0; i--) {
+        if (history[i] === 'A' || history[i] === 'M' || history[i] === 'N') {
+          lastHistWork = history[i];
+          break;
+        }
+      }
+
+      // Compute outgoing transitions from virtual start node (at d = 0 -> state at d = 1)
+      const startEdges: Array<{ act: number; nextState: number; pen: number }> = [];
+      if (activeTailWork.length > 0) {
+        const curShift = activeTailWork[activeTailWork.length - 1];
+        const curIdx = shToIdx(curShift);
+        const totalWorkTail = activeTailWork.length;
+        let sameLen = 0;
+        for (let i = activeTailWork.length - 1; i >= 0 && activeTailWork[i] === curShift; i--) sameLen++;
+        if (totalWorkTail < 5 && targetWorkingDays >= 1) {
+          startEdges.push({ act: curIdx, nextState: encState(1, curIdx, totalWorkTail), pen: 0 });
+        }
+        if (sameLen >= 3) {
+          startEdges.push({ act: 3, nextState: encState(0, curIdx, 10), pen: 0 });
+        }
+      } else if (hasHistory) {
+        const restLen = activeTailRest.length;
+        const lastIdx = lastHistWork ? shToIdx(lastHistWork) : 3;
+        if (restLen < 3) {
+          startEdges.push({ act: 3, nextState: encState(0, lastIdx, 10 + restLen), pen: 0 });
+        }
+        if (targetWorkingDays >= 1 && (lastIdx === 3 || restLen >= (lastIdx === 2 ? 2 : minNonNightRest))) {
+          const pen = lastIdx !== 3 && lastIdx !== 2 && restLen === 1 ? 15 : 0;
+          if (lastIdx === 3) {
+            for (const ns of [0, 1, 2]) {
+              startEdges.push({ act: ns, nextState: encState(1, ns, 0), pen: 0 });
+            }
+          } else {
+            const ns = NEXT_SH[lastIdx];
+            startEdges.push({ act: ns, nextState: encState(1, ns, 0), pen });
+          }
+        }
+      } else {
+        startEdges.push({ act: 3, nextState: encState(0, 3, 10), pen: 0 });
+        if (targetWorkingDays >= 1) {
+          for (const ns of [0, 1, 2]) {
+            startEdges.push({ act: ns, nextState: encState(1, ns, 5), pen: 0 });
+          }
+        }
+      }
+
+      if (startEdges.length === 0) {
+        return { layers: [], feasible: false, maxNodes: 0, cAct: [], cNext: [] };
+      }
+
+      // Forward reachability sets: activeStates[d] for d = 1..daysCount
+      const activeStates: number[][] = Array.from({ length: daysCount + 1 }, () => []);
+      const seen = new Uint8Array(numStatesPerDay);
+      for (const e of startEdges) {
+        if (!seen[e.nextState]) {
+          seen[e.nextState] = 1;
+          activeStates[1].push(e.nextState);
+        }
+      }
+
+      const stepTransitions = (state: number): Array<{ act: number; nextState: number; pen: number }> => {
+        const ml = state % 13;
+        const tmp = (state - ml) / 13;
+        const sh = tmp % 4;
+        const w = (tmp - sh) / 4;
+        const out: Array<{ act: number; nextState: number; pen: number }> = [];
+
+        if (ml < 10) {
+          const isUnb = ml >= 5;
+          const len = isUnb ? ml - 4 : ml + 1;
+          if (len < 5 && w + 1 <= targetWorkingDays) {
+            out.push({ act: sh, nextState: encState(w + 1, sh, ml + 1), pen: 0 });
+          }
+          if (len >= 3 || isUnb) {
+            out.push({ act: 3, nextState: encState(w, sh, 10), pen: 0 });
+          }
+        } else {
+          const len = ml - 9;
+          if (len < 3) {
+            out.push({ act: 3, nextState: encState(w, sh, ml + 1), pen: 0 });
+          }
+          if (w + 1 <= targetWorkingDays) {
+            if (sh === 3) {
+              for (const ns of [0, 1, 2]) {
+                out.push({ act: ns, nextState: encState(w + 1, ns, 0), pen: 0 });
+              }
+            } else if (len >= (sh === 2 ? 2 : minNonNightRest)) {
+              const ns = NEXT_SH[sh];
+              const pen = sh !== 2 && len === 1 ? 15 : 0;
+              out.push({ act: ns, nextState: encState(w + 1, ns, 0), pen });
+            }
+          }
+        }
+        return out;
+      };
+
+      for (let d = 1; d < daysCount; d++) {
+        seen.fill(0);
+        for (const st of activeStates[d]) {
+          for (const tr of stepTransitions(st)) {
+            if (!seen[tr.nextState]) {
+              seen[tr.nextState] = 1;
+              activeStates[d + 1].push(tr.nextState);
+            }
+          }
+        }
+      }
+
+      // Backward reachability filter from terminal states (w === targetWorkingDays at d = daysCount)
+      const reachNext = new Int32Array(numStatesPerDay).fill(-1);
+      let termIdx = 0;
+      for (const st of activeStates[daysCount]) {
+        const ml = st % 13;
+        const tmp = (st - ml) / 13;
+        const sh = tmp % 4;
+        const w = (tmp - sh) / 4;
+        if (w === targetWorkingDays) {
+          reachNext[st] = termIdx++;
+        }
+      }
+      if (termIdx === 0) {
+        return { layers: [], feasible: false, maxNodes: 0, cAct: [], cNext: [] };
+      }
+
+      const layers: DagEdge[][][] = new Array(daysCount);
+      const reachCur = new Int32Array(numStatesPerDay);
+      for (let d = daysCount - 1; d >= 1; d--) {
+        reachCur.fill(-1);
+        const dayLayer: DagEdge[][] = [];
+        for (const st of activeStates[d]) {
+          const nodeEdges: DagEdge[] = [];
+          for (const tr of stepTransitions(st)) {
+            const nxtIdx = reachNext[tr.nextState];
+            if (nxtIdx !== -1) {
+              nodeEdges.push({ act: tr.act, nextNode: nxtIdx, pen: tr.pen });
+            }
+          }
+          if (nodeEdges.length > 0) {
+            reachCur[st] = dayLayer.length;
+            dayLayer.push(nodeEdges);
+          }
+        }
+        if (dayLayer.length === 0) {
+          return { layers: [], feasible: false, maxNodes: 0, cAct: [], cNext: [] };
+        }
+        layers[d] = dayLayer;
+        reachNext.set(reachCur);
+      }
+
+      const rootEdges: DagEdge[] = [];
+      for (const e of startEdges) {
+        const nxtIdx = reachNext[e.nextState];
+        if (nxtIdx !== -1) {
+          rootEdges.push({ act: e.act, nextNode: nxtIdx, pen: e.pen });
+        }
+      }
+      if (rootEdges.length === 0) {
+        return { layers: [], feasible: false, maxNodes: 0, cAct: [], cNext: [] };
+      }
+      layers[0] = [rootEdges];
+      let maxNodes = 1;
+      const cAct: Int8Array[] = new Array(daysCount);
+      const cNext: Int32Array[] = new Array(daysCount);
+      for (let d = 0; d < daysCount; d++) {
+        const len = layers[d].length;
+        if (len > maxNodes) maxNodes = len;
+        cAct[d] = new Int8Array(len);
+        cNext[d] = new Int32Array(len);
+      }
+      return { layers, feasible: true, maxNodes, cAct, cNext };
+    };
+
+    const covPenalty = (m: number, a: number, n: number, dayWeight: number = 1) => {
+      const hard =
+        (m < 1 ? 1500 * dayWeight * (1 - m) : 0) +
+        (a < 2 ? 1500 * dayWeight * (2 - a) : 0) +
+        (n !== 2 ? 1800 * dayWeight * Math.abs(n - 2) : 0);
+      const soft =
+        (m > 1 ? 10 * (m - 1) + (m > 2 ? 25 * (m - 2) : 0) : 0) +
+        (a > 2 ? 10 * (a - 2) + (a > 3 ? 25 * (a - 3) : 0) : 0);
+      return hard + soft;
+    };
+
+    const dayCostScratch = new Float64Array(daysCount * 4);
+    let dpNextBuf = new Float64Array(512);
+    let dpCurBuf = new Float64Array(512);
+
+    const solveBestPath = (
+      dag: EmpDag,
+      otherM: Int32Array,
+      otherA: Int32Array,
+      otherN: Int32Array,
+      dayWeights: Float64Array | null,
+      noise: Float64Array | null
+    ): number[] => {
+      if (dag.maxNodes > dpNextBuf.length) {
+        dpNextBuf = new Float64Array(dag.maxNodes + 64);
+        dpCurBuf = new Float64Array(dag.maxNodes + 64);
+      }
+      for (let d = 0; d < daysCount; d++) {
+        const m0 = otherM[d];
+        const a0 = otherA[d] + fixedAfternoonCoverage[d];
+        const n0 = otherN[d];
+        const dw = dayWeights ? dayWeights[d] : 1;
+        const base = d * 4;
+        dayCostScratch[base + 0] = covPenalty(m0, a0 + 1, n0, dw) + (noise ? noise[base + 0] : 0);
+        dayCostScratch[base + 1] = covPenalty(m0 + 1, a0, n0, dw) + (noise ? noise[base + 1] : 0);
+        dayCostScratch[base + 2] = covPenalty(m0, a0, n0 + 1, dw) + (noise ? noise[base + 2] : 0);
+        dayCostScratch[base + 3] = covPenalty(m0, a0, n0, dw) + (noise ? noise[base + 3] : 0);
+      }
+
+      const { layers, cAct: dpChoicesAct, cNext: dpChoicesNext } = dag;
+
+      for (let d = daysCount - 1; d >= 0; d--) {
+        const layer = layers[d];
+        const nNodes = layer.length;
+        const cAct = dpChoicesAct[d];
+        const cNext = dpChoicesNext[d];
+        const base = d * 4;
+        const isLast = d === daysCount - 1;
+        const c0 = dayCostScratch[base + 0];
+        const c1 = dayCostScratch[base + 1];
+        const c2 = dayCostScratch[base + 2];
+        const c3 = dayCostScratch[base + 3];
+
+        for (let u = 0; u < nNodes; u++) {
+          const edges = layer[u];
+          const elen = edges.length;
+          let bestVal = Infinity;
+          let bestA = 3;
+          let bestV = 0;
+          for (let ei = 0; ei < elen; ei++) {
+            const edge = edges[ei];
+            const act = edge.act;
+            const actCost = act === 0 ? c0 : act === 1 ? c1 : act === 2 ? c2 : c3;
+            const vCost = isLast ? 0 : dpNextBuf[edge.nextNode];
+            const val = actCost + edge.pen + vCost;
+            if (val < bestVal) {
+              bestVal = val;
+              bestA = act;
+              bestV = edge.nextNode;
+            }
+          }
+          dpCurBuf[u] = bestVal;
+          cAct[u] = bestA;
+          cNext[u] = bestV;
+        }
+        const tmp = dpNextBuf;
+        dpNextBuf = dpCurBuf;
+        dpCurBuf = tmp;
+      }
+
+      const path = new Array<number>(daysCount);
+      let curNode = 0;
+      for (let d = 0; d < daysCount; d++) {
+        path[d] = dpChoicesAct[d][curNode];
+        curNode = dpChoicesNext[d][curNode];
+      }
+      return path;
+    };
+
+    const buildRowsFromPaths = (paths: number[][]): Record<string, Record<string, string>> => {
+      const candidateRows: Record<string, Record<string, string>> = {};
+      allEmployees.forEach((emp) => {
+        candidateRows[emp] = {};
+        if (excludedSet.has(emp)) {
+          dateColumns.forEach(({ isoDate }) => {
+            candidateRows[emp][isoDate] = 'OFF';
+          });
+        }
+      });
+      fixedMidEmployees.forEach((emp) => {
+        dateColumns.forEach(({ date, isoDate }) => {
+          candidateRows[emp][isoDate] = isFixedStaffOffDate(date, isoDate) ? 'OFF' : 'MID';
+        });
+      });
+      fixedWeekdayMAEmployees.forEach((emp) => {
+        dateColumns.forEach(({ date, isoDate }) => {
+          candidateRows[emp][isoDate] = isFixedStaffOffDate(date, isoDate)
+            ? 'OFF'
+            : getIsoWeekNumber(date) % 2 === 1
+              ? 'M'
+              : 'A';
+        });
+      });
+      rotatingEmployees.forEach((emp, eIdx) => {
+        const path = paths[eIdx];
+        dateColumns.forEach(({ index, isoDate }) => {
+          candidateRows[emp][isoDate] = ACT_SHIFT[path[index]];
+        });
+      });
+      return candidateRows;
+    };
+
+    let rngState = (seed ^ 0x9e3779b9) >>> 0;
+    const nextRand = (): number => {
+      rngState = (rngState + 0x6d2b79f5) >>> 0;
+      let t = Math.imul(rngState ^ (rngState >>> 15), 1 | rngState);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const shuffleStage3 = (arr: number[]): void => {
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(nextRand() * (i + 1));
+        const tmp = arr[i];
+        arr[i] = arr[j];
+        arr[j] = tmp;
+      }
+    };
+    const isStage3PathValid = (dag: EmpDag, path: number[]): boolean => {
+      let u = 0;
+      for (let d = 0; d < daysCount; d++) {
+        const edges = dag.layers[d][u];
+        const act = path[d];
+        let found = -1;
+        for (let ei = 0; ei < edges.length; ei++) {
+          if (edges[ei].act === act) {
+            found = edges[ei].nextNode;
+            break;
+          }
+        }
+        if (found === -1) return false;
+        u = found;
+      }
+      return true;
+    };
+    const solveStage3ExtremeCount = (dag: EmpDag, targetAct: number, sign: 1 | -1): number => {
+      let dpNext = new Float64Array(Math.max(1, dag.maxNodes));
+      let dpCur = new Float64Array(Math.max(1, dag.maxNodes));
+      for (let d = daysCount - 1; d >= 0; d--) {
+        const layer = dag.layers[d];
+        const isLast = d === daysCount - 1;
+        for (let u = 0; u < layer.length; u++) {
+          const edges = layer[u];
+          let bestVal = Infinity;
+          for (let ei = 0; ei < edges.length; ei++) {
+            const edge = edges[ei];
+            const val = (edge.act === targetAct ? sign : 0) + (isLast ? 0 : dpNext[edge.nextNode]);
+            if (val < bestVal) bestVal = val;
+          }
+          dpCur[u] = bestVal;
+        }
+        const tmp = dpNext;
+        dpNext = dpCur;
+        dpCur = tmp;
+      }
+      return sign === 1 ? dpNext[0] : -dpNext[0];
+    };
+
+    const evalCovWeighted = (mArr: Int32Array, aArr: Int32Array, nArr: Int32Array, dayWeights: Float64Array | null) => {
+      let hard = 0;
+      let total = 0;
+      let weightedTotal = 0;
+      for (let d = 0; d < daysCount; d++) {
+        const m = mArr[d];
+        const a = aArr[d] + fixedAfternoonCoverage[d];
+        const n = nArr[d];
+        if (m < 1 || a < 2 || n !== 2) hard++;
+        const baseP = covPenalty(m, a, n, 1);
+        total += baseP;
+        weightedTotal += dayWeights ? covPenalty(m, a, n, dayWeights[d]) : baseP;
+      }
+      return { hard, total, weightedTotal };
+    };
+
+    const addPath = (path: number[], sign: number, mArr: Int32Array, aArr: Int32Array, nArr: Int32Array) => {
+      for (let d = 0; d < daysCount; d++) {
+        const act = path[d];
+        if (act === 0) aArr[d] += sign;
+        else if (act === 1) mArr[d] += sign;
+        else if (act === 2) nArr[d] += sign;
+      }
+    };
+
+    const hasSufficientDagCapacity = (dags: EmpDag[]): boolean => {
+      const needM = daysCount;
+      let needRotA = 0;
+      for (let d = 0; d < daysCount; d++) {
+        if (fixedAfternoonCoverage[d] < 2) needRotA += 2 - fixedAfternoonCoverage[d];
+      }
+      const needN = daysCount * 2;
+      const totalSlots = dags.length * targetWorkingDays;
+      let sumMinA = 0, sumMaxA = 0, sumMinM = 0, sumMaxM = 0, sumMinN = 0, sumMaxN = 0;
+      for (let i = 0; i < dags.length; i++) {
+        sumMinA += solveStage3ExtremeCount(dags[i], 0, 1);
+        sumMaxA += solveStage3ExtremeCount(dags[i], 0, -1);
+        sumMinM += solveStage3ExtremeCount(dags[i], 1, 1);
+        sumMaxM += solveStage3ExtremeCount(dags[i], 1, -1);
+        sumMinN += solveStage3ExtremeCount(dags[i], 2, 1);
+        sumMaxN += solveStage3ExtremeCount(dags[i], 2, -1);
+      }
+      if (sumMaxM < needM || sumMaxA < needRotA || sumMaxN < needN || sumMinN > needN) return false;
+      if (sumMinM + needRotA + needN > totalSlots) return false;
+      if (sumMinA + needM + needN > totalSlots) return false;
+      if (sumMinN + needM + needRotA > totalSlots) return false;
+      return true;
+    };
+
+    const R = rotatingEmployees.length;
+    const priorBestPaths = rotatingEmployees.map((emp) =>
+      dateColumns.map(({ isoDate }) => shToIdx(shiftKey(bestResultRows[emp]?.[isoDate] ?? 'OFF')))
+    );
+    const dayWeights = new Float64Array(daysCount);
+    const noise = new Float64Array(daysCount * 4);
+    const empPool = Array.from({ length: R }, (_, i) => i);
+
+    for (const minRest of [2, 1]) {
+      if (bestReport?.isFullyCompliant && bestHandoffSafe) break;
+      if (bestReport?.isFullyCompliant && minRest === 1) break;
+      const dags = rotatingEmployees.map((emp) => buildEmpDag(rotatingHistories[emp], minRest));
+      if (dags.some((g) => !g.feasible) || !hasSufficientDagCapacity(dags)) continue;
+
+      const canSeedStage2 = !bestReport?.isFullyCompliant && priorBestPaths.every((p, idx) => isStage3PathValid(dags[idx], p));
+      const numRestarts = minRest === 2 ? 6 : 5;
+      let compliantRestarts = 0;
+      for (let restart = 0; restart < numRestarts; restart++) {
+        if (bestReport?.isFullyCompliant && bestHandoffSafe) break;
+        if (bestReport?.isFullyCompliant && compliantRestarts >= 3) break;
+
+        dayWeights.fill(1);
+        let paths: number[][] = new Array(R);
+        const curM = new Int32Array(daysCount);
+        const curA = new Int32Array(daysCount);
+        const curN = new Int32Array(daysCount);
+        const order = Array.from({ length: R }, (_, i) => i);
+        shuffleStage3(order);
+
+        if (restart === 0 && canSeedStage2) {
+          for (let eIdx = 0; eIdx < R; eIdx++) {
+            paths[eIdx] = priorBestPaths[eIdx];
+            addPath(paths[eIdx], 1, curM, curA, curN);
+          }
+        } else {
+          // Greedy randomized initialization
+          for (let oi = 0; oi < R; oi++) {
+            const eIdx = order[oi];
+            if (restart > 0 && oi < 3) {
+              for (let k = 0; k < noise.length; k++) noise[k] = nextRand() * 250;
+            } else {
+              for (let k = 0; k < noise.length; k++) noise[k] = nextRand() * (restart === 0 ? 10 : 8);
+            }
+            const p = solveBestPath(dags[eIdx], curM, curA, curN, null, noise);
+            paths[eIdx] = p;
+            addPath(p, 1, curM, curA, curN);
+          }
+        }
+
+        // Coordinate-descent best-response sweeps
+        const runSweeps = (maxSweeps: number, useWeights: boolean) => {
+          const wArr = useWeights ? dayWeights : null;
+          for (let sweep = 0; sweep < maxSweeps; sweep++) {
+            let changed = false;
+            for (let oi = 0; oi < R; oi++) {
+              const eIdx = order[(oi + sweep) % R];
+              const oldP = paths[eIdx];
+              const before = evalCovWeighted(curM, curA, curN, wArr).weightedTotal;
+              addPath(oldP, -1, curM, curA, curN);
+              const newP = solveBestPath(dags[eIdx], curM, curA, curN, wArr, null);
+              addPath(newP, 1, curM, curA, curN);
+              const after = evalCovWeighted(curM, curA, curN, wArr).weightedTotal;
+              if (after < before) {
+                paths[eIdx] = newP;
+                changed = true;
+              } else if (after > before) {
+                addPath(newP, -1, curM, curA, curN);
+                addPath(oldP, 1, curM, curA, curN);
+              } else {
+                paths[eIdx] = newP;
+              }
+            }
+            if (!changed) break;
+          }
+        };
+
+        if (!(restart === 0 && canSeedStage2)) {
+          runSweeps(3, false);
+        }
+
+        // Multi-employee Ruin-and-Recreate Simulated Annealing + Guided Local Search dayWeights
+        let curEval = evalCovWeighted(curM, curA, curN, dayWeights);
+        let bestRestartHard = curEval.hard;
+        let bestRestartTotal = curEval.total;
+        let bestRestartPaths = paths.map((p) => p);
+
+        let temp = 1600;
+        const cool = 0.994;
+        const saSteps = curEval.hard > 0 ? 1500 : 0;
+        for (let step = 0; step < saSteps && bestRestartHard > 0; step++) {
+          const badDays: number[] = [];
+          for (let d = 0; d < daysCount; d++) {
+            if (curM[d] < 1 || curA[d] + fixedAfternoonCoverage[d] < 2 || curN[d] !== 2) {
+              badDays.push(d);
+            }
+          }
+          if (badDays.length === 0) break;
+
+          // Guided Local Search: boost weights on stubborn bad days every 35 steps
+          if (step > 0 && step % 35 === 0) {
+            for (const bd of badDays) {
+              dayWeights[bd] = Math.min(8, dayWeights[bd] + 0.5);
+            }
+            if (step % 210 === 0) {
+              for (let d = 0; d < daysCount; d++) dayWeights[d] = 1 + (dayWeights[d] - 1) * 0.5;
+            }
+            curEval = evalCovWeighted(curM, curA, curN, dayWeights);
+          }
+
+          const focusDay = badDays[Math.floor(nextRand() * badDays.length)];
+          const k = Math.min(R, step % 3 === 0 ? 3 : 2);
+          shuffleStage3(empPool);
+          const ruinGroup = empPool.slice(0, k);
+
+          const savedSub: number[][] = ruinGroup.map((idx) => paths[idx]);
+
+          for (let gi = 0; gi < ruinGroup.length; gi++) {
+            addPath(paths[ruinGroup[gi]], -1, curM, curA, curN);
+          }
+
+          const noiseAmp = Math.min(350, temp * 0.32);
+          for (let gi = 0; gi < ruinGroup.length; gi++) {
+            const eIdx = ruinGroup[gi];
+            if (gi === 0 && nextRand() < 0.5) {
+              for (let nk = 0; nk < noise.length; nk++) noise[nk] = nextRand() * 6;
+              for (let d = Math.max(0, focusDay - 5); d <= Math.min(daysCount - 1, focusDay + 5); d++) {
+                for (let a = 0; a < 4; a++) noise[d * 4 + a] += (nextRand() - 0.5) * noiseAmp * 3;
+              }
+            } else {
+              for (let nk = 0; nk < noise.length; nk++) noise[nk] = nextRand() * (4 + noiseAmp * 0.25);
+            }
+            const newP = solveBestPath(dags[eIdx], curM, curA, curN, dayWeights, noise);
+            paths[eIdx] = newP;
+            addPath(newP, 1, curM, curA, curN);
+          }
+
+          let nextEval = evalCovWeighted(curM, curA, curN, dayWeights);
+          const improvedRecord = nextEval.hard < bestRestartHard;
+          if (improvedRecord) {
+            runSweeps(2, true);
+            nextEval = evalCovWeighted(curM, curA, curN, dayWeights);
+          }
+
+          const delta = nextEval.weightedTotal - curEval.weightedTotal;
+          const accept =
+            improvedRecord ||
+            delta <= 0 ||
+            nextRand() < Math.exp(-delta / Math.max(1, temp));
+
+          if (accept) {
+            curEval = nextEval;
+            if (
+              curEval.hard < bestRestartHard ||
+              (curEval.hard === bestRestartHard && curEval.total < bestRestartTotal)
+            ) {
+              bestRestartHard = curEval.hard;
+              bestRestartTotal = curEval.total;
+              bestRestartPaths = paths.map((p) => p);
+              if (bestRestartHard === 0) break;
+            }
+          } else {
+            for (let gi = 0; gi < ruinGroup.length; gi++) {
+              const eIdx = ruinGroup[gi];
+              addPath(paths[eIdx], -1, curM, curA, curN);
+              paths[eIdx] = savedSub[gi];
+              addPath(savedSub[gi], 1, curM, curA, curN);
+            }
+          }
+
+          temp *= cool;
+        }
+
+        paths = bestRestartPaths;
+        curM.fill(0);
+        curA.fill(0);
+        curN.fill(0);
+        for (let idx = 0; idx < R; idx++) addPath(paths[idx], 1, curM, curA, curN);
+        runSweeps(2, false);
+
+        const candidateRows = buildRowsFromPaths(paths);
+        const testReport = validateScheduleCompliance(
+          candidateRows,
+          dateColumns,
+          roster,
+          targetYear,
+          targetMonth,
+          targetWorkingDays,
+          options.excludedEmployees ?? []
+        );
+        const curHandoffSafe = testReport.isFullyCompliant ? isMonthEndHandoffSafe(candidateRows) : false;
+        const curScore = scoreReport(testReport, curHandoffSafe);
+
+        if (testReport.isFullyCompliant) compliantRestarts++;
+
+        if (!bestReport || curScore < bestScoreValue) {
+          bestResultRows = candidateRows;
+          bestReport = testReport;
+          bestScoreValue = curScore;
+          bestHandoffSafe = curHandoffSafe;
+          finalSeed = seed + restart;
+          if (testReport.isFullyCompliant && curHandoffSafe) {
+            break;
+          }
+        }
+      }
+      // If minRest = 2 found a fully compliant solution (even if handoffSafe was false), do not downgrade to 1-day rests
+      if (bestReport?.isFullyCompliant) break;
     }
   }
   const validation = bestReport ?? validateScheduleCompliance(
@@ -2061,8 +2861,10 @@ export function validateScheduleCompliance(
   targetYear?: number,
   targetMonth?: number,
   targetWorkingDays?: number,
-  excludedEmployees: string[] = []
+  excludedEmployees: string[] = [],
+  options?: ValidationOptions
 ): ScheduleValidationReport {
+  void options;
   const excludedSet = new Set(excludedEmployees);
   const dailyCoverage: Record<string, DayCoverage> = {};
   const employeeStats: Record<string, EmployeeMonthStats> = {};
@@ -2478,7 +3280,7 @@ export function loadHistoricalSchedule(
 ): GeneratedScheduleResult {
   const monthDateCols = buildMonthDateColumns(year, month);
   const rows: Record<string, Record<string, string>> = {};
-  const employees = roster.employees.length > 0 ? roster.employees : Object.keys(roster.rows);
+  const employees = roster.employees && roster.employees.length > 0 ? roster.employees : Object.keys(roster.rows);
 
   employees.forEach((emp) => {
     rows[emp] = {};
@@ -2613,7 +3415,7 @@ export async function exportRosterToExcelFile(
   const targetWorkingDays = countLegalWorkingDaysInMonth(roster.month, roster.year);
 
   // 5. Employee Rows
-  const employees = roster.employees.length > 0 ? roster.employees : Object.keys(roster.rows);
+  const employees = roster.employees && roster.employees.length > 0 ? roster.employees : Object.keys(roster.rows);
   const firstDayColLetter = ws.getColumn(2).letter;
   const lastDayColLetter = ws.getColumn(1 + numDays).letter;
   const totalColLetter = ws.getColumn(totalColIdx).letter;
@@ -2753,7 +3555,8 @@ export async function exportRosterToExcelFile(
         result: count
       };
 
-      const dayOfWeek = new Date(col.isoDate).getDay();
+      const [yNum, mNum, dNum] = col.isoDate.split('-').map(Number);
+      const dayOfWeek = new Date(yNum, mNum - 1, dNum).getDay();
       const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
       const isHoliday = ROMANIAN_HOLIDAYS.has(col.isoDate);
       const isSpecial = isWeekend || isHoliday;
@@ -2976,29 +3779,56 @@ export function calculateAbsReadjustments(
   const findOffsetDayForEmp = (
     baseRows: Record<string, Record<string, string>>,
     emp: string,
-    excludeIsoDate: string
+    excludeIsoDate: string,
+    pendingChanges: Array<{ isoDate: string; employee?: string; toShift: string }> = []
   ): { offsetIso: string; oldShift: string } | null => {
+    const preRows = cloneRows(baseRows);
+    for (const pc of pendingChanges) {
+      const targetEmp = pc.employee ?? emp;
+      if (!preRows[targetEmp]) preRows[targetEmp] = {};
+      preRows[targetEmp][pc.isoDate] = pc.toShift;
+    }
+
+    let bestCandidate: { offsetIso: string; oldShift: string; violations: number; penalty: number } | null = null;
     for (let k = 0; k < dateColumns.length; k++) {
       const kIso = dateColumns[k].isoDate;
       if (kIso === excludeIsoDate) continue;
-      const curS = shiftKey(baseRows[emp]?.[kIso] ?? 'OFF');
+      if (pendingChanges.some((pc) => (pc.employee ?? emp) === emp && pc.isoDate === kIso)) continue;
+      const curS = shiftKey(preRows[emp]?.[kIso] ?? 'OFF');
       if (curS !== 'M' && curS !== 'A') continue;
 
       let count = 0;
-      for (const re of rotatingEmployees) {
-        if (shiftKey(baseRows[re]?.[kIso] ?? 'OFF') === curS) count++;
+      if (curS === 'M') {
+        for (const re of rotatingEmployees) {
+          if (shiftKey(preRows[re]?.[kIso] ?? 'OFF') === 'M') count++;
+        }
+      } else {
+        for (const ae of allEmployees) {
+          if (shiftKey(preRows[ae]?.[kIso] ?? 'OFF') === 'A') count++;
+        }
       }
       const minStaff = curS === 'M' ? 2 : 3;
       if (count >= minStaff) {
-        const tempRows = cloneRows(baseRows);
+        const tempRows = cloneRows(preRows);
         tempRows[emp][kIso] = 'OFF';
-        const { rep } = evaluatePenalty(tempRows);
+        const { penalty, rep } = evaluatePenalty(tempRows);
         if (!rep.warnings.some((w) => w.startsWith(`${kIso}:`))) {
-          return { offsetIso: kIso, oldShift: curS };
+          if (
+            !bestCandidate ||
+            rep.totalViolations < bestCandidate.violations ||
+            (rep.totalViolations === bestCandidate.violations && penalty < bestCandidate.penalty)
+          ) {
+            bestCandidate = {
+              offsetIso: kIso,
+              oldShift: curS,
+              violations: rep.totalViolations,
+              penalty
+            };
+          }
         }
       }
     }
-    return null;
+    return bestCandidate ? { offsetIso: bestCandidate.offsetIso, oldShift: bestCandidate.oldShift } : null;
   };
 
   interface CandidatePlan {
@@ -3171,7 +4001,6 @@ export function calculateAbsReadjustments(
       // Category 3: OFF staff who didn't work Night on prev day
       const eligibleOff = offStaff.filter((emp) => getShift(workingRows, emp, prevIso) !== 'N');
       for (const emp of eligibleOff) {
-        const offset = findOffsetDayForEmp(workingRows, emp, isoDate);
         const changes3: CandidatePlan['changes'] = [
           {
             isoDate,
@@ -3182,16 +4011,36 @@ export function calculateAbsReadjustments(
             absColleague: absNames
           }
         ];
+        let clearedWorkingDays = 0;
         if (nextIso && getShift(workingRows, emp, nextIso) !== 'OFF') {
+          const nextOrig = getShift(workingRows, emp, nextIso);
+          if (nextOrig === 'M' || nextOrig === 'A' || nextOrig === 'N' || nextOrig === 'MID') {
+            clearedWorkingDays++;
+          }
           changes3.push({
             isoDate: nextIso,
             employee: emp,
-            fromShift: getShift(workingRows, emp, nextIso),
+            fromShift: nextOrig,
             toShift: 'OFF',
             reason: `Mandatory post-night rest day 1.`,
             absColleague: absNames
           });
         }
+        if (nextNextIso && getShift(workingRows, emp, nextNextIso) !== 'OFF') {
+          const nextNextOrig = getShift(workingRows, emp, nextNextIso);
+          if (nextNextOrig === 'M' || nextNextOrig === 'A' || nextNextOrig === 'N' || nextNextOrig === 'MID') {
+            clearedWorkingDays++;
+          }
+          changes3.push({
+            isoDate: nextNextIso,
+            employee: emp,
+            fromShift: nextNextOrig,
+            toShift: 'OFF',
+            reason: `Mandatory post-night rest day 2.`,
+            absColleague: absNames
+          });
+        }
+        const offset = clearedWorkingDays === 0 ? findOffsetDayForEmp(workingRows, emp, isoDate, changes3) : null;
         if (offset) {
           changes3.push({
             isoDate: offset.offsetIso,
@@ -3279,7 +4128,8 @@ export function calculateAbsReadjustments(
       if (FIXED_WEEKDAY_MA_EMPLOYEES.length > 0) {
         const dayOfWeek = col.date.getDay();
         const isWk = dayOfWeek === 0 || dayOfWeek === 6;
-        if (!isWk) {
+        const isHol = ROMANIAN_HOLIDAYS.has(isoDate);
+        if (!isWk && !isHol) {
           for (const gt of FIXED_WEEKDAY_MA_EMPLOYEES) {
             if (getShift(workingRows, gt, isoDate) === 'A') {
               const changes: CandidatePlan['changes'] = [
@@ -3310,8 +4160,7 @@ export function calculateAbsReadjustments(
       });
 
       for (const emp of eligibleOff) {
-        const offset = findOffsetDayForEmp(workingRows, emp, isoDate);
-        const changes: CandidatePlan['changes'] = [
+        const preChanges: CandidatePlan['changes'] = [
           {
             isoDate,
             employee: emp,
@@ -3321,6 +4170,8 @@ export function calculateAbsReadjustments(
             absColleague: absNames
           }
         ];
+        const offset = findOffsetDayForEmp(workingRows, emp, isoDate, preChanges);
+        const changes = [...preChanges];
         if (offset) {
           changes.push({
             isoDate: offset.offsetIso,
@@ -3340,31 +4191,33 @@ export function calculateAbsReadjustments(
       }
 
       if (plans.length > 0) {
+        plans.sort((a, b) => a.violations - b.violations || a.penalty - b.penalty);
+        const minViolations = plans[0].violations;
+        const minViolPlans = plans.filter((p) => p.violations === minViolations);
         let chosen: CandidatePlan;
 
-        const prisecaruPlan = plans.find((p) => p.changes.some((c) => c.employee.includes('Prisecaru')));
-        const lucianPlan = plans.find((p) => p.changes.some((c) => c.employee.includes('Olteanu')));
-        const urzicaPlan = plans.find((p) => p.changes.some((c) => c.employee.includes('Urzica')));
+        const prisecaruPlan = minViolPlans.find((p) => p.changes.some((c) => c.employee.includes('Prisecaru')));
+        const lucianPlan = minViolPlans.find((p) => p.changes.some((c) => c.employee.includes('Olteanu')));
+        const urzicaPlan = minViolPlans.find((p) => p.changes.some((c) => c.employee.includes('Urzica')));
 
-        // Strategic variant assignment:
+        // Strategic variant assignment (only among minimum-violation plans):
         if (variantSeed === 0) {
-          // Variant 1: Give Prisecaru the morning shift on these 2 days as he is on after
-          chosen = prisecaruPlan ?? lucianPlan ?? plans[0];
+          // Variant 1: Prefer Prisecaru when equally compliant
+          chosen = prisecaruPlan ?? lucianPlan ?? minViolPlans[0];
         } else if (variantSeed === 1) {
-          // Variant 2: Urzica 1 morning and Lucian 1 morning
+          // Variant 2: Urzica 1 morning and Lucian 1 morning when equally compliant
           if (dayInBlock === 0) {
-            chosen = urzicaPlan ?? prisecaruPlan ?? plans[0];
+            chosen = urzicaPlan ?? prisecaruPlan ?? minViolPlans[0];
           } else {
-            chosen = lucianPlan ?? prisecaruPlan ?? plans[0];
+            chosen = lucianPlan ?? prisecaruPlan ?? minViolPlans[0];
           }
         } else if (variantSeed === 2) {
-          // Variant 3: Lucian covers both days
-          chosen = lucianPlan ?? prisecaruPlan ?? plans[0];
+          // Variant 3: Prefer Lucian when equally compliant
+          chosen = lucianPlan ?? prisecaruPlan ?? minViolPlans[0];
         } else {
           // Generic cycling across top variants
-          plans.sort((a, b) => a.penalty - b.penalty);
-          const bestPenalty = plans[0].penalty;
-          const topPlans = plans.filter((p) => p.penalty === bestPenalty);
+          const bestPenalty = minViolPlans[0].penalty;
+          const topPlans = minViolPlans.filter((p) => p.penalty === bestPenalty);
           chosen = topPlans[(variantSeed + dayInBlock + i) % topPlans.length];
         }
 
@@ -3418,7 +4271,8 @@ export function calculateAbsReadjustments(
       if (FIXED_WEEKDAY_MA_EMPLOYEES.length > 0) {
         const dayOfWeek = col.date.getDay();
         const isWk = dayOfWeek === 0 || dayOfWeek === 6;
-        if (!isWk) {
+        const isHol = ROMANIAN_HOLIDAYS.has(isoDate);
+        if (!isWk && !isHol) {
           for (const gt of FIXED_WEEKDAY_MA_EMPLOYEES) {
             if (getShift(workingRows, gt, isoDate) === 'M') {
               const changes: CandidatePlan['changes'] = [
@@ -3443,8 +4297,7 @@ export function calculateAbsReadjustments(
       // Category 3: OFF staff
       const eligibleOff = offStaff.filter((emp) => getShift(workingRows, emp, prevIso) !== 'N');
       for (const emp of eligibleOff) {
-        const offset = findOffsetDayForEmp(workingRows, emp, isoDate);
-        const changes: CandidatePlan['changes'] = [
+        const preChanges: CandidatePlan['changes'] = [
           {
             isoDate,
             employee: emp,
@@ -3454,6 +4307,8 @@ export function calculateAbsReadjustments(
             absColleague: absNames
           }
         ];
+        const offset = findOffsetDayForEmp(workingRows, emp, isoDate, preChanges);
+        const changes = [...preChanges];
         if (offset) {
           changes.push({
             isoDate: offset.offsetIso,
@@ -3522,17 +4377,18 @@ export function calculateAbsReadjustments(
 
       // Case A: Employee worked more days than target (e.g. called in from OFF)
       if (stats.totalWorkingDays > stats.targetWorkingDays) {
+        let bestOffset: { kIso: string; curS: string; rep: typeof currentValidation } | null = null;
         for (let k = 0; k < dateColumns.length; k++) {
           const kIso = dateColumns[k].isoDate;
           const curS = shiftKey(workingRows[emp]?.[kIso] ?? 'OFF');
           if (curS !== 'M' && curS !== 'A') continue;
 
-          // Check if shift has >= 3 staff
-          const curCount = rotatingEmployees.filter(
-            (re) => shiftKey(workingRows[re]?.[kIso] ?? 'OFF') === curS
-          ).length;
+          // Morning requires >= 1 rotating M after removal; Afternoon requires >= 2 total A (incl. weekday M/A) after removal
+          const curCount = curS === 'M'
+            ? rotatingEmployees.filter((re) => shiftKey(workingRows[re]?.[kIso] ?? 'OFF') === 'M').length
+            : allEmployees.filter((ae) => shiftKey(workingRows[ae]?.[kIso] ?? 'OFF') === 'A').length;
 
-          if (curCount >= 3) {
+          if (curCount >= (curS === 'M' ? 2 : 3)) {
             const testRows = cloneRows(workingRows);
             testRows[emp][kIso] = 'OFF';
             const testRep = validateScheduleCompliance(
@@ -3545,19 +4401,1063 @@ export function calculateAbsReadjustments(
             );
 
             if (testRep.totalViolations < currentValidation.totalViolations) {
-              workingRows[emp][kIso] = 'OFF';
-              currentValidation = testRep;
-              adjustments.push({
-                isoDate: kIso,
-                employee: emp,
-                fromShift: curS,
-                toShift: 'OFF',
-                reason: `Rebalanced: Added offsetting day off to preserve legal monthly norm of ${targetWorkingDays} working days.`,
-                absColleague: 'Rebalancing'
-              });
-              improved = true;
+              if (!bestOffset || testRep.totalViolations < bestOffset.rep.totalViolations) {
+                bestOffset = { kIso, curS, rep: testRep };
+              }
+            }
+          }
+        }
+        if (bestOffset) {
+          workingRows[emp][bestOffset.kIso] = 'OFF';
+          currentValidation = bestOffset.rep;
+          adjustments.push({
+            isoDate: bestOffset.kIso,
+            employee: emp,
+            fromShift: bestOffset.curS,
+            toShift: 'OFF',
+            reason: `Rebalanced: Added offsetting day off to preserve legal monthly norm of ${targetWorkingDays} working days.`,
+            absColleague: 'Rebalancing'
+          });
+          improved = true;
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 5. EXACT MINIMAL-DIFF DP+SA FALLBACK REPAIR (when heuristics leave violations)
+  // ---------------------------------------------------------------------------
+  if (currentValidation.totalViolations > 0 && rotatingEmployees.length > 0) {
+    const daysCount = dateColumns.length;
+    const GEN_NEXT = [1, 2, 0]; // A(0)->M(1), M(1)->N(2), N(2)->A(0)
+    const shToGen = (s: string) => (s === 'A' ? 0 : s === 'M' ? 1 : s === 'N' ? 2 : s === 'ABS' ? 4 : (s === 'H8' || s === 'HUP') ? 5 : 3);
+    const fixedMidSet = new Set(FIXED_MID_EMPLOYEES);
+    const fixedMaEmps = allEmployees.filter((e) => FIXED_WEEKDAY_MA_EMPLOYEES.includes(e));
+
+    let firstGlobalAbsIdx = daysCount;
+    const empFirstAbsIndices: number[] = [];
+    for (const emp of rotatingEmployees) {
+      let eFirst = daysCount;
+      for (let d = 0; d < daysCount; d++) {
+        if (shiftKey(rows[emp]?.[dateColumns[d].isoDate] ?? 'OFF') === 'ABS') {
+          eFirst = d;
+          if (d < firstGlobalAbsIdx) firstGlobalAbsIdx = d;
+          break;
+        }
+      }
+      if (eFirst < daysCount) empFirstAbsIndices.push(eFirst);
+    }
+    for (const emp of fixedMaEmps) {
+      for (let d = 0; d < daysCount; d++) {
+        if (shiftKey(rows[emp]?.[dateColumns[d].isoDate] ?? 'OFF') === 'ABS') {
+          if (d < firstGlobalAbsIdx) firstGlobalAbsIdx = d;
+          break;
+        }
+      }
+    }
+    if (firstGlobalAbsIdx === daysCount) firstGlobalAbsIdx = 0;
+    const hasDistinctEmpAbsStarts = empFirstAbsIndices.some((idx) => idx > firstGlobalAbsIdx);
+
+    // Extract raw history from priorRoster preserving ABS/H8/OFF/work sequence
+    const empHistories: Record<string, string[]> = {};
+    for (const emp of rotatingEmployees) {
+      const h: string[] = [];
+      if (priorRoster && priorRoster.dateColumns.length > 0) {
+        const tailCols = priorRoster.dateColumns.slice(-7);
+        for (const tc of tailCols) {
+          h.push(shiftKey(priorRoster.rows[emp]?.[tc.isoDate] ?? 'OFF'));
+        }
+      }
+      empHistories[emp] = h;
+    }
+
+    interface GenEdge {
+      act: number; // 0:A, 1:M, 2:N, 3:OFF(or Tir M/OFF/ABS/H8), 4:ABS, 5:H8/HUP
+      nextNode: number;
+      penA: number;
+      penB: number;
+    }
+    interface GenDag {
+      emp: string;
+      isFixedTir: boolean;
+      origCodes: string[];
+      origActs: number[];
+      layers: GenEdge[][][];
+      feasible: boolean;
+      maxNodes: number;
+      cAct: Int8Array[];
+      cNext: Int32Array[];
+    }
+
+    const buildTirGenDag = (emp: string): GenDag => {
+      const origCodes = dateColumns.map(({ isoDate }) => shiftKey(rows[emp]?.[isoDate] ?? 'OFF'));
+      const origActs = origCodes.map((c) => (c === 'A' ? 0 : 3));
+      const layers: GenEdge[][][] = new Array(daysCount);
+      for (let d = 0; d < daysCount; d++) {
+        const col = dateColumns[d];
+        const isWorkWeekday = !isFixedStaffOffDate(col.date, col.isoDate);
+        const orig = origCodes[d];
+        const edges: GenEdge[] = [];
+        if (isWorkWeekday && orig === 'M') {
+          edges.push({ act: 3, nextNode: 0, penA: 0, penB: 0 });
+          const flipPenA = d < firstGlobalAbsIdx ? 35 : 4;
+          const flipPenB = d < firstGlobalAbsIdx ? 400 : 40;
+          edges.push({ act: 0, nextNode: 0, penA: flipPenA, penB: flipPenB });
+        } else {
+          edges.push({ act: orig === 'A' ? 0 : 3, nextNode: 0, penA: 0, penB: 0 });
+        }
+        layers[d] = [edges];
+      }
+      return {
+        emp,
+        isFixedTir: true,
+        origCodes,
+        origActs,
+        layers,
+        feasible: true,
+        maxNodes: 1,
+        cAct: Array.from({ length: daysCount }, () => new Int8Array(1)),
+        cNext: Array.from({ length: daysCount }, () => new Int32Array(1))
+      };
+    };
+
+    const buildGeneralDag = (
+      emp: string,
+      empIdx: number,
+      minNonNightRest: number,
+      lockMode: 'globalPre' | 'empPre' | 'none'
+    ): GenDag => {
+      const origCodes = dateColumns.map(({ isoDate }) => shiftKey(rows[emp]?.[isoDate] ?? 'OFF'));
+      const origActs = origCodes.map((c) => shToGen(c));
+      let empFirstAbsIdx = Infinity;
+      let fixedNonWorkDrops = 0;
+      let empHasAbsOrH8 = false;
+      for (let d = 0; d < daysCount; d++) {
+        if (origActs[d] === 4) {
+          if (d < empFirstAbsIdx) empFirstAbsIdx = d;
+          fixedNonWorkDrops++;
+          empHasAbsOrH8 = true;
+        } else if (origActs[d] === 5) {
+          fixedNonWorkDrops++;
+          empHasAbsOrH8 = true;
+        }
+      }
+      const effectiveTarget = Math.max(0, targetWorkingDays - fixedNonWorkDrops);
+      const editableDays = origActs.filter((a) => a !== 4 && a !== 5).length;
+      if (effectiveTarget > editableDays) {
+        return { emp, isFixedTir: false, origCodes, origActs, layers: [], feasible: false, maxNodes: 0, cAct: [], cNext: [] };
+      }
+
+      const dayAllowed: number[][] = new Array(daysCount);
+      for (let d = 0; d < daysCount; d++) {
+        const oa = origActs[d];
+        if (oa === 4 || oa === 5) {
+          dayAllowed[d] = [oa];
+        } else if (lockMode === 'globalPre' && d < firstGlobalAbsIdx) {
+          dayAllowed[d] = [oa];
+        } else if (lockMode === 'empPre' && empFirstAbsIdx < Infinity && d < empFirstAbsIdx) {
+          dayAllowed[d] = [oa];
+        } else {
+          dayAllowed[d] = [0, 1, 2, 3];
+        }
+      }
+
+      const edgePens = (d: number, act: number, restPen: number): { penA: number; penB: number } => {
+        if (act === origActs[d]) return { penA: restPen, penB: restPen * 2 };
+        const tie = variantSeed > 0 ? (((empIdx * 31 + d * 17 + act * 7 + variantSeed * 13) % 7) * 0.1) : 0;
+        if (d < empFirstAbsIdx && empFirstAbsIdx < Infinity) {
+          return { penA: restPen + 120 + tie, penB: restPen * 2 + 1200 + tie };
+        }
+        if (d < firstGlobalAbsIdx) {
+          return { penA: restPen + 40 + tie, penB: restPen * 2 + 400 + tie };
+        }
+        if (empHasAbsOrH8) {
+          return { penA: restPen + 8 + tie, penB: restPen * 2 + 120 + tie };
+        }
+        return { penA: restPen + 3 + tie, penB: restPen * 2 + 45 + tie };
+      };
+
+      const numStates = (effectiveTarget + 1) * 4 * 13 * 4;
+      const enc = (w: number, sh: number, ml: number, offS: number) => (((w * 4 + sh) * 13 + ml) * 4 + offS);
+
+      const history = empHistories[emp] ?? [];
+      const activeTailWork = getActiveTailBlock(history);
+      const activeTailRest = activeTailWork.length === 0 ? getActiveTailRest(history) : [];
+      let lastHistWork: string | null = null;
+      for (let i = history.length - 1; i >= 0; i--) {
+        if (history[i] === 'A' || history[i] === 'M' || history[i] === 'N') {
+          lastHistWork = history[i];
+          break;
+        }
+      }
+
+      const allowed0 = dayAllowed[0];
+      const startEdges: Array<{ act: number; nextState: number; penA: number; penB: number }> = [];
+      if (activeTailWork.length > 0) {
+        const curShift = activeTailWork[activeTailWork.length - 1];
+        const curIdx = shToGen(curShift);
+        const totalWorkTail = activeTailWork.length;
+        let sameLen = 0;
+        for (let i = activeTailWork.length - 1; i >= 0 && activeTailWork[i] === curShift; i--) sameLen++;
+        if (curIdx <= 2) {
+          if (totalWorkTail < 5 && 1 <= effectiveTarget && allowed0.includes(curIdx)) {
+            const p = edgePens(0, curIdx, 0);
+            startEdges.push({ act: curIdx, nextState: enc(1, curIdx, totalWorkTail, 0), ...p });
+          }
+          if (sameLen >= 3) {
+            if (allowed0.includes(3)) {
+              startEdges.push({ act: 3, nextState: enc(0, curIdx, 10, 1), ...edgePens(0, 3, 0) });
+            }
+            if (allowed0.includes(4)) {
+              startEdges.push({ act: 4, nextState: enc(0, curIdx, 10, 0), ...edgePens(0, 4, 0) });
+            }
+            if (allowed0.includes(5)) {
+              startEdges.push({ act: 5, nextState: enc(0, curIdx, 10, 0), ...edgePens(0, 5, 0) });
+            }
+          }
+        }
+      } else if (history.length > 0) {
+        const restLen = activeTailRest.length;
+        const lastIdx = lastHistWork ? shToGen(lastHistWork) : 3;
+        const initOffS = Math.min(3, restLen);
+        const initMl = Math.min(12, 10 + restLen);
+        if (restLen < 3 && allowed0.includes(3)) {
+          startEdges.push({ act: 3, nextState: enc(0, lastIdx, initMl, restLen + 1), ...edgePens(0, 3, 0) });
+        }
+        if (allowed0.includes(4)) {
+          startEdges.push({ act: 4, nextState: enc(0, lastIdx, initMl, initOffS), ...edgePens(0, 4, 0) });
+        }
+        if (allowed0.includes(5)) {
+          startEdges.push({ act: 5, nextState: enc(0, lastIdx, initMl, 0), ...edgePens(0, 5, 0) });
+        }
+        if (1 <= effectiveTarget && (lastIdx === 3 || restLen >= (lastIdx === 2 ? 2 : minNonNightRest))) {
+          const rPen = lastIdx !== 3 && lastIdx !== 2 && restLen === 1 ? 15 : 0;
+          if (lastIdx === 3) {
+            for (const ns of [0, 1, 2]) {
+              if (allowed0.includes(ns)) {
+                startEdges.push({ act: ns, nextState: enc(1, ns, 0, 0), ...edgePens(0, ns, 0) });
+              }
+            }
+          } else {
+            const ns = GEN_NEXT[lastIdx];
+            if (allowed0.includes(ns)) {
+              startEdges.push({ act: ns, nextState: enc(1, ns, 0, 0), ...edgePens(0, ns, rPen) });
+            }
+          }
+        }
+      } else {
+        if (allowed0.includes(3)) {
+          startEdges.push({ act: 3, nextState: enc(0, 3, 10, 1), ...edgePens(0, 3, 0) });
+        }
+        if (allowed0.includes(4)) {
+          startEdges.push({ act: 4, nextState: enc(0, 3, 10, 0), ...edgePens(0, 4, 0) });
+        }
+        if (allowed0.includes(5)) {
+          startEdges.push({ act: 5, nextState: enc(0, 3, 10, 0), ...edgePens(0, 5, 0) });
+        }
+        if (1 <= effectiveTarget) {
+          for (const ns of [0, 1, 2]) {
+            if (allowed0.includes(ns)) {
+              startEdges.push({ act: ns, nextState: enc(1, ns, 5, 0), ...edgePens(0, ns, 0) });
+            }
+          }
+        }
+      }
+
+      if (startEdges.length === 0) {
+        return { emp, isFixedTir: false, origCodes, origActs, layers: [], feasible: false, maxNodes: 0, cAct: [], cNext: [] };
+      }
+
+      const activeStates: number[][] = Array.from({ length: daysCount + 1 }, () => []);
+      const seen = new Uint8Array(numStates);
+      for (const e of startEdges) {
+        if (!seen[e.nextState]) {
+          seen[e.nextState] = 1;
+          activeStates[1].push(e.nextState);
+        }
+      }
+
+      const stepTransitions = (d: number, st: number) => {
+        const offS = st % 4;
+        const t1 = (st - offS) / 4;
+        const ml = t1 % 13;
+        const t2 = (t1 - ml) / 13;
+        const sh = t2 % 4;
+        const w = (t2 - sh) / 4;
+        const allowed = dayAllowed[d];
+        const out: Array<{ act: number; nextState: number; penA: number; penB: number }> = [];
+
+        if (ml < 10) {
+          const isUnb = ml >= 5;
+          const len = isUnb ? ml - 4 : ml + 1;
+          if (len < 5 && w + 1 <= effectiveTarget && allowed.includes(sh)) {
+            out.push({ act: sh, nextState: enc(w + 1, sh, ml + 1, 0), ...edgePens(d, sh, 0) });
+          }
+          if (len >= 3 || isUnb) {
+            if (allowed.includes(3)) {
+              out.push({ act: 3, nextState: enc(w, sh, 10, 1), ...edgePens(d, 3, 0) });
+            }
+            if (allowed.includes(4)) {
+              out.push({ act: 4, nextState: enc(w, sh, 10, 0), ...edgePens(d, 4, 0) });
+            }
+            if (allowed.includes(5)) {
+              out.push({ act: 5, nextState: enc(w, sh, 10, 0), ...edgePens(d, 5, 0) });
+            }
+          }
+        } else {
+          const restLen = ml - 9;
+          const nextMl = Math.min(12, ml + 1);
+          if (offS < 3 && allowed.includes(3)) {
+            out.push({ act: 3, nextState: enc(w, sh, nextMl, offS + 1), ...edgePens(d, 3, 0) });
+          }
+          if (allowed.includes(4)) {
+            out.push({ act: 4, nextState: enc(w, sh, nextMl, offS), ...edgePens(d, 4, 0) });
+          }
+          if (allowed.includes(5)) {
+            out.push({ act: 5, nextState: enc(w, sh, nextMl, 0), ...edgePens(d, 5, 0) });
+          }
+          if (w + 1 <= effectiveTarget) {
+            if (sh === 3) {
+              for (const ns of [0, 1, 2]) {
+                if (allowed.includes(ns)) {
+                  out.push({ act: ns, nextState: enc(w + 1, ns, 0, 0), ...edgePens(d, ns, 0) });
+                }
+              }
+            } else if (restLen >= (sh === 2 ? 2 : minNonNightRest)) {
+              const ns = GEN_NEXT[sh];
+              if (allowed.includes(ns)) {
+                const rPen = sh !== 2 && restLen === 1 ? 15 : 0;
+                out.push({ act: ns, nextState: enc(w + 1, ns, 0, 0), ...edgePens(d, ns, rPen) });
+              }
+            }
+          }
+        }
+        return out;
+      };
+
+      for (let d = 1; d < daysCount; d++) {
+        seen.fill(0);
+        for (const st of activeStates[d]) {
+          for (const tr of stepTransitions(d, st)) {
+            if (!seen[tr.nextState]) {
+              seen[tr.nextState] = 1;
+              activeStates[d + 1].push(tr.nextState);
+            }
+          }
+        }
+      }
+
+      const reachNext = new Int32Array(numStates).fill(-1);
+      let termIdx = 0;
+      for (const st of activeStates[daysCount]) {
+        const offS = st % 4;
+        const t1 = (st - offS) / 4;
+        const ml = t1 % 13;
+        const t2 = (t1 - ml) / 13;
+        const sh = t2 % 4;
+        const w = (t2 - sh) / 4;
+        if (w === effectiveTarget) {
+          reachNext[st] = termIdx++;
+        }
+      }
+      if (termIdx === 0) {
+        return { emp, isFixedTir: false, origCodes, origActs, layers: [], feasible: false, maxNodes: 0, cAct: [], cNext: [] };
+      }
+
+      const layers: GenEdge[][][] = new Array(daysCount);
+      const reachCur = new Int32Array(numStates);
+      for (let d = daysCount - 1; d >= 1; d--) {
+        reachCur.fill(-1);
+        const dayLayer: GenEdge[][] = [];
+        for (const st of activeStates[d]) {
+          const nodeEdges: GenEdge[] = [];
+          for (const tr of stepTransitions(d, st)) {
+            const nxtIdx = reachNext[tr.nextState];
+            if (nxtIdx !== -1) {
+              nodeEdges.push({ act: tr.act, nextNode: nxtIdx, penA: tr.penA, penB: tr.penB });
+            }
+          }
+          if (nodeEdges.length > 0) {
+            reachCur[st] = dayLayer.length;
+            dayLayer.push(nodeEdges);
+          }
+        }
+        if (dayLayer.length === 0) {
+          return { emp, isFixedTir: false, origCodes, origActs, layers: [], feasible: false, maxNodes: 0, cAct: [], cNext: [] };
+        }
+        layers[d] = dayLayer;
+        reachNext.set(reachCur);
+      }
+
+      const rootEdges: GenEdge[] = [];
+      for (const e of startEdges) {
+        const nxtIdx = reachNext[e.nextState];
+        if (nxtIdx !== -1) {
+          rootEdges.push({ act: e.act, nextNode: nxtIdx, penA: e.penA, penB: e.penB });
+        }
+      }
+      if (rootEdges.length === 0) {
+        return { emp, isFixedTir: false, origCodes, origActs, layers: [], feasible: false, maxNodes: 0, cAct: [], cNext: [] };
+      }
+      layers[0] = [rootEdges];
+
+      let maxNodes = 1;
+      const cAct: Int8Array[] = new Array(daysCount);
+      const cNext: Int32Array[] = new Array(daysCount);
+      for (let d = 0; d < daysCount; d++) {
+        const len = layers[d].length;
+        if (len > maxNodes) maxNodes = len;
+        cAct[d] = new Int8Array(len);
+        cNext[d] = new Int32Array(len);
+      }
+      return { emp, isFixedTir: false, origCodes, origActs, layers, feasible: true, maxNodes, cAct, cNext };
+    };
+
+    let dpNextGen = new Float64Array(512);
+    let dpCurGen = new Float64Array(512);
+    const dayCostGen = new Float64Array(daysCount * 4);
+
+    const covPenaltyA = (m: number, a: number, n: number, dw: number = 1, useSoft: boolean = false) => {
+      const hard =
+        (m < 1 ? 1500 * dw * (1 - m) : 0) +
+        (a < 2 ? 1500 * dw * (2 - a) : 0) +
+        (n !== 2 ? 1800 * dw * Math.abs(n - 2) : 0);
+      if (!useSoft) return hard;
+      const soft =
+        (m > 1 ? 10 * (m - 1) + (m > 2 ? 25 * (m - 2) : 0) : 0) +
+        (a > 2 ? 10 * (a - 2) + (a > 3 ? 25 * (a - 3) : 0) : 0);
+      return hard + soft;
+    };
+
+    const covPenaltyB = (m: number, a: number, n: number) => {
+      return (
+        (m < 1 ? 100000 * (1 - m) : 0) +
+        (a < 2 ? 100000 * (2 - a) : 0) +
+        (n !== 2 ? 120000 * Math.abs(n - 2) : 0)
+      );
+    };
+
+    // mode: 0 = gentle minimal-edit Phase A1, 1 = deep Stage-3 FastSA Phase A2, 2 = strict minimal-diff Phase B
+    const solveGenPath = (
+      dag: GenDag,
+      otherM: Int32Array,
+      otherA: Int32Array,
+      otherN: Int32Array,
+      dayWeights: Float64Array | null,
+      noise: Float64Array | null,
+      mode: 0 | 1 | 2
+    ): number[] => {
+      if (dag.maxNodes > dpNextGen.length) {
+        dpNextGen = new Float64Array(dag.maxNodes + 64);
+        dpCurGen = new Float64Array(dag.maxNodes + 64);
+      }
+      const useSoft = mode === 1;
+      if (dag.isFixedTir) {
+        for (let d = 0; d < daysCount; d++) {
+          const m0 = otherM[d];
+          const a0 = otherA[d];
+          const n0 = otherN[d];
+          const dw = dayWeights ? dayWeights[d] : 1;
+          const base = d * 4;
+          dayCostGen[base + 0] = (mode === 2 ? covPenaltyB(m0, a0 + 1, n0) : covPenaltyA(m0, a0 + 1, n0, dw, useSoft)) + (noise ? noise[base + 0] : 0);
+          dayCostGen[base + 3] = (mode === 2 ? covPenaltyB(m0, a0, n0) : covPenaltyA(m0, a0, n0, dw, useSoft)) + (noise ? noise[base + 3] : 0);
+        }
+      } else {
+        for (let d = 0; d < daysCount; d++) {
+          const m0 = otherM[d];
+          const a0 = otherA[d];
+          const n0 = otherN[d];
+          const dw = dayWeights ? dayWeights[d] : 1;
+          const base = d * 4;
+          if (mode === 2) {
+            dayCostGen[base + 0] = covPenaltyB(m0, a0 + 1, n0);
+            dayCostGen[base + 1] = covPenaltyB(m0 + 1, a0, n0);
+            dayCostGen[base + 2] = covPenaltyB(m0, a0, n0 + 1);
+            dayCostGen[base + 3] = covPenaltyB(m0, a0, n0);
+          } else {
+            dayCostGen[base + 0] = covPenaltyA(m0, a0 + 1, n0, dw, useSoft) + (noise ? noise[base + 0] : 0);
+            dayCostGen[base + 1] = covPenaltyA(m0 + 1, a0, n0, dw, useSoft) + (noise ? noise[base + 1] : 0);
+            dayCostGen[base + 2] = covPenaltyA(m0, a0, n0 + 1, dw, useSoft) + (noise ? noise[base + 2] : 0);
+            dayCostGen[base + 3] = covPenaltyA(m0, a0, n0, dw, useSoft) + (noise ? noise[base + 3] : 0);
+          }
+        }
+      }
+
+      const { layers, cAct, cNext } = dag;
+      for (let d = daysCount - 1; d >= 0; d--) {
+        const layer = layers[d];
+        const isLast = d === daysCount - 1;
+        const cA = cAct[d];
+        const cN = cNext[d];
+        const base = d * 4;
+        const c0 = dayCostGen[base + 0];
+        const c1 = dayCostGen[base + 1];
+        const c2 = dayCostGen[base + 2];
+        const c3 = dayCostGen[base + 3];
+
+        for (let u = 0; u < layer.length; u++) {
+          const edges = layer[u];
+          let bestVal = Infinity;
+          let bestA = 3;
+          let bestV = 0;
+          for (let ei = 0; ei < edges.length; ei++) {
+            const edge = edges[ei];
+            const act = edge.act;
+            const actCost = act === 0 ? c0 : act === 1 ? c1 : act === 2 ? c2 : c3;
+            const edgePen = mode === 2 ? edge.penB : (mode === 0 ? edge.penA : 0);
+            const vCost = isLast ? 0 : dpNextGen[edge.nextNode];
+            const val = actCost + edgePen + vCost;
+            if (val < bestVal) {
+              bestVal = val;
+              bestA = act;
+              bestV = edge.nextNode;
+            }
+          }
+          dpCurGen[u] = bestVal;
+          cA[u] = bestA;
+          cN[u] = bestV;
+        }
+        const tmp = dpNextGen;
+        dpNextGen = dpCurGen;
+        dpCurGen = tmp;
+      }
+
+      const path = new Array<number>(daysCount);
+      let curNode = 0;
+      for (let d = 0; d < daysCount; d++) {
+        path[d] = cAct[d][curNode];
+        curNode = cNext[d][curNode];
+      }
+      return path;
+    };
+
+    const addGenPath = (dag: GenDag, path: number[], sign: number, mArr: Int32Array, aArr: Int32Array, nArr: Int32Array) => {
+      if (dag.isFixedTir) {
+        for (let d = 0; d < daysCount; d++) {
+          if (path[d] === 0) aArr[d] += sign;
+        }
+      } else {
+        for (let d = 0; d < daysCount; d++) {
+          const act = path[d];
+          if (act === 0) aArr[d] += sign;
+          else if (act === 1) mArr[d] += sign;
+          else if (act === 2) nArr[d] += sign;
+        }
+      }
+    };
+
+    const evalGenCov = (dags: GenDag[], paths: number[][], mArr: Int32Array, aArr: Int32Array, nArr: Int32Array, dayWeights: Float64Array | null, mode: 0 | 1 | 2) => {
+      let hard = 0;
+      let weightedTotal = 0;
+      let total = 0;
+      let editPenB = 0;
+      let diffCount = 0;
+      const useSoft = mode === 1;
+      for (let d = 0; d < daysCount; d++) {
+        const m = mArr[d];
+        const a = aArr[d];
+        const n = nArr[d];
+        if (m < 1 || a < 2 || n !== 2) hard++;
+        const baseP = mode === 2 ? covPenaltyB(m, a, n) : covPenaltyA(m, a, n, 1, useSoft);
+        total += baseP;
+        weightedTotal += mode === 2 ? baseP : (dayWeights ? covPenaltyA(m, a, n, dayWeights[d], useSoft) : baseP);
+      }
+      for (let i = 0; i < dags.length; i++) {
+        const dg = dags[i];
+        const p = paths[i];
+        let u = 0;
+        for (let d = 0; d < daysCount; d++) {
+          const act = p[d];
+          if (act !== dg.origActs[d]) diffCount++;
+          const edges = dg.layers[d][u];
+          for (let ei = 0; ei < edges.length; ei++) {
+            if (edges[ei].act === act) {
+              const ep = mode === 2 ? edges[ei].penB : (mode === 0 ? edges[ei].penA : 0);
+              weightedTotal += ep;
+              total += ep;
+              editPenB += edges[ei].penB;
+              u = edges[ei].nextNode;
               break;
             }
+          }
+        }
+      }
+      return { hard, weightedTotal, total, editPenB, diffCount };
+    };
+
+    const buildRowsFromGenPaths = (dags: GenDag[], paths: number[][]): Record<string, Record<string, string>> => {
+      const candidate = cloneRows(rows);
+      for (let i = 0; i < dags.length; i++) {
+        const dg = dags[i];
+        const p = paths[i];
+        for (let d = 0; d < daysCount; d++) {
+          const iso = dateColumns[d].isoDate;
+          const act = p[d];
+          if (dg.isFixedTir) {
+            candidate[dg.emp][iso] = act === 0 ? 'A' : dg.origCodes[d];
+          } else {
+            if (act === 0) candidate[dg.emp][iso] = 'A';
+            else if (act === 1) candidate[dg.emp][iso] = 'M';
+            else if (act === 2) candidate[dg.emp][iso] = 'N';
+            else if (act === 4) candidate[dg.emp][iso] = 'ABS';
+            else if (act === 5) candidate[dg.emp][iso] = dg.origCodes[d];
+            else candidate[dg.emp][iso] = 'OFF';
+          }
+        }
+      }
+      for (const emp of allEmployees) {
+        if (fixedMidSet.has(emp)) {
+          // Keep original Palade shifts unchanged
+          candidate[emp] = { ...rows[emp] };
+        }
+      }
+      return candidate;
+    };
+
+    let genRngState = ((((variantSeed + 1) * 0x9e3779b9) ^ 0x517cc1b7) >>> 0);
+    const genRand = (): number => {
+      genRngState = (genRngState + 0x6d2b79f5) >>> 0;
+      let t = Math.imul(genRngState ^ (genRngState >>> 15), 1 | genRngState);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const shuffleGen = (arr: number[]): void => {
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(genRand() * (i + 1));
+        const tmp = arr[i];
+        arr[i] = arr[j];
+        arr[j] = tmp;
+      }
+    };
+    const isGenPathValid = (dag: GenDag, path: number[]): boolean => {
+      let u = 0;
+      for (let d = 0; d < daysCount; d++) {
+        const edges = dag.layers[d][u];
+        const act = path[d];
+        let found = -1;
+        for (let ei = 0; ei < edges.length; ei++) {
+          if (edges[ei].act === act) {
+            found = edges[ei].nextNode;
+            break;
+          }
+        }
+        if (found === -1) return false;
+        u = found;
+      }
+      return true;
+    };
+    const solveGenExtremeCount = (dag: GenDag, targetAct: number, sign: 1 | -1): number => {
+      let dpNext = new Float64Array(Math.max(1, dag.maxNodes));
+      let dpCur = new Float64Array(Math.max(1, dag.maxNodes));
+      for (let d = daysCount - 1; d >= 0; d--) {
+        const layer = dag.layers[d];
+        const isLast = d === daysCount - 1;
+        for (let u = 0; u < layer.length; u++) {
+          const edges = layer[u];
+          let bestVal = Infinity;
+          for (let ei = 0; ei < edges.length; ei++) {
+            const edge = edges[ei];
+            const val = (edge.act === targetAct ? sign : 0) + (isLast ? 0 : dpNext[edge.nextNode]);
+            if (val < bestVal) bestVal = val;
+          }
+          dpCur[u] = bestVal;
+        }
+        const tmp = dpNext;
+        dpNext = dpCur;
+        dpCur = tmp;
+      }
+      return sign === 1 ? dpNext[0] : -dpNext[0];
+    };
+
+    let bestRepairedRows: Record<string, Record<string, string>> | null = null;
+    let bestRepairedValidation = currentValidation;
+    let bestRepairedDiffCost = Infinity;
+
+    const solverEmps = [...rotatingEmployees, ...fixedMaEmps];
+    const G = solverEmps.length;
+
+    const hasSufficientGenCapacity = (dags: GenDag[]): boolean => {
+      const fixedMaxA = new Int32Array(daysCount);
+      const availM = new Int32Array(daysCount);
+      const availA = new Int32Array(daysCount);
+      const availN = new Int32Array(daysCount);
+      let sumMinRotA = 0, sumMaxRotA = 0, sumMinM = 0, sumMaxM = 0, sumMinN = 0, sumMaxN = 0;
+      let sumMaxFixedA = 0;
+      let totalRotSlots = 0;
+
+      for (const dg of dags) {
+        for (let d = 0; d < daysCount; d++) {
+          let hasA = false, hasM = false, hasN = false;
+          for (const layerEdges of dg.layers[d]) {
+            for (let ei = 0; ei < layerEdges.length; ei++) {
+              const a = layerEdges[ei].act;
+              if (a === 0) hasA = true;
+              else if (!dg.isFixedTir && a === 1) hasM = true;
+              else if (!dg.isFixedTir && a === 2) hasN = true;
+            }
+          }
+          if (hasA) {
+            availA[d]++;
+            if (dg.isFixedTir) fixedMaxA[d]++;
+          }
+          if (hasM) availM[d]++;
+          if (hasN) availN[d]++;
+        }
+
+        if (dg.isFixedTir) {
+          sumMaxFixedA += solveGenExtremeCount(dg, 0, -1);
+        } else {
+          const drops = dg.origActs.filter((a) => a === 4 || a === 5).length;
+          totalRotSlots += Math.max(0, targetWorkingDays - drops);
+          sumMinRotA += solveGenExtremeCount(dg, 0, 1);
+          sumMaxRotA += solveGenExtremeCount(dg, 0, -1);
+          sumMinM += solveGenExtremeCount(dg, 1, 1);
+          sumMaxM += solveGenExtremeCount(dg, 1, -1);
+          sumMinN += solveGenExtremeCount(dg, 2, 1);
+          sumMaxN += solveGenExtremeCount(dg, 2, -1);
+        }
+      }
+
+      for (let d = 0; d < daysCount; d++) {
+        if (availM[d] < 1 || availA[d] < 2 || availN[d] < 2) return false;
+      }
+
+      const needM = daysCount;
+      const needTotalA = daysCount * 2;
+      const needN = daysCount * 2;
+      let needRotA = 0;
+      for (let d = 0; d < daysCount; d++) {
+        if (fixedMaxA[d] < 2) needRotA += 2 - fixedMaxA[d];
+      }
+      if (sumMaxM < needM || sumMaxRotA + sumMaxFixedA < needTotalA || sumMaxN < needN || sumMinN > needN) return false;
+      if (sumMinM + needRotA + needN > totalRotSlots) return false;
+      if (sumMinRotA + needM + needN > totalRotSlots) return false;
+      if (sumMinN + needM + needRotA > totalRotSlots) return false;
+      return true;
+    };
+
+    const gNoise = new Float64Array(daysCount * 4);
+    const gDayWeights = new Float64Array(daysCount);
+    const gPool = Array.from({ length: G }, (_, i) => i);
+    const lockModes: Array<'globalPre' | 'empPre' | 'none'> = hasDistinctEmpAbsStarts
+      ? ['globalPre', 'empPre', 'none']
+      : ['globalPre', 'none'];
+
+    for (const lockMode of lockModes) {
+      if (bestRepairedValidation.totalViolations === 0) break;
+      for (const minRest of [2, 1]) {
+        if (bestRepairedValidation.totalViolations === 0) break;
+
+        const dags: GenDag[] = solverEmps.map((emp, eIdx) => {
+          if (fixedMaEmps.includes(emp)) return buildTirGenDag(emp);
+          let dg = buildGeneralDag(emp, eIdx, minRest, lockMode);
+          if (!dg.feasible && lockMode === 'globalPre') {
+            dg = buildGeneralDag(emp, eIdx, minRest, 'empPre');
+            if (!dg.feasible) dg = buildGeneralDag(emp, eIdx, minRest, 'none');
+          } else if (!dg.feasible && lockMode === 'empPre') {
+            dg = buildGeneralDag(emp, eIdx, minRest, 'none');
+          }
+          return dg;
+        });
+
+        if (dags.some((g) => !g.feasible) || !hasSufficientGenCapacity(dags)) continue;
+
+        const origPathsValid = dags.map((dg) => isGenPathValid(dg, dg.origActs));
+        const numRestarts = lockMode === 'none' ? (minRest === 2 ? 4 : 8) : 2;
+
+        for (let restart = 0; restart < numRestarts; restart++) {
+          gDayWeights.fill(1);
+          const curM = new Int32Array(daysCount);
+          const curA = new Int32Array(daysCount);
+          const curN = new Int32Array(daysCount);
+          let paths: number[][] = new Array(G);
+
+          const order = Array.from({ length: G }, (_, i) => i);
+          shuffleGen(order);
+
+          const deepOnlyRestart = lockMode === 'none' && restart >= 2;
+          const initMode: 0 | 1 = deepOnlyRestart ? 1 : 0;
+
+          if (restart === 0) {
+            // Always warm-start from original schedule for all legal employees, solve remaining greedily
+            for (let i = 0; i < G; i++) {
+              if (origPathsValid[i]) {
+                paths[i] = [...dags[i].origActs];
+                addGenPath(dags[i], paths[i], 1, curM, curA, curN);
+              }
+            }
+            for (let oi = 0; oi < G; oi++) {
+              const i = order[oi];
+              if (!origPathsValid[i]) {
+                paths[i] = solveGenPath(dags[i], curM, curA, curN, null, null, 0);
+                addGenPath(dags[i], paths[i], 1, curM, curA, curN);
+              }
+            }
+          } else if (deepOnlyRestart) {
+            // Full fresh Stage-3-style randomized initialization to escape deep origActs basins
+            for (let oi = 0; oi < G; oi++) {
+              const i = order[oi];
+              if (oi < 3) {
+                for (let k = 0; k < gNoise.length; k++) gNoise[k] = genRand() * 250;
+              } else {
+                for (let k = 0; k < gNoise.length; k++) gNoise[k] = genRand() * 8;
+              }
+              paths[i] = solveGenPath(dags[i], curM, curA, curN, null, gNoise, 1);
+              addGenPath(dags[i], paths[i], 1, curM, curA, curN);
+            }
+          } else {
+            // Drop random subset from original warm-start instead of scrambling the whole roster
+            for (let oi = 0; oi < G; oi++) {
+              const i = order[oi];
+              if (origPathsValid[i] && oi >= 2 + (restart % 3)) {
+                paths[i] = [...dags[i].origActs];
+                addGenPath(dags[i], paths[i], 1, curM, curA, curN);
+              } else {
+                paths[i] = [];
+              }
+            }
+            for (let oi = 0; oi < G; oi++) {
+              const i = order[oi];
+              if (paths[i].length === 0) {
+                for (let k = 0; k < gNoise.length; k++) gNoise[k] = genRand() * (oi < 3 ? 120 : 12);
+                paths[i] = solveGenPath(dags[i], curM, curA, curN, null, gNoise, 0);
+                addGenPath(dags[i], paths[i], 1, curM, curA, curN);
+              }
+            }
+          }
+
+          const runGenSweeps = (maxSweeps: number, useWeights: boolean, mode: 0 | 1 | 2) => {
+            const wArr = useWeights && mode !== 2 ? gDayWeights : null;
+            for (let sweep = 0; sweep < maxSweeps; sweep++) {
+              let changed = false;
+              for (let oi = 0; oi < G; oi++) {
+                const eIdx = order[(oi + sweep) % G];
+                const oldP = paths[eIdx];
+                const before = evalGenCov(dags, paths, curM, curA, curN, wArr, mode).weightedTotal;
+                addGenPath(dags[eIdx], oldP, -1, curM, curA, curN);
+                const newP = solveGenPath(dags[eIdx], curM, curA, curN, wArr, null, mode);
+                paths[eIdx] = newP;
+                addGenPath(dags[eIdx], newP, 1, curM, curA, curN);
+                const after = evalGenCov(dags, paths, curM, curA, curN, wArr, mode).weightedTotal;
+                if (after < before) {
+                  changed = true;
+                } else if (after > before) {
+                  addGenPath(dags[eIdx], newP, -1, curM, curA, curN);
+                  paths[eIdx] = oldP;
+                  addGenPath(dags[eIdx], oldP, 1, curM, curA, curN);
+                }
+              }
+              if (!changed) break;
+            }
+          };
+
+          runGenSweeps(deepOnlyRestart ? 3 : 4, false, initMode);
+
+          let curEval = evalGenCov(dags, paths, curM, curA, curN, gDayWeights, initMode);
+          let bestRH = curEval.hard;
+          let bestRT = curEval.total;
+          let bestRPaths = paths.map((p) => p);
+
+          if (bestRH > 0) {
+            const gentleSteps = deepOnlyRestart ? 0 : 350;
+            const saSteps = deepOnlyRestart ? 2000 : 1850;
+            let temp = deepOnlyRestart ? 1600 : 300;
+            let cool = deepOnlyRestart ? 0.994 : 0.985;
+            for (let step = 0; step < saSteps && bestRH > 0; step++) {
+              if (!deepOnlyRestart && step === gentleSteps) {
+                paths = bestRPaths.map((p) => p);
+                curM.fill(0);
+                curA.fill(0);
+                curN.fill(0);
+                for (let i = 0; i < G; i++) addGenPath(dags[i], paths[i], 1, curM, curA, curN);
+                gDayWeights.fill(1);
+                curEval = evalGenCov(dags, paths, curM, curA, curN, gDayWeights, 1);
+                temp = 1600;
+                cool = 0.994;
+              } else if (step === (deepOnlyRestart ? 1000 : 1150) || (deepOnlyRestart && step === 1550)) {
+                temp = Math.max(temp, 750);
+              }
+              const stepMode: 0 | 1 = step < gentleSteps ? 0 : 1;
+
+              const badDays: number[] = [];
+              for (let d = 0; d < daysCount; d++) {
+                if (curM[d] < 1 || curA[d] < 2 || curN[d] !== 2) badDays.push(d);
+              }
+              if (badDays.length === 0) break;
+
+              if (step > 0 && step % 35 === 0 && step !== gentleSteps) {
+                for (const bd of badDays) gDayWeights[bd] = Math.min(8, gDayWeights[bd] + 0.5);
+                if (step % 210 === 0) {
+                  for (let d = 0; d < daysCount; d++) gDayWeights[d] = 1 + (gDayWeights[d] - 1) * 0.5;
+                }
+                curEval = evalGenCov(dags, paths, curM, curA, curN, gDayWeights, stepMode);
+              }
+
+              const focusDay = badDays[Math.floor(genRand() * badDays.length)];
+              const k = stepMode === 0 ? Math.min(G, 2) : Math.min(G, step % 2 === 0 ? 3 : 2);
+              shuffleGen(gPool);
+              const ruinGroup = gPool.slice(0, k);
+
+              const savedSub = ruinGroup.map((idx) => paths[idx]);
+              for (let gi = 0; gi < ruinGroup.length; gi++) {
+                addGenPath(dags[ruinGroup[gi]], paths[ruinGroup[gi]], -1, curM, curA, curN);
+              }
+
+              const noiseAmp = stepMode === 0 ? Math.min(40, temp * 0.15) : Math.min(350, temp * 0.3);
+              for (let gi = 0; gi < ruinGroup.length; gi++) {
+                const eIdx = ruinGroup[gi];
+                if (gi === 0 && genRand() < 0.5) {
+                  for (let nk = 0; nk < gNoise.length; nk++) gNoise[nk] = genRand() * (stepMode === 0 ? 2 : 6);
+                  for (let d = Math.max(0, focusDay - 5); d <= Math.min(daysCount - 1, focusDay + 5); d++) {
+                    for (let a = 0; a < 4; a++) gNoise[d * 4 + a] += (genRand() - 0.5) * noiseAmp * 3;
+                  }
+                } else {
+                  for (let nk = 0; nk < gNoise.length; nk++) gNoise[nk] = genRand() * (2 + noiseAmp * 0.25);
+                }
+                const newP = solveGenPath(dags[eIdx], curM, curA, curN, gDayWeights, gNoise, stepMode);
+                paths[eIdx] = newP;
+                addGenPath(dags[eIdx], newP, 1, curM, curA, curN);
+              }
+
+              let nextEval = evalGenCov(dags, paths, curM, curA, curN, gDayWeights, stepMode);
+              const improvedRec = nextEval.hard < bestRH;
+              if (improvedRec) {
+                runGenSweeps(2, true, stepMode);
+                nextEval = evalGenCov(dags, paths, curM, curA, curN, gDayWeights, stepMode);
+              }
+              const delta = nextEval.weightedTotal - curEval.weightedTotal;
+              const accept = improvedRec || delta <= 0 || genRand() < Math.exp(-delta / Math.max(1, temp));
+              if (accept) {
+                curEval = nextEval;
+                if (curEval.hard < bestRH || (curEval.hard === bestRH && curEval.total < bestRT)) {
+                  bestRH = curEval.hard;
+                  bestRT = curEval.total;
+                  bestRPaths = paths.map((p) => p);
+                  if (bestRH === 0) break;
+                }
+              } else {
+                for (let gi = 0; gi < ruinGroup.length; gi++) {
+                  const eIdx = ruinGroup[gi];
+                  addGenPath(dags[eIdx], paths[eIdx], -1, curM, curA, curN);
+                  paths[eIdx] = savedSub[gi];
+                  addGenPath(dags[eIdx], savedSub[gi], 1, curM, curA, curN);
+                }
+              }
+              temp *= cool;
+            }
+          }
+
+          paths = bestRPaths;
+          curM.fill(0);
+          curA.fill(0);
+          curN.fill(0);
+          for (let i = 0; i < G; i++) addGenPath(dags[i], paths[i], 1, curM, curA, curN);
+
+          // Phase B: Strict feasibility-preserving deterministic minimal-diff polishing
+          runGenSweeps(6, false, 2);
+
+          // Pairwise 2-employee zero-noise minimization across modified employees
+          for (let pass = 0; pass < 2; pass++) {
+            let pairImproved = false;
+            const changedEmps: number[] = [];
+            for (let i = 0; i < G; i++) {
+              for (let d = 0; d < daysCount; d++) {
+                if (paths[i][d] !== dags[i].origActs[d]) {
+                  changedEmps.push(i);
+                  break;
+                }
+              }
+            }
+            for (let aIdx = 0; aIdx < changedEmps.length; aIdx++) {
+              for (let bIdx = aIdx + 1; bIdx < changedEmps.length; bIdx++) {
+                const i1 = changedEmps[aIdx];
+                const i2 = changedEmps[bIdx];
+                const baseScore = evalGenCov(dags, paths, curM, curA, curN, null, 2);
+                const old1 = paths[i1];
+                const old2 = paths[i2];
+
+                for (const [first, second] of [[i1, i2], [i2, i1]]) {
+                  const s1 = paths[first];
+                  const s2 = paths[second];
+                  addGenPath(dags[first], s1, -1, curM, curA, curN);
+                  addGenPath(dags[second], s2, -1, curM, curA, curN);
+                  const n1 = solveGenPath(dags[first], curM, curA, curN, null, null, 2);
+                  paths[first] = n1;
+                  addGenPath(dags[first], n1, 1, curM, curA, curN);
+                  const n2 = solveGenPath(dags[second], curM, curA, curN, null, null, 2);
+                  paths[second] = n2;
+                  addGenPath(dags[second], n2, 1, curM, curA, curN);
+
+                  const nextScore = evalGenCov(dags, paths, curM, curA, curN, null, 2);
+                  if (nextScore.hard <= baseScore.hard && nextScore.weightedTotal < baseScore.weightedTotal) {
+                    pairImproved = true;
+                    break;
+                  } else {
+                    addGenPath(dags[first], n1, -1, curM, curA, curN);
+                    addGenPath(dags[second], n2, -1, curM, curA, curN);
+                    paths[i1] = old1;
+                    paths[i2] = old2;
+                    addGenPath(dags[i1], old1, 1, curM, curA, curN);
+                    addGenPath(dags[i2], old2, 1, curM, curA, curN);
+                  }
+                }
+              }
+            }
+            if (!pairImproved) break;
+            runGenSweeps(4, false, 2);
+          }
+
+          const finalEval = evalGenCov(dags, paths, curM, curA, curN, null, 2);
+          const candidateRows = buildRowsFromGenPaths(dags, paths);
+          const candidateRep = validateScheduleCompliance(
+            candidateRows,
+            dateColumns,
+            priorRoster,
+            targetYear,
+            targetMonth,
+            targetWorkingDays
+          );
+
+          const isBetter =
+            candidateRep.totalViolations < bestRepairedValidation.totalViolations ||
+            (candidateRep.totalViolations === bestRepairedValidation.totalViolations &&
+              finalEval.editPenB < bestRepairedDiffCost);
+
+          if (isBetter) {
+            bestRepairedRows = candidateRows;
+            bestRepairedValidation = candidateRep;
+            bestRepairedDiffCost = finalEval.editPenB;
+            if (candidateRep.totalViolations === 0) break;
+          }
+        }
+      }
+    }
+
+    if (bestRepairedRows && bestRepairedValidation.totalViolations < currentValidation.totalViolations) {
+      for (const emp of allEmployees) {
+        workingRows[emp] = { ...bestRepairedRows[emp] };
+      }
+      currentValidation = bestRepairedValidation;
+      adjustments.length = 0;
+      unresolvedDeficits.length = 0;
+
+      for (const col of dateColumns) {
+        const iso = col.isoDate;
+        const absOnDay = allEmployees.filter((e) => shiftKey(rows[e]?.[iso] ?? 'OFF') === 'ABS').join(', ');
+        for (const emp of allEmployees) {
+          const origC = shiftKey(rows[emp]?.[iso] ?? 'OFF');
+          const newC = shiftKey(workingRows[emp]?.[iso] ?? 'OFF');
+          if (origC !== newC) {
+            adjustments.push({
+              isoDate: iso,
+              employee: emp,
+              fromShift: origC,
+              toShift: newC,
+              reason: absOnDay
+                ? `Rebalanced schedule to legally cover sick colleague (${absOnDay}) while maintaining ${targetWorkingDays}-day monthly norm and rest rules.`
+                : `Rebalanced shift to preserve legal ${targetWorkingDays}-day monthly norm, shift sequence, and rest rules.`,
+              absColleague: absOnDay || 'Rebalancing'
+            });
           }
         }
       }
