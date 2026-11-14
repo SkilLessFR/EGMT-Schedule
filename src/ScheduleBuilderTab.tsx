@@ -39,7 +39,7 @@ import {
   type GeneratedScheduleResult,
   type ScheduleValidationReport,
   type ReadjustmentProposal
-} from './scheduleBuilder';
+} from './schedule';
 import { shiftKey, shiftColors, shiftSolid, initials, GLASS_CARD } from './scheduleUtils';
 import { mergeRosters } from './parser';
 

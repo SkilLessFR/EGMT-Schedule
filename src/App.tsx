@@ -6,7 +6,7 @@ import type { RosterData, ShiftEvent } from './types';
 import { parseRoster, mergeRosters } from './parser';
 
 const ScheduleBuilderTab = lazy(() => import('./ScheduleBuilderTab'));
-import { countLegalWorkingDaysInMonth } from './scheduleBuilder';
+import { countLegalWorkingDaysInMonth } from './schedule';
 import {
   colorFor,
   shiftKey,
