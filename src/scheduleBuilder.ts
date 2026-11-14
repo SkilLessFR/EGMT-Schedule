@@ -2596,7 +2596,40 @@ export function generateBalancedSchedule(
       }
     };
 
-    const hasSufficientDagCapacity = (dags: EmpDag[]): boolean => {
+    const buildDayActMasks = (dags: EmpDag[]): Uint8Array[] =>
+      dags.map((dag) => {
+        const masks = new Uint8Array(daysCount);
+        if (!dag.feasible) return masks;
+        for (let d = 0; d < daysCount; d++) {
+          let mask = 0;
+          const layer = dag.layers[d];
+          for (let u = 0; u < layer.length; u++) {
+            const edges = layer[u];
+            for (let ei = 0; ei < edges.length; ei++) {
+              mask |= 1 << edges[ei].act;
+            }
+          }
+          masks[d] = mask;
+        }
+        return masks;
+      });
+    const canDoShift = (dayActMasks: Uint8Array[], eIdx: number, d: number, act: number): boolean =>
+      (dayActMasks[eIdx][d] & (1 << act)) !== 0;
+
+    const hasSufficientDagCapacity = (dags: EmpDag[], dayActMasks?: Uint8Array[]): boolean => {
+      const masks = dayActMasks ?? buildDayActMasks(dags);
+      for (let d = 0; d < daysCount; d++) {
+        let availA = 0;
+        let availM = 0;
+        let availN = 0;
+        for (let i = 0; i < masks.length; i++) {
+          const mk = masks[i][d];
+          if (mk & 1) availA++;
+          if (mk & 2) availM++;
+          if (mk & 4) availN++;
+        }
+        if (availM < 1 || availA + fixedAfternoonCoverage[d] < 2 || availN < 2) return false;
+      }
       const needM = daysCount;
       let needRotA = 0;
       for (let d = 0; d < daysCount; d++) {
@@ -2620,6 +2653,56 @@ export function generateBalancedSchedule(
       return true;
     };
 
+    const selectStage3RuinGroup = (
+      focusDay: number,
+      k: number,
+      curM: Int32Array,
+      curA: Int32Array,
+      curN: Int32Array,
+      paths: number[][],
+      dayActMasks: Uint8Array[]
+    ): number[] => {
+      shuffleStage3(empPool);
+      if (nextRand() < 0.2) {
+        return empPool.slice(0, k);
+      }
+      const needAct =
+        curN[focusDay] < 2
+          ? 2
+          : curM[focusDay] < 1
+            ? 1
+            : curA[focusDay] + fixedAfternoonCoverage[focusDay] < 2
+              ? 0
+              : -1;
+      const helpers: number[] = [];
+      const capable: number[] = [];
+      const others: number[] = [];
+      for (let idx = 0; idx < empPool.length; idx++) {
+        const e = empPool[idx];
+        if (needAct !== -1) {
+          if (canDoShift(dayActMasks, e, focusDay, needAct)) {
+            if (paths[e][focusDay] !== needAct) helpers.push(e);
+            else capable.push(e);
+          } else {
+            others.push(e);
+          }
+        } else if (paths[e][focusDay] === 2 && (dayActMasks[e][focusDay] & ~4) !== 0) {
+          helpers.push(e);
+        } else {
+          others.push(e);
+        }
+      }
+      if (helpers.length > 0) {
+        const partners = [...helpers.slice(1), ...capable, ...others];
+        shuffleStage3(partners);
+        return [helpers[0], ...partners].slice(0, k);
+      }
+      if (capable.length > 0) {
+        return [...capable, ...others].slice(0, k);
+      }
+      return empPool.slice(0, k);
+    };
+
     const R = rotatingEmployees.length;
     const priorBestPaths = rotatingEmployees.map((emp) =>
       dateColumns.map(({ isoDate }) => shToIdx(shiftKey(bestResultRows[emp]?.[isoDate] ?? 'OFF')))
@@ -2632,7 +2715,9 @@ export function generateBalancedSchedule(
       if (bestReport?.isFullyCompliant && bestHandoffSafe) break;
       if (bestReport?.isFullyCompliant && minRest === 1) break;
       const dags = rotatingEmployees.map((emp) => buildEmpDag(rotatingHistories[emp], minRest));
-      if (dags.some((g) => !g.feasible) || !hasSufficientDagCapacity(dags)) continue;
+      if (dags.some((g) => !g.feasible)) continue;
+      const dayActMasks = buildDayActMasks(dags);
+      if (!hasSufficientDagCapacity(dags, dayActMasks)) continue;
 
       const canSeedStage2 = !bestReport?.isFullyCompliant && priorBestPaths.every((p, idx) => isStage3PathValid(dags[idx], p));
       const numRestarts = minRest === 2 ? 6 : 5;
@@ -2731,8 +2816,7 @@ export function generateBalancedSchedule(
 
           const focusDay = badDays[Math.floor(nextRand() * badDays.length)];
           const k = Math.min(R, step % 3 === 0 ? 3 : 2);
-          shuffleStage3(empPool);
-          const ruinGroup = empPool.slice(0, k);
+          const ruinGroup = selectStage3RuinGroup(focusDay, k, curM, curA, curN, paths, dayActMasks);
 
           const savedSub: number[][] = ruinGroup.map((idx) => paths[idx]);
 
