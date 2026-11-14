@@ -6,6 +6,7 @@ import type { RosterData, ShiftEvent } from './types';
 import { parseRoster, mergeRosters } from './parser';
 
 const ScheduleBuilderTab = lazy(() => import('./ScheduleBuilderTab'));
+import { countLegalWorkingDaysInMonth } from './scheduleBuilder';
 import {
   colorFor,
   shiftKey,
@@ -51,16 +52,7 @@ const ADMIN_PIN_STORAGE_KEY = 'work-schedule-admin-pin';
 const APP_BASE_URL = ((import.meta as ImportMeta & { env?: { BASE_URL?: string } }).env?.BASE_URL ?? '/');
 
 function countWorkingDaysInMonth(month: number, year: number) {
-  let count = 0;
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  for (let day = 1; day <= daysInMonth; day++) {
-    const date = new Date(year, month, day);
-    const dayOfWeek = date.getDay();
-    if (dayOfWeek === 0 || dayOfWeek === 6) continue;
-    if (isNationalHoliday(iso(date))) continue;
-    count += 1;
-  }
-  return count;
+  return countLegalWorkingDaysInMonth(month, year);
 }
 
 function normalizeName(name: string) {
@@ -823,7 +815,7 @@ export default function App() {
   );
 
   const monthlyStats = useMemo(() => {
-    const counts: Record<string, number> = { M: 0, A: 0, N: 0, MID: 0, OFF: 0, H8: 0 };
+    const counts: Record<string, number> = { M: 0, A: 0, N: 0, MID: 0, OFF: 0, H8: 0, ABS: 0 };
     const monthDatesInRoster = roster ? roster.dateColumns.filter(
       (d) => d.date.getMonth() === currentMonth && d.date.getFullYear() === currentYear
     ) : [];
@@ -838,19 +830,25 @@ export default function App() {
         counts['OFF'] += 1;
       }
       const isWeekendDate = date.getDay() === 0 || date.getDay() === 6;
-      const isWorking = code !== 'OFF' && code !== 'H8';
+      const isWorking = code === 'M' || code === 'A' || code === 'N' || code === 'MID';
       if (isWeekendDate && isWorking) weekendDays += 1;
     });
 
     const workingShifts = counts.M + counts.A + counts.N + counts.MID;
+    const h8Days = counts.H8;
+    const absDays = counts.ABS;
+    const daysInMonth = monthDatesInRoster.length;
+    const totalOff = Math.max(0, daysInMonth - workingShifts - h8Days - absDays);
+    counts.OFF = totalOff;
     const totalHours = Object.entries(counts).reduce((sum, [code, count]) => sum + count * (shiftHourValues[code] ?? 0), 0);
-    const daysOff = counts.OFF + counts.H8;
-    return { counts, workingShifts, totalHours, daysOff, weekendDays };
+    const daysOff = totalOff + h8Days;
+    return { counts, workingShifts, totalHours, daysOff, totalOff, h8Days, absDays, weekendDays };
   }, [roster, selectedEmployee, currentMonth, currentYear]);
 
   const salaryBreakdown = useMemo(() => {
     const baseSalary = salaries[selectedEmployee] ?? 0;
-    const workingDaysInMonth = countWorkingDaysInMonth(currentMonth, currentYear);
+    const normDays = countWorkingDaysInMonth(currentMonth, currentYear);
+    const workingDaysInMonth = normDays;
     const dailyWage = workingDaysInMonth > 0 ? baseSalary / workingDaysInMonth : 0;
 
     const monthDatesInRoster = roster ? roster.dateColumns.filter(
@@ -858,6 +856,8 @@ export default function App() {
     ) : [];
 
     let workedDays = 0;
+    let h8Days = 0;
+    let absDays = 0;
     let nightCount = 0, weekendCount = 0, holidayCount = 0;
     let nightBonus = 0, weekendBonus = 0, holidayBonus = 0;
     let basePay = 0;
@@ -865,14 +865,25 @@ export default function App() {
     monthDatesInRoster.forEach(({ isoDate, date }) => {
       const raw = roster?.rows[selectedEmployee]?.[isoDate];
       const code = shiftKey(raw ?? 'OFF');
-      
-      const isPaidDay = code !== 'OFF';
-      if (!isPaidDay) return;
+
+      if (code === 'OFF') return;
+      if (code === 'ABS') {
+        absDays += 1;
+        return;
+      }
+
+      if (code === 'H8') {
+        h8Days += 1;
+        workedDays += 1;
+        basePay += dailyWage;
+        return;
+      }
+
+      const isWorkingShiftCode = code === 'M' || code === 'A' || code === 'N' || code === 'MID';
+      if (!isWorkingShiftCode) return;
 
       workedDays += 1;
       basePay += dailyWage;
-
-      if (code === 'H8') return;
 
       const isNight = code === 'N';
       const isWeekend = date.getDay() === 0 || date.getDay() === 6;
@@ -883,9 +894,10 @@ export default function App() {
       if (isHoliday) { holidayCount += 1; holidayBonus += dailyWage * 1.00; }
     });
 
+    const targetDays = Math.max(0, normDays - h8Days - absDays);
     const total = basePay + nightBonus + weekendBonus + holidayBonus;
     return {
-      baseSalary, workingDaysInMonth, dailyWage, workedDays, basePay,
+      baseSalary, workingDaysInMonth, targetDays, h8Days, absDays, dailyWage, workedDays, basePay,
       nightCount, weekendCount, holidayCount,
       nightBonus, weekendBonus, holidayBonus, total,
     };
@@ -894,7 +906,10 @@ export default function App() {
   const mostSeenColleagues = useMemo(() => {
     if (!roster || !selectedEmployee) return { names: [], count: 0 };
     const matches: Record<string, number> = {};
-    const targetMonthEvents = currentMonthEvents.filter(e => shiftKey(e.shift) !== 'OFF' && shiftKey(e.shift) !== 'H8');
+    const targetMonthEvents = currentMonthEvents.filter((e) => {
+      const code = shiftKey(e.shift);
+      return code === 'M' || code === 'A' || code === 'N' || code === 'MID';
+    });
 
     targetMonthEvents.forEach((userEvent) => {
       const activeUserShiftCode = shiftKey(userEvent.shift);
@@ -903,9 +918,12 @@ export default function App() {
         if (MOST_SEEN_EXCLUDED.includes(normalizeName(colleague))) return;
         const colleagueShiftRaw = roster.rows[colleague]?.[userEvent.isoDate];
         const colleagueShiftCode = shiftKey(colleagueShiftRaw ?? 'OFF');
+        if (colleagueShiftCode !== 'M' && colleagueShiftCode !== 'A' && colleagueShiftCode !== 'N' && colleagueShiftCode !== 'MID') {
+          return;
+        }
 
         let isShared = false;
-        if (activeUserShiftCode === colleagueShiftCode && colleagueShiftCode !== 'OFF') {
+        if (activeUserShiftCode === colleagueShiftCode) {
           isShared = true;
         } else if (activeUserShiftCode === 'MID' && (colleagueShiftCode === 'M' || colleagueShiftCode === 'A')) {
           isShared = true;

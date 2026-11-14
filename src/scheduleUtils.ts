@@ -313,7 +313,7 @@ function isSameMonth(isoDate: string, month: number, year: number) {
 
 function isBlockBoundary(roster: RosterData, employee: string, isoDate: string): boolean {
   const shift = shiftKey(roster.rows[employee]?.[isoDate] ?? 'OFF');
-  if (shift === 'OFF' || shift === 'H8') return false;
+  if (!isWorkingShift(shift)) return false;
   const block = detectShiftBlock(roster, employee, isoDate);
   return block.shift === shift && (block.startDate === isoDate || block.endDate === isoDate);
 }
@@ -332,8 +332,7 @@ export function isWholeBlockOverlapCandidate(
   const requesterShift = shiftKey(roster.rows[requester]?.[requesterDate] ?? 'OFF');
   const candidateShift = shiftKey(roster.rows[candidate]?.[candidateDate] ?? 'OFF');
   if (
-    requesterShift === 'OFF' || candidateShift === 'OFF' ||
-    requesterShift === 'H8' || candidateShift === 'H8' ||
+    !isWorkingShift(requesterShift) || !isWorkingShift(candidateShift) ||
     requesterShift === 'MID' || candidateShift === 'MID'
   ) {
     return false;
@@ -364,8 +363,7 @@ export function isPartialBlockOverlapCandidate(
   const requesterShift = shiftKey(roster.rows[requester]?.[requesterDate] ?? 'OFF');
   const candidateShift = shiftKey(roster.rows[candidate]?.[candidateDate] ?? 'OFF');
   if (
-    requesterShift === 'OFF' || candidateShift === 'OFF' ||
-    requesterShift === 'H8' || candidateShift === 'H8' ||
+    !isWorkingShift(requesterShift) || !isWorkingShift(candidateShift) ||
     requesterShift === 'MID' || candidateShift === 'MID'
   ) {
     return false;
@@ -395,14 +393,14 @@ export function isPartialBlockOverlapCandidate(
  */
 export function isDayOnlyBoundaryCandidate(roster: RosterData, employee: string, isoDate: string): boolean {
   const shift = shiftKey(roster.rows[employee]?.[isoDate] ?? 'OFF');
-  if (shift === 'OFF' || shift === 'H8' || shift === 'MID') return false;
+  if (!isWorkingShift(shift) || shift === 'MID') return false;
   const block = detectShiftBlock(roster, employee, isoDate);
   return block.startDate === isoDate || block.endDate === isoDate;
 }
 
 export function remainderOfBlockDates(roster: RosterData, employee: string, isoDate: string): string[] {
   const shift = shiftKey(roster.rows[employee]?.[isoDate] ?? 'OFF');
-  if (shift === 'OFF' || shift === 'H8') return [];
+  if (!isWorkingShift(shift)) return [];
 
   const block = detectShiftBlock(roster, employee, isoDate);
   if (isoDate < block.startDate || isoDate > block.endDate) return [];
@@ -427,8 +425,7 @@ export function isSwapRemainingOfBlockCandidate(
   const requesterShift = shiftKey(roster.rows[requester]?.[requesterDate] ?? 'OFF');
   const candidateShift = shiftKey(roster.rows[candidate]?.[candidateDate] ?? 'OFF');
   if (
-    requesterShift === 'OFF' || candidateShift === 'OFF' ||
-    requesterShift === 'H8' || candidateShift === 'H8' ||
+    !isWorkingShift(requesterShift) || !isWorkingShift(candidateShift) ||
     requesterShift === 'MID' || candidateShift === 'MID' ||
     requesterShift === candidateShift
   ) {
@@ -492,7 +489,7 @@ function countRegularOffDaysForEmployee(
   for (const { isoDate } of monthDates) {
     const rawShift = (rows[employee]?.[isoDate] ?? 'OFF').trim().toUpperCase();
     const normalized = shiftKey(rawShift);
-    if (normalized === 'OFF' && rawShift !== 'ABS' && rawShift !== 'AD' && rawShift !== 'H8') count += 1;
+    if (normalized === 'OFF') count += 1;
   }
   return count;
 }
@@ -501,8 +498,29 @@ function isMonthStateOffDayBalanced(
   rows: Record<string, Record<string, string>>,
   employee: string,
   monthDates: { isoDate: string }[],
+  baselineRows?: Record<string, Record<string, string>>,
 ): boolean {
-  return countRegularOffDaysForEmployee(rows, employee, monthDates) === 8;
+  if (monthDates.length === 0) return true;
+  if (baselineRows) {
+    return (
+      countRegularOffDaysForEmployee(rows, employee, monthDates) ===
+      countRegularOffDaysForEmployee(baselineRows, employee, monthDates)
+    );
+  }
+  let legalNorm = 0;
+  let leaveCount = 0;
+  for (const { isoDate } of monthDates) {
+    const [y, m, d] = isoDate.split('-').map(Number);
+    const dow = new Date(y, m - 1, d).getDay();
+    if (dow !== 0 && dow !== 6 && !ROMANIAN_HOLIDAYS.has(isoDate)) {
+      legalNorm += 1;
+    }
+    const s = shiftKey(rows[employee]?.[isoDate] ?? 'OFF');
+    if (s === 'H8' || s === 'ABS') leaveCount += 1;
+  }
+  const expectedWork = Math.max(0, legalNorm - leaveCount);
+  const expectedOff = Math.max(0, monthDates.length - expectedWork - leaveCount);
+  return countRegularOffDaysForEmployee(rows, employee, monthDates) === expectedOff;
 }
 
 function getBaselineMaxStreak(roster: RosterData, employee: string, monthDates: { isoDate: string }[]): number {
@@ -540,7 +558,7 @@ function isMonthStateLegallyBalanced(
   const monthDateSet = new Set(monthDates.map((m) => m.isoDate));
 
   for (const employee of employees) {
-    if (options.requireOffDayBalance && !isMonthStateOffDayBalanced(rows, employee, monthDates)) return false;
+    if (options.requireOffDayBalance && !isMonthStateOffDayBalanced(rows, employee, monthDates, roster.rows)) return false;
 
     let streak = 0;
     let maxStreak = 0;
@@ -612,9 +630,9 @@ function countOnShift(roster: RosterData, isoDate: string, shiftCode: string, ex
   return count;
 }
 
-function isWorkingShift(shift: string): boolean {
-  const code = shiftKey(shift);
-  return code !== 'OFF' && code !== 'H8';
+export function isWorkingShift(shift: string): boolean {
+  const s = shiftKey(shift);
+  return s === 'M' || s === 'A' || s === 'N' || s === 'MID';
 }
 
 function getMaxConsecutiveWorkStreak(
@@ -873,7 +891,7 @@ export function buildTransformationMoves(
     .map((entry) => entry.isoDate)
     .filter((isoDate) => {
       const shift = shiftKey(rows[employee]?.[isoDate] ?? 'OFF');
-      return shift !== requestedShift && shift !== 'MID' && shift !== 'H8';
+      return shift !== requestedShift && shift !== 'MID' && shift !== 'H8' && shift !== 'ABS';
     });
 
   const moves: TransformationMove[] = [];
@@ -987,7 +1005,7 @@ export function findShiftTransformationPreview(
 
   for (const isoDate of monthDates.map(({ isoDate }) => isoDate)) {
     const currentShift = shiftKey(currentRows[employee]?.[isoDate] ?? 'OFF');
-    if (currentShift === requestedShift || currentShift === 'OFF' || currentShift === 'H8' || currentShift === 'MID') continue;
+    if (currentShift === requestedShift || !isWorkingShift(currentShift) || currentShift === 'MID') continue;
 
     for (const candidate of roster.employees) {
       if (candidate === employee) continue;
@@ -1026,9 +1044,9 @@ export function findShiftTransformationPreview(
             : requesterDates;
         const sourceDates = normalizedType === 'DAY_ONLY' ? [candidateDate] : operationDates;
         const sourceShifts = sourceDates.map((sourceDate) => shiftKey(currentRows[candidate]?.[sourceDate] ?? 'OFF'));
-        if (sourceShifts.some((sourceShift) => sourceShift !== requestedShift || sourceShift === 'H8' || sourceShift === 'MID')) continue;
+        if (sourceShifts.some((sourceShift) => sourceShift !== requestedShift || !isWorkingShift(sourceShift) || sourceShift === 'MID')) continue;
         const requesterShifts = operationDates.map((opDate) => shiftKey(currentRows[employee]?.[opDate] ?? 'OFF'));
-        if (requesterShifts.some((s) => s === 'MID' || s === 'H8')) continue;
+        if (requesterShifts.some((s) => s === 'MID' || s === 'H8' || s === 'ABS')) continue;
         const operationRows = cloneRows(currentRows);
         if (normalizedType === 'DAY_ONLY' && isoDate !== candidateDate) {
           operationRows[employee][isoDate] = shiftKey(currentRows[candidate]?.[candidateDate] ?? 'OFF');
@@ -1055,6 +1073,7 @@ export function findShiftTransformationPreview(
           const candidateDayShift = shiftKey(currentRows[candidate]?.[candidateDate] ?? 'OFF');
           if (requesterDayShift === 'MID' || candidateDayShift === 'MID'
             || requesterDayShift === 'H8' || candidateDayShift === 'H8'
+            || requesterDayShift === 'ABS' || candidateDayShift === 'ABS'
             || (requesterDayShift === 'OFF' && candidateDayShift === 'OFF')
             || requesterDayShift === candidateDayShift) continue;
         }
@@ -1216,9 +1235,12 @@ export function evaluateSwapLegality(
   const requesterShift = shiftKey(roster.rows[requester]?.[requesterDate] ?? 'OFF');
   const candidateShift = shiftKey(roster.rows[candidate]?.[candidateDate] ?? 'OFF');
 
-  // 2. MID exclusion — if either shift is MID, hard block. MID is never swappable.
+  // 2. MID / ABS exclusion — if either shift is MID or ABS, hard block.
   if (requesterShift === 'MID' || candidateShift === 'MID') {
     return { valid: false, blockers: ['MID shifts are excluded from swap possibilities.'] };
+  }
+  if (requesterShift === 'ABS' || candidateShift === 'ABS') {
+    return { valid: false, blockers: ['Absence (ABS) days cannot be swapped.'] };
   }
 
   // Both-OFF check
@@ -1231,9 +1253,9 @@ export function evaluateSwapLegality(
     return { valid: false, blockers: [`Same-shift swaps like ${shiftLabel(requesterShift)} ↔ ${shiftLabel(candidateShift)} are pointless and should not be suggested.`] };
   }
 
-  // 3. Determine work blocks (shift is not OFF/H8)
-  const requesterIsWorkBlock = requesterShift !== 'OFF' && requesterShift !== 'H8';
-  const candidateIsWorkBlock = candidateShift !== 'OFF' && candidateShift !== 'H8';
+  // 3. Determine work blocks (active working shift M/A/N/MID)
+  const requesterIsWorkBlock = isWorkingShift(requesterShift);
+  const candidateIsWorkBlock = isWorkingShift(candidateShift);
 
   // 4. Compute blocks, overlap, and isBlockOverlapTrade (ONLY true when BOTH sides are real work blocks and overlap > 1 day)
   const requesterBlock = detectShiftBlock(roster, requester, requesterDate);
@@ -1415,8 +1437,8 @@ export function scoreSwapResult(
 
   const requesterShift = shiftKey(roster.rows[requester]?.[requesterDate] ?? 'OFF');
   const candidateShift = shiftKey(roster.rows[candidate]?.[candidateDate] ?? 'OFF');
-  const requesterIsWorkBlock = requesterShift !== 'OFF' && requesterShift !== 'H8';
-  const candidateIsWorkBlock = candidateShift !== 'OFF' && candidateShift !== 'H8';
+  const requesterIsWorkBlock = isWorkingShift(requesterShift);
+  const candidateIsWorkBlock = isWorkingShift(candidateShift);
 
   const requesterBlock = detectShiftBlock(roster, requester, requesterDate);
   const candidateBlock = detectShiftBlock(roster, candidate, candidateDate);
@@ -1708,7 +1730,7 @@ export function calculateTradeBalance(
     trade.dates.forEach((isoDate) => {
       const shift = shiftKey(roster.rows[trade.giver]?.[isoDate] ?? 'OFF');
       const hours = shiftHourValues[shift] ?? 0;
-      const isWorkDay = shift !== 'OFF' && shift !== 'H8';
+      const isWorkDay = isWorkingShift(shift);
 
       if (trade.giver === employeeA && trade.receiver === employeeB) {
         if (isWorkDay) aGaveDays += 1;
@@ -1765,7 +1787,7 @@ export function suggestRebalancingTrades(
     if (monthContext && !isSameMonth(isoDate, monthContext.month, monthContext.year)) continue;
 
     const fromShift = shiftKey(roster.rows[owes]?.[isoDate] ?? 'OFF');
-    if (fromShift === 'OFF' || fromShift === 'H8') continue;
+    if (!isWorkingShift(fromShift)) continue;
 
     const toShift = shiftKey(roster.rows[owedTo]?.[isoDate] ?? 'OFF');
 
@@ -1934,8 +1956,8 @@ export function detectShiftBlock(
 ): ShiftBlock {
   const targetShift = shiftKey(rows[employee]?.[targetIsoDate] ?? 'OFF');
 
-  // If the target day is OFF or H8, it's not part of a work block
-  if (targetShift === 'OFF' || targetShift === 'H8') {
+  // If the target day is not an active working shift (OFF/H8/ABS), it's not part of a work block
+  if (!isWorkingShift(targetShift)) {
     return { shift: targetShift, startDate: targetIsoDate, endDate: targetIsoDate };
   }
 
@@ -1944,8 +1966,8 @@ export function detectShiftBlock(
   let currentDate = addDaysIso(targetIsoDate, -1);
   while (true) {
     const shift = shiftKey(rows[employee]?.[currentDate] ?? 'OFF');
-    // Stop when we hit an OFF/H8 day or run out of dates
-    if (shift === 'OFF' || shift === 'H8' || !roster.dateColumns.some(c => c.isoDate === currentDate)) {
+    // Stop when we hit a non-working day or run out of dates
+    if (!isWorkingShift(shift) || !roster.dateColumns.some(c => c.isoDate === currentDate)) {
       break;
     }
     // Stop if shift type changes
@@ -1961,8 +1983,8 @@ export function detectShiftBlock(
   currentDate = addDaysIso(targetIsoDate, 1);
   while (true) {
     const shift = shiftKey(rows[employee]?.[currentDate] ?? 'OFF');
-    // Stop when we hit an OFF/H8 day or run out of dates
-    if (shift === 'OFF' || shift === 'H8' || !roster.dateColumns.some(c => c.isoDate === currentDate)) {
+    // Stop when we hit a non-working day or run out of dates
+    if (!isWorkingShift(shift) || !roster.dateColumns.some(c => c.isoDate === currentDate)) {
       break;
     }
     // Stop if shift type changes
@@ -1998,7 +2020,7 @@ function buildPartialBlockNote(
 ): string | undefined {
   const requesterShift = shiftKey(roster.rows[requester]?.[requesterDate] ?? 'OFF');
   const candidateShift = shiftKey(roster.rows[candidate]?.[candidateDate] ?? 'OFF');
-  if (requesterShift === 'OFF' || candidateShift === 'OFF' || requesterShift === 'H8' || candidateShift === 'H8') return undefined;
+  if (!isWorkingShift(requesterShift) || !isWorkingShift(candidateShift)) return undefined;
 
   const requesterBlock = detectShiftBlock(roster, requester, requesterDate);
   const candidateBlock = detectShiftBlock(roster, candidate, candidateDate);
@@ -2039,7 +2061,7 @@ function buildBlockDebt(
 ): BlockDebtInfo | null {
   const receiverShift = shiftKey(roster.rows[receiver]?.[isoDate] ?? 'OFF');
   const giverShift = shiftKey(roster.rows[giver]?.[isoDate] ?? 'OFF');
-  if (receiverShift === 'OFF' || receiverShift === 'H8' || giverShift === 'OFF' || giverShift === 'H8') {
+  if (!isWorkingShift(receiverShift) || !isWorkingShift(giverShift)) {
     return null;
   }
 

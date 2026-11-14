@@ -30,6 +30,7 @@ import {
   countLegalWorkingDaysInMonth,
   isHistoricalMonthInRoster,
   loadHistoricalSchedule,
+  ROMANIAN_HOLIDAYS,
   FIXED_MID_EMPLOYEES,
   FIXED_WEEKDAY_MA_EMPLOYEES,
   type ComplianceTier,
@@ -1022,7 +1023,7 @@ export default function ScheduleBuilderTab({
           <div className="text-[12px]">
             <p className="font-semibold text-zinc-800 dark:text-zinc-200 text-[13px]">Fixed Management</p>
             <p className="text-zinc-500 dark:text-zinc-400 mt-0.5 leading-relaxed">
-              <span className="font-semibold text-blue-500">Alexandru Ionut Palade</span> & <span className="font-semibold text-blue-500">George Tir</span> are locked to <span className="font-semibold">MID</span> Mon–Fri, <span className="font-semibold">OFF</span> Sat–Sun.
+              <span className="font-semibold text-blue-500">Palade Alexandru-Ionut</span> (<span className="font-semibold">MID</span>) &amp; <span className="font-semibold text-emerald-500">Tir George Cristian</span> (<span className="font-semibold">M/A</span> by ISO week) work Mon–Fri, <span className="font-semibold">OFF</span> Sat–Sun &amp; legal holidays.
             </p>
           </div>
         </div>
@@ -1036,7 +1037,7 @@ export default function ScheduleBuilderTab({
             <p className="font-semibold text-zinc-800 dark:text-zinc-200 text-[13px]">24/7 Shift Coverage</p>
             <div className="mt-1 flex flex-wrap gap-2 text-[11px] font-medium">
               <span className="rounded bg-green-500/15 text-green-700 dark:text-green-300 px-1.5 py-0.5">Morning: ≥ 1 (rot)</span>
-              <span className="rounded bg-orange-500/15 text-orange-700 dark:text-orange-300 px-1.5 py-0.5">Afternoon: 2–3</span>
+              <span className="rounded bg-orange-500/15 text-orange-700 dark:text-orange-300 px-1.5 py-0.5">Afternoon: ≥ 2</span>
               <span className="rounded bg-purple-500/15 text-purple-700 dark:text-purple-300 px-1.5 py-0.5">Night: 2</span>
             </div>
           </div>
@@ -1361,7 +1362,7 @@ export default function ScheduleBuilderTab({
           </span>
         ) : (
           <span className="text-zinc-400 text-[11px]">
-            Hotkeys: <span className="font-mono font-semibold">M</span>, <span className="font-mono font-semibold">A</span>, <span className="font-mono font-semibold">N</span>, <span className="font-mono font-semibold">O</span> (off), <span className="font-mono font-semibold">H</span> (h8)
+            Hotkeys: <span className="font-mono font-semibold">M</span>, <span className="font-mono font-semibold">A</span>, <span className="font-mono font-semibold">N</span>, <span className="font-mono font-semibold">O</span> (off), <span className="font-mono font-semibold">H</span> (h8), <span className="font-mono font-semibold">B</span> (abs)
           </span>
         )}
       </div>
@@ -1399,11 +1400,13 @@ export default function ScheduleBuilderTab({
                   const dayNum = date.getDate();
                   const dayName = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][date.getDay()];
                   const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+                  const isHoliday = ROMANIAN_HOLIDAYS.has(isoDate);
                   const dayHeaderRelaxations = relaxationLookup.getDayHeaderRelaxations(isoDate);
                   const hasDayRelaxation = dayHeaderRelaxations.length > 0;
+                  const holidayNote = isHoliday ? ' (National Holiday)' : '';
                   const headerTooltip = hasDayRelaxation
-                    ? `${isoDate} — Relaxations: ${dayHeaderRelaxations.map((r) => `${r.rule} (Tier ${r.tier}): ${r.note}`).join('; ')}`
-                    : `Click to select/deselect all shifts on ${isoDate}`;
+                    ? `${isoDate}${holidayNote} — Relaxations: ${dayHeaderRelaxations.map((r) => `${r.rule} (Tier ${r.tier}): ${r.note}`).join('; ')}`
+                    : `Click to select/deselect all shifts on ${isoDate}${holidayNote}`;
 
                   return (
                     <th
@@ -1412,9 +1415,11 @@ export default function ScheduleBuilderTab({
                       className={`min-w-[42px] max-w-[42px] p-1 text-center font-semibold transition-colors border-r border-zinc-950/5 dark:border-white/5 cursor-pointer ${
                         hasDayRelaxation
                           ? 'bg-amber-500/10 text-amber-800 dark:text-amber-200 hover:bg-amber-500/15'
-                          : isWeekend
-                            ? 'bg-zinc-950/[0.05] dark:bg-white/[0.05] text-zinc-500 hover:bg-zinc-950/10 dark:hover:bg-white/10'
-                            : 'text-zinc-700 dark:text-zinc-300 hover:bg-zinc-950/[0.03] dark:hover:bg-white/[0.03]'
+                          : isHoliday
+                            ? 'bg-rose-500/[0.08] dark:bg-rose-500/[0.12] text-rose-600 dark:text-rose-400 hover:bg-rose-500/15'
+                            : isWeekend
+                              ? 'bg-zinc-950/[0.05] dark:bg-white/[0.05] text-zinc-500 hover:bg-zinc-950/10 dark:hover:bg-white/10'
+                              : 'text-zinc-700 dark:text-zinc-300 hover:bg-zinc-950/[0.03] dark:hover:bg-white/[0.03]'
                       }`}
                       title={headerTooltip}
                     >
@@ -1522,6 +1527,7 @@ export default function ScheduleBuilderTab({
                       const rawShift = scheduleData.rows[emp]?.[isoDate] ?? 'OFF';
                       const sKey = shiftKey(rawShift);
                       const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+                      const isHoliday = ROMANIAN_HOLIDAYS.has(isoDate);
                       const cellKey = `${emp}::${isoDate}`;
                       const isCellSelected = selectedCells.has(cellKey);
                       const isEditing = editingCell?.employee === emp && editingCell?.isoDate === isoDate;
@@ -1550,9 +1556,11 @@ export default function ScheduleBuilderTab({
                                 ? 'z-30 ring-2 ring-blue-500/50 rounded-lg'
                                 : isCellRelaxed
                                   ? 'bg-amber-500/[0.06] dark:bg-amber-400/[0.08]'
-                                  : isWeekend
-                                    ? 'bg-zinc-950/[0.015] dark:bg-white/[0.015]'
-                                    : ''
+                                  : isHoliday
+                                    ? 'bg-rose-500/[0.03] dark:bg-rose-500/[0.04]'
+                                    : isWeekend
+                                      ? 'bg-zinc-950/[0.015] dark:bg-white/[0.015]'
+                                      : ''
                           }`}
                           title={`${emp} on ${isoDate}: ${rawShift}${relaxationTitleSuffix} (Click to edit, Shift+click to select block, drag to select range)`}
                         >
@@ -1693,7 +1701,7 @@ export default function ScheduleBuilderTab({
                   );
                 })}
                 <td className="sticky right-0 z-10 p-1 text-center bg-zinc-100 dark:bg-[#141414] border-l border-zinc-950/10 dark:border-white/10 font-bold text-green-700 dark:text-green-400">
-                  M ≥ 1
+                  M ≥ 1 (rot)
                 </td>
               </tr>
 
@@ -1797,7 +1805,7 @@ export default function ScheduleBuilderTab({
                   );
                 })}
                 <td className="sticky right-0 z-10 p-1 text-center bg-zinc-100 dark:bg-[#141414] border-l border-zinc-950/10 dark:border-white/10 font-bold text-blue-600 dark:text-blue-400">
-                  2 (Mon–Fri)
+                  1 (Mon–Fri, excl. holidays)
                 </td>
               </tr>
             </tfoot>
@@ -2059,14 +2067,34 @@ export default function ScheduleBuilderTab({
                                 {readjustProposal.validation.understaffedDaysCount} understaffed
                               </span>
                             )}
+                            {readjustProposal.validation.nightOverstaffedDaysCount > 0 && (
+                              <span className="bg-purple-500/15 text-purple-700 dark:text-purple-300 px-2 py-0.5 rounded-full font-mono font-medium">
+                                {readjustProposal.validation.nightOverstaffedDaysCount} night &gt; 2
+                              </span>
+                            )}
                             {readjustProposal.validation.nightRestViolationCount > 0 && (
                               <span className="bg-purple-500/15 text-purple-700 dark:text-purple-300 px-2 py-0.5 rounded-full font-mono font-medium">
                                 {readjustProposal.validation.nightRestViolationCount} rest issue
                               </span>
                             )}
+                            {readjustProposal.validation.excessiveRestViolationCount > 0 && (
+                              <span className="bg-amber-500/15 text-amber-700 dark:text-amber-300 px-2 py-0.5 rounded-full font-mono font-medium">
+                                {readjustProposal.validation.excessiveRestViolationCount} rest &gt; 3d
+                              </span>
+                            )}
                             {readjustProposal.validation.streakViolationCount > 0 && (
                               <span className="bg-orange-500/15 text-orange-700 dark:text-orange-300 px-2 py-0.5 rounded-full font-mono font-medium">
-                                {readjustProposal.validation.streakViolationCount} streak &gt; 5d
+                                {readjustProposal.validation.streakViolationCount} block/streak issue
+                              </span>
+                            )}
+                            {readjustProposal.validation.mixedBlockViolationCount > 0 && (
+                              <span className="bg-rose-500/15 text-rose-700 dark:text-rose-300 px-2 py-0.5 rounded-full font-mono font-medium">
+                                {readjustProposal.validation.mixedBlockViolationCount} mixed block
+                              </span>
+                            )}
+                            {(readjustProposal.validation.fixedStaffViolationCount ?? 0) > 0 && (
+                              <span className="bg-blue-500/15 text-blue-700 dark:text-blue-300 px-2 py-0.5 rounded-full font-mono font-medium">
+                                {readjustProposal.validation.fixedStaffViolationCount} fixed staff
                               </span>
                             )}
                           </div>

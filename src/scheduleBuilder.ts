@@ -45,7 +45,7 @@ export function getIsoWeekNumber(date: Date): number {
 export { ROMANIAN_HOLIDAYS };
 export const ROMANIAN_HOLIDAYS_2026 = ROMANIAN_HOLIDAYS;
 
-// Dec 31st New Year's Eve exemption: Palade and Tir George work normal weekday shift if Dec 31 is a weekday (e.g. 2026-12-31 is Thursday)
+// Extra non-statutory dates on which fixed staff (Palade, Tir George) are scheduled OFF
 export const FIXED_STAFF_EXEMPT_OFF_DATES = new Set<string>();
 
 export const MONTHLY_WORKING_DAYS_2026: Record<number, number> = {
@@ -141,6 +141,101 @@ export function getActiveTailRest(history: string[]): string[] {
     tail.unshift('OFF');
   }
   return tail;
+}
+
+const DAG_NEXT_SHIFT_ACT: readonly number[] = [1, 2, 0]; // A(0)->M(1), M(1)->N(2), N(2)->A(0)
+const DAG_LEAVE_CODES = new Set(['ABS', 'H8', 'CM']);
+
+function encodeStage3DagState(w: number, sh: number, ml: number, sb: number): number {
+  return ((w * 4 + sh) * 13 + ml) * 2 + sb;
+}
+
+function encodeGenDagState(w: number, sh: number, ml: number, offS: number, sb: number): number {
+  return (((w * 4 + sh) * 13 + ml) * 4 + offS) * 2 + sb;
+}
+
+function canDoShift(dayActMasks: Uint8Array[], eIdx: number, d: number, act: number): boolean {
+  return (dayActMasks[eIdx][d] & (1 << act)) !== 0;
+}
+
+function buildDagDayActMasks(
+  dags: ReadonlyArray<{
+    feasible: boolean;
+    layers: ReadonlyArray<ReadonlyArray<ReadonlyArray<{ act: number }>>>;
+  }>,
+  daysCount: number
+): Uint8Array[] {
+  return dags.map((dag) => {
+    const masks = new Uint8Array(daysCount);
+    if (!dag.feasible) return masks;
+    for (let d = 0; d < daysCount; d++) {
+      let mask = 0;
+      const layer = dag.layers[d];
+      for (let u = 0; u < layer.length; u++) {
+        const edges = layer[u];
+        for (let ei = 0; ei < edges.length; ei++) {
+          mask |= 1 << edges[ei].act;
+        }
+      }
+      masks[d] = mask;
+    }
+    return masks;
+  });
+}
+
+function isDagPathValid(
+  dag: {
+    layers: ReadonlyArray<ReadonlyArray<ReadonlyArray<{ act: number; nextNode: number }>>>;
+  },
+  path: number[],
+  daysCount: number
+): boolean {
+  let u = 0;
+  for (let d = 0; d < daysCount; d++) {
+    const edges = dag.layers[d][u];
+    const act = path[d];
+    let found = -1;
+    for (let ei = 0; ei < edges.length; ei++) {
+      if (edges[ei].act === act) {
+        found = edges[ei].nextNode;
+        break;
+      }
+    }
+    if (found === -1) return false;
+    u = found;
+  }
+  return true;
+}
+
+function solveDagExtremeCount(
+  dag: {
+    maxNodes: number;
+    layers: ReadonlyArray<ReadonlyArray<ReadonlyArray<{ act: number; nextNode: number }>>>;
+  },
+  daysCount: number,
+  targetAct: number,
+  sign: 1 | -1
+): number {
+  let dpNext = new Float64Array(Math.max(1, dag.maxNodes));
+  let dpCur = new Float64Array(Math.max(1, dag.maxNodes));
+  for (let d = daysCount - 1; d >= 0; d--) {
+    const layer = dag.layers[d];
+    const isLast = d === daysCount - 1;
+    for (let u = 0; u < layer.length; u++) {
+      const edges = layer[u];
+      let bestVal = Infinity;
+      for (let ei = 0; ei < edges.length; ei++) {
+        const edge = edges[ei];
+        const val = (edge.act === targetAct ? sign : 0) + (isLast ? 0 : dpNext[edge.nextNode]);
+        if (val < bestVal) bestVal = val;
+      }
+      dpCur[u] = bestVal;
+    }
+    const tmp = dpNext;
+    dpNext = dpCur;
+    dpCur = tmp;
+  }
+  return sign === 1 ? dpNext[0] : -dpNext[0];
 }
 
 export interface ScheduleBuilderOptions {
@@ -2386,10 +2481,10 @@ export function generateBalancedSchedule(
   // Stage 3: Exact Legal-Trajectory DP + Large Neighborhood Search across active tiers
   if (rotatingEmployees.length > 0 && targetWorkingDays > 0 && targetWorkingDays <= daysCount) {
     const ACT_SHIFT = ['A', 'M', 'N', 'OFF'] as const;
-    const NEXT_SH = [1, 2, 0]; // A(0)->M(1), M(1)->N(2), N(2)->A(0)
+    const NEXT_SH = DAG_NEXT_SHIFT_ACT;
     const shToIdx = (s: string) => (s === 'A' ? 0 : s === 'M' ? 1 : s === 'N' ? 2 : 3);
     const numStatesPerDay = (targetWorkingDays + 1) * 4 * 13 * 2;
-    const encState = (w: number, sh: number, ml: number, sb: number) => ((w * 4 + sh) * 13 + ml) * 2 + sb;
+    const encState = encodeStage3DagState;
 
     interface DagEdge {
       act: number;
@@ -2726,45 +2821,10 @@ export function generateBalancedSchedule(
         arr[j] = tmp;
       }
     };
-    const isStage3PathValid = (dag: EmpDag, path: number[]): boolean => {
-      let u = 0;
-      for (let d = 0; d < daysCount; d++) {
-        const edges = dag.layers[d][u];
-        const act = path[d];
-        let found = -1;
-        for (let ei = 0; ei < edges.length; ei++) {
-          if (edges[ei].act === act) {
-            found = edges[ei].nextNode;
-            break;
-          }
-        }
-        if (found === -1) return false;
-        u = found;
-      }
-      return true;
-    };
-    const solveStage3ExtremeCount = (dag: EmpDag, targetAct: number, sign: 1 | -1): number => {
-      let dpNext = new Float64Array(Math.max(1, dag.maxNodes));
-      let dpCur = new Float64Array(Math.max(1, dag.maxNodes));
-      for (let d = daysCount - 1; d >= 0; d--) {
-        const layer = dag.layers[d];
-        const isLast = d === daysCount - 1;
-        for (let u = 0; u < layer.length; u++) {
-          const edges = layer[u];
-          let bestVal = Infinity;
-          for (let ei = 0; ei < edges.length; ei++) {
-            const edge = edges[ei];
-            const val = (edge.act === targetAct ? sign : 0) + (isLast ? 0 : dpNext[edge.nextNode]);
-            if (val < bestVal) bestVal = val;
-          }
-          dpCur[u] = bestVal;
-        }
-        const tmp = dpNext;
-        dpNext = dpCur;
-        dpCur = tmp;
-      }
-      return sign === 1 ? dpNext[0] : -dpNext[0];
-    };
+    const isStage3PathValid = (dag: EmpDag, path: number[]): boolean =>
+      isDagPathValid(dag, path, daysCount);
+    const solveStage3ExtremeCount = (dag: EmpDag, targetAct: number, sign: 1 | -1): number =>
+      solveDagExtremeCount(dag, daysCount, targetAct, sign);
 
     const evalCovWeighted = (
       mArr: Int32Array,
@@ -2798,24 +2858,7 @@ export function generateBalancedSchedule(
     };
 
     const buildDayActMasks = (dags: EmpDag[]): Uint8Array[] =>
-      dags.map((dag) => {
-        const masks = new Uint8Array(daysCount);
-        if (!dag.feasible) return masks;
-        for (let d = 0; d < daysCount; d++) {
-          let mask = 0;
-          const layer = dag.layers[d];
-          for (let u = 0; u < layer.length; u++) {
-            const edges = layer[u];
-            for (let ei = 0; ei < edges.length; ei++) {
-              mask |= 1 << edges[ei].act;
-            }
-          }
-          masks[d] = mask;
-        }
-        return masks;
-      });
-    const canDoShift = (dayActMasks: Uint8Array[], eIdx: number, d: number, act: number): boolean =>
-      (dayActMasks[eIdx][d] & (1 << act)) !== 0;
+      buildDagDayActMasks(dags, daysCount);
 
     const hasSufficientDagCapacity = (
       dags: EmpDag[],
@@ -2923,7 +2966,7 @@ export function generateBalancedSchedule(
     };
 
     const R = rotatingEmployees.length;
-    const LEAVE_CODES = new Set(['ABS', 'H8', 'CM']);
+    const LEAVE_CODES = DAG_LEAVE_CODES;
     const stage3EmpData = rotatingEmployees.map((emp) => {
       const rawHist = rotatingRawHistories[emp] ?? [];
       const sanitizedHist = rawHist.map((s) =>
@@ -4108,6 +4151,7 @@ export async function exportRosterToExcelFile(
     employees: string[];
     rows: Record<string, Record<string, string>>;
     dateColumns: { index: number; isoDate: string }[];
+    targetWorkingDays?: number;
   },
   customFileName?: string
 ) {
@@ -4197,7 +4241,8 @@ export async function exportRosterToExcelFile(
   });
 
   // Target working days for month
-  const targetWorkingDays = countLegalWorkingDaysInMonth(roster.month, roster.year);
+  const targetWorkingDays =
+    roster.targetWorkingDays ?? countLegalWorkingDaysInMonth(roster.month, roster.year);
 
   // 5. Employee Rows
   const employees = roster.employees && roster.employees.length > 0 ? roster.employees : Object.keys(roster.rows);
@@ -4302,9 +4347,9 @@ export async function exportRosterToExcelFile(
 
   // 6. Coverage summary rows
   const summaryDefs = [
-    { label: 'MORNING 6-15', code: 'M', offset: 3, targetMin: 1 },
-    { label: 'AFTER 13-22', code: 'A', offset: 4, targetMin: 1 },
-    { label: 'NIGHT 21-06', code: 'N', offset: 5, targetMin: 1 },
+    { label: 'MORNING 06-14', code: 'M', offset: 3, targetMin: 1 },
+    { label: 'AFTER 14-22', code: 'A', offset: 4, targetMin: 2 },
+    { label: 'NIGHT 22-06', code: 'N', offset: 5, targetMin: 2 },
     { label: 'MID', code: 'MID', offset: 6, targetMin: 0 }
   ];
 
@@ -4482,7 +4527,7 @@ export async function exportRosterToExcelFile(
  * Intelligent, minimally-invasive shift readjustment algorithm to makeup for colleagues calling in sick (ABS).
  *
  * Rules:
- * 1. Minimum rotating staffing per day: M >= 2, A >= 2, N = 2.
+ * 1. Minimum daily staffing: rotating M >= 1, total A >= 2, N = 2 (Tier 0 strict; relaxed in Tiers 1-3).
  * 2. Minimum invasiveness: If staffing on a shift with an ABS colleague is still >= 2, DO NOT change anyone.
  * 3. Morning deficit (M < 2):
  *    - Priority 1: Afternoon surplus on the same day (A > 2 -> move candidate to M).
@@ -5172,7 +5217,7 @@ export function calculateAbsReadjustments(
     const s5DeadlineMs = s5StartMs + s5BudgetMs - 100;
     const absTiers: ComplianceTier[] = [0, 1, 2, 3];
     const daysCount = dateColumns.length;
-    const GEN_NEXT = [1, 2, 0]; // A(0)->M(1), M(1)->N(2), N(2)->A(0)
+    const GEN_NEXT = DAG_NEXT_SHIFT_ACT;
     const shToGen = (s: string) => (s === 'A' ? 0 : s === 'M' ? 1 : s === 'N' ? 2 : s === 'ABS' ? 4 : (s === 'H8' || s === 'HUP') ? 5 : 3);
     const fixedMidSet = new Set(FIXED_MID_EMPLOYEES);
     const fixedMaEmps = allEmployees.filter((e) => FIXED_WEEKDAY_MA_EMPLOYEES.includes(e));
@@ -5246,7 +5291,7 @@ export function calculateAbsReadjustments(
       };
     };
 
-    const LEAVE_CODES = new Set(['ABS', 'H8', 'CM']);
+    const LEAVE_CODES = DAG_LEAVE_CODES;
 
     const buildGeneralDag = (
       emp: string,
@@ -5306,8 +5351,7 @@ export function calculateAbsReadjustments(
       };
 
       const numStates = (effectiveTarget + 1) * 4 * 13 * 4 * 2;
-      const enc = (w: number, sh: number, ml: number, offS: number, sb: number) =>
-        (((w * 4 + sh) * 13 + ml) * 4 + offS) * 2 + sb;
+      const enc = encodeGenDagState;
 
       const rawHistory = empHistories[emp] ?? [];
       const history = rawHistory.map((s) =>
@@ -5780,45 +5824,10 @@ export function calculateAbsReadjustments(
         arr[j] = tmp;
       }
     };
-    const isGenPathValid = (dag: GenDag, path: number[]): boolean => {
-      let u = 0;
-      for (let d = 0; d < daysCount; d++) {
-        const edges = dag.layers[d][u];
-        const act = path[d];
-        let found = -1;
-        for (let ei = 0; ei < edges.length; ei++) {
-          if (edges[ei].act === act) {
-            found = edges[ei].nextNode;
-            break;
-          }
-        }
-        if (found === -1) return false;
-        u = found;
-      }
-      return true;
-    };
-    const solveGenExtremeCount = (dag: GenDag, targetAct: number, sign: 1 | -1): number => {
-      let dpNext = new Float64Array(Math.max(1, dag.maxNodes));
-      let dpCur = new Float64Array(Math.max(1, dag.maxNodes));
-      for (let d = daysCount - 1; d >= 0; d--) {
-        const layer = dag.layers[d];
-        const isLast = d === daysCount - 1;
-        for (let u = 0; u < layer.length; u++) {
-          const edges = layer[u];
-          let bestVal = Infinity;
-          for (let ei = 0; ei < edges.length; ei++) {
-            const edge = edges[ei];
-            const val = (edge.act === targetAct ? sign : 0) + (isLast ? 0 : dpNext[edge.nextNode]);
-            if (val < bestVal) bestVal = val;
-          }
-          dpCur[u] = bestVal;
-        }
-        const tmp = dpNext;
-        dpNext = dpCur;
-        dpCur = tmp;
-      }
-      return sign === 1 ? dpNext[0] : -dpNext[0];
-    };
+    const isGenPathValid = (dag: GenDag, path: number[]): boolean =>
+      isDagPathValid(dag, path, daysCount);
+    const solveGenExtremeCount = (dag: GenDag, targetAct: number, sign: 1 | -1): number =>
+      solveDagExtremeCount(dag, daysCount, targetAct, sign);
 
     let bestRepairedRows: Record<string, Record<string, string>> | null = null;
     let bestRepairedValidation = currentValidation;
@@ -5900,21 +5909,7 @@ export function calculateAbsReadjustments(
     const s5Locked: number[] = [];
 
     const buildGenDayActMasks = (dags: GenDag[]): Uint8Array[] =>
-      dags.map((dg) => {
-        const masks = new Uint8Array(daysCount);
-        for (let d = 0; d < daysCount; d++) {
-          let mask = 0;
-          const layer = dg.layers[d];
-          for (let u = 0; u < layer.length; u++) {
-            const edges = layer[u];
-            for (let ei = 0; ei < edges.length; ei++) {
-              mask |= 1 << edges[ei].act;
-            }
-          }
-          masks[d] = mask;
-        }
-        return masks;
-      });
+      buildDagDayActMasks(dags, daysCount);
 
     const appendRandomFromBucket = (bucket: number[], out: number[], limit: number): void => {
       let rem = bucket.length;
@@ -5966,7 +5961,7 @@ export function calculateAbsReadjustments(
           continue;
         }
         if (needAct >= 0) {
-          if ((mask & (1 << needAct)) !== 0) {
+          if (canDoShift(genDayActMasks, e, focusDay, needAct)) {
             if (paths[e][focusDay] !== needAct) s5Helpers.push(e);
             else s5Capable.push(e);
           } else {
