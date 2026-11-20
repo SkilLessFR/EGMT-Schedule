@@ -49,6 +49,7 @@ const EMPLOYEE_STORAGE_KEY = 'work-schedule-employee';
 const DARK_MODE_STORAGE_KEY = 'work-schedule-dark-mode';
 const SALARY_STORAGE_KEY = 'work-schedule-salaries';
 const ADMIN_PIN_STORAGE_KEY = 'work-schedule-admin-pin';
+const LOCAL_ROSTER_STORAGE_KEY = 'work-schedule-local-roster';
 const APP_BASE_URL = ((import.meta as ImportMeta & { env?: { BASE_URL?: string } }).env?.BASE_URL ?? '/');
 
 function countWorkingDaysInMonth(month: number, year: number) {
@@ -312,6 +313,7 @@ export default function App() {
       }
 
       setRoster(payloadRoster);
+      localStorage.removeItem(LOCAL_ROSTER_STORAGE_KEY);
       setScheduleSource('kv');
       setCurrentMonth(parsedPreview.month);
       setCurrentYear(parsedPreview.year);
@@ -674,7 +676,18 @@ export default function App() {
         if (kvRes.ok) {
           const json = (await kvRes.json()) as ScheduleJson;
           if (!mounted) return;
-          const parsed = hydrateRoster(json);
+          let parsed = hydrateRoster(json);
+          try {
+            const rawLocal = localStorage.getItem(LOCAL_ROSTER_STORAGE_KEY);
+            if (rawLocal) {
+              const localJson = JSON.parse(rawLocal) as ScheduleJson;
+              if (localJson && Array.isArray(localJson.dateColumns) && localJson.rows) {
+                parsed = mergeRosters(parsed, hydrateRoster(localJson));
+              }
+            }
+          } catch {
+            // Ignore malformed local overlay
+          }
           setRoster(parsed);
           setScheduleSource('kv');
           const savedAuth = localStorage.getItem(AUTH_STORAGE_KEY);
@@ -701,7 +714,18 @@ export default function App() {
         if (!res.ok) throw new Error('Schedule structural asset missing from schedule.json.');
         const json = (await res.json()) as ScheduleJson;
         if (!mounted) return;
-        const parsed = hydrateRoster(json);
+        let parsed = hydrateRoster(json);
+        try {
+          const rawLocal = localStorage.getItem(LOCAL_ROSTER_STORAGE_KEY);
+          if (rawLocal) {
+            const localJson = JSON.parse(rawLocal) as ScheduleJson;
+            if (localJson && Array.isArray(localJson.dateColumns) && localJson.rows) {
+              parsed = mergeRosters(parsed, hydrateRoster(localJson));
+            }
+          }
+        } catch {
+          // Ignore malformed local overlay
+        }
         setRoster(parsed);
         setScheduleSource('static');
         const savedAuth = localStorage.getItem(AUTH_STORAGE_KEY);
@@ -1560,10 +1584,39 @@ export default function App() {
                   >
                     <ScheduleBuilderTab
                       roster={roster}
-                      onApplySchedule={(updatedRoster, targetMonth, targetYear) => {
+                      onApplySchedule={async (updatedRoster, targetMonth, targetYear) => {
                         setRoster(updatedRoster);
                         setCurrentMonth(targetMonth);
                         setCurrentYear(targetYear);
+                        const serialized = {
+                          fileName: updatedRoster.fileName,
+                          month: updatedRoster.month,
+                          year: updatedRoster.year,
+                          employees: updatedRoster.employees,
+                          dateColumns: updatedRoster.dateColumns.map(({ index, isoDate }) => ({ index, isoDate })),
+                          rows: updatedRoster.rows,
+                        };
+                        try {
+                          localStorage.setItem(LOCAL_ROSTER_STORAGE_KEY, JSON.stringify(serialized));
+                        } catch {
+                          // Ignore storage quota errors
+                        }
+                        try {
+                          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+                          const storedPin = (adminPin || localStorage.getItem(ADMIN_PIN_STORAGE_KEY) || '').trim();
+                          if (storedPin) headers['X-Admin-Pin'] = storedPin;
+                          const res = await fetch('/api/schedule', {
+                            method: 'POST',
+                            headers,
+                            body: JSON.stringify(serialized),
+                          });
+                          if (res.ok) {
+                            setScheduleSource('kv');
+                            localStorage.removeItem(LOCAL_ROSTER_STORAGE_KEY);
+                          }
+                        } catch {
+                          // Keep localStorage copy when offline or KV sync fails
+                        }
                       }}
                     />
                   </Suspense>
