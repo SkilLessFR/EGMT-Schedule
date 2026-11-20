@@ -28,6 +28,7 @@ import {
   calculateAbsReadjustments,
   exportRosterToExcelFile,
   countLegalWorkingDaysInMonth,
+  buildMonthDateColumns,
   isHistoricalMonthInRoster,
   loadHistoricalSchedule,
   ROMANIAN_HOLIDAYS,
@@ -502,24 +503,92 @@ export default function ScheduleBuilderTab({
   }, [initialSchedule, roster, hasUserNavigated]);
 
   const [isGenerating, setIsGenerating] = useState(false);
+  const [scheduleGenEnabled, setScheduleGenEnabled] = useState<boolean>(true);
   const skipInitialGenerationRef = useRef(Boolean(initialSchedule));
 
-  // Generate initial schedule or load historical schedule if already set in stone
+  const buildBlankSchedule = useCallback(
+    (
+      baseRoster: RosterData | null,
+      y: number,
+      m: number,
+      exclusions: Set<string>
+    ): GeneratedScheduleResult => {
+      const dateColumns = buildMonthDateColumns(y, m);
+      const targetNorm = countLegalWorkingDaysInMonth(m, y);
+      const employeeList =
+        baseRoster?.employees && baseRoster.employees.length > 0
+          ? baseRoster.employees
+          : [
+              'Palade Alexandru-Ionut',
+              'Tir George Cristian',
+              'Urzica Ion-Alexandru',
+              'Debona Andrei-Laurentiu',
+              'Nica Bogdan-Alexandru',
+              'Corneci Stefan-Cristian',
+              'Toma Mihai',
+              'Gheorghe Adrian Marinescu',
+              'Olteanu Ionut-Lucian',
+              'Stoian Alexandru-Gabriel',
+              'Prisecaru Alexandru-Ionut'
+            ];
+      const PRESERVE_CODES = new Set(['H8', 'ABS', 'CM', 'HUP', 'AD']);
+      const rows: Record<string, Record<string, string>> = {};
+      for (const emp of employeeList) {
+        rows[emp] = {};
+        for (const col of dateColumns) {
+          const raw = shiftKey(baseRoster?.rows?.[emp]?.[col.isoDate] ?? '');
+          rows[emp][col.isoDate] = !exclusions.has(emp) && PRESERVE_CODES.has(raw) ? raw : 'OFF';
+        }
+      }
+      const validation = validateScheduleCompliance(
+        rows,
+        dateColumns,
+        baseRoster,
+        y,
+        m,
+        targetNorm,
+        Array.from(exclusions),
+        { tier: 0, relaxations: [] }
+      );
+      return {
+        month: m,
+        year: y,
+        daysCount: dateColumns.length,
+        targetWorkingDays: targetNorm,
+        dateColumns,
+        rows,
+        validation,
+        seed: 0,
+        excludedEmployees: Array.from(exclusions),
+        tier: 0,
+        relaxations: [],
+        needsManualReview: false,
+        elapsedMs: 0
+      };
+    },
+    []
+  );
+
+  // Generate initial schedule, blank month (when gen disabled), or load historical schedule if already set in stone
   const runGeneration = useCallback(
     (
       seedValue: number = currentSeed,
       y: number = targetYear,
       m: number = targetMonth,
-      exclusions: Set<string> = excludedEmployees
+      exclusions: Set<string> = excludedEmployees,
+      genEnabledOverride: boolean = scheduleGenEnabled,
+      rosterOverride: RosterData | null = roster
     ) => {
       setIsGenerating(true);
       setStricterStatusNote(null);
       setShowAllWarnings(false);
       setTimeout(() => {
-        if (isHistoricalMonthInRoster(roster, y, m)) {
-          setScheduleData(loadHistoricalSchedule(roster!, y, m));
+        if (isHistoricalMonthInRoster(rosterOverride, y, m)) {
+          setScheduleData(loadHistoricalSchedule(rosterOverride!, y, m));
+        } else if (!genEnabledOverride) {
+          setScheduleData(buildBlankSchedule(rosterOverride, y, m, exclusions));
         } else {
-          const result = generateBalancedSchedule(roster, y, m, {
+          const result = generateBalancedSchedule(rosterOverride, y, m, {
             seed: seedValue,
             targetWorkingDays: countLegalWorkingDaysInMonth(m, y),
             excludedEmployees: Array.from(exclusions)
@@ -531,8 +600,48 @@ export default function ScheduleBuilderTab({
         setIsGenerating(false);
       }, 20);
     },
-    [roster, currentSeed, targetYear, targetMonth, excludedEmployees]
+    [roster, currentSeed, targetYear, targetMonth, excludedEmployees, scheduleGenEnabled, buildBlankSchedule]
   );
+
+  const handleToggleScheduleGen = (enabled: boolean) => {
+    if (isGenerating || enabled === scheduleGenEnabled) return;
+    setScheduleGenEnabled(enabled);
+
+    // Preserve any H8/leave entries currently edited in the blank grid even before Apply to Calendar
+    let effectiveRoster: RosterData | null = roster;
+    if (scheduleData && scheduleData.year === targetYear && scheduleData.month === targetMonth && !isHistorical) {
+      const LEAVE_CODES = new Set(['H8', 'ABS', 'CM', 'HUP', 'AD']);
+      const baseRows: Record<string, Record<string, string>> = {};
+      if (roster?.rows) {
+        for (const emp of Object.keys(roster.rows)) {
+          baseRows[emp] = { ...roster.rows[emp] };
+        }
+      }
+      for (const emp of Object.keys(scheduleData.rows)) {
+        if (!baseRows[emp]) baseRows[emp] = {};
+        for (const { isoDate } of scheduleData.dateColumns) {
+          const val = shiftKey(scheduleData.rows[emp]?.[isoDate] ?? '');
+          if (LEAVE_CODES.has(val)) {
+            baseRows[emp][isoDate] = val;
+          } else if (LEAVE_CODES.has(shiftKey(baseRows[emp][isoDate] ?? ''))) {
+            delete baseRows[emp][isoDate];
+          }
+        }
+      }
+      effectiveRoster = roster
+        ? { ...roster, rows: baseRows }
+        : {
+            fileName: 'PrePlanned_Leaves',
+            month: targetMonth,
+            year: targetYear,
+            employees: Object.keys(scheduleData.rows),
+            dateColumns: scheduleData.dateColumns,
+            rows: baseRows
+          };
+    }
+
+    runGeneration(currentSeed, targetYear, targetMonth, excludedEmployees, enabled, effectiveRoster);
+  };
 
   useEffect(() => {
     if (skipInitialGenerationRef.current) {
@@ -988,12 +1097,51 @@ export default function ScheduleBuilderTab({
           <p className="mt-1 text-[13px] text-zinc-500 dark:text-zinc-400">
             {isHistorical
               ? "Archived monthly schedule record loaded directly from roster data (locked & set in stone)"
-              : "Automated, balanced schedule generation based on previous months' roster rules"}
+              : !scheduleGenEnabled
+                ? "Blank month view — add H8s or leave entries, apply to calendar, then re-enable Schedule Gen"
+                : "Automated, balanced schedule generation based on previous months' roster rules"}
           </p>
         </div>
 
-        {/* Month Selector Pill */}
-        <div className="flex items-center gap-2">
+        {/* Schedule Gen Toggle Tab + Month Selector Pill */}
+        <div className="flex flex-wrap items-center gap-2.5">
+          <div
+            className="flex items-center gap-1 rounded-2xl border border-zinc-950/10 dark:border-white/10 bg-zinc-950/5 dark:bg-white/5 p-1"
+            role="tablist"
+            aria-label="Schedule Generation Mode"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={scheduleGenEnabled}
+              disabled={isGenerating}
+              onClick={() => handleToggleScheduleGen(true)}
+              className={`rounded-xl px-3 py-1.5 text-[12px] font-bold transition-all cursor-pointer ${
+                scheduleGenEnabled
+                  ? 'bg-blue-500 text-white shadow-sm'
+                  : 'text-zinc-600 dark:text-zinc-300 hover:bg-zinc-950/5 dark:hover:bg-white/10'
+              } disabled:opacity-60`}
+              title="Enable automatic shift generation for future months"
+            >
+              Schedule Gen: ON
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={!scheduleGenEnabled}
+              disabled={isGenerating}
+              onClick={() => handleToggleScheduleGen(false)}
+              className={`rounded-xl px-3 py-1.5 text-[12px] font-bold transition-all cursor-pointer ${
+                !scheduleGenEnabled
+                  ? 'bg-amber-500 text-white shadow-sm'
+                  : 'text-zinc-600 dark:text-zinc-300 hover:bg-zinc-950/5 dark:hover:bg-white/10'
+              } disabled:opacity-60`}
+              title="Disable shift generation to view blank future months, add H8s, and apply"
+            >
+              Schedule Gen: OFF
+            </button>
+          </div>
+
           <div className="flex items-center gap-1 rounded-2xl border border-zinc-950/10 dark:border-white/10 bg-zinc-950/5 dark:bg-white/5 p-1">
             <button
               type="button"
@@ -1084,6 +1232,20 @@ export default function ScheduleBuilderTab({
               </p>
             </div>
           </div>
+        ) : !scheduleGenEnabled ? (
+          <div className={`p-4 ${GLASS_CARD} border border-blue-500/35 bg-blue-500/[0.06] dark:bg-blue-500/[0.08] flex items-start gap-3`}>
+            <div className="rounded-xl p-2 shrink-0 bg-blue-500/15 text-blue-600 dark:text-blue-400">
+              <Info className="size-5" />
+            </div>
+            <div className="text-[12px] flex-1 min-w-0">
+              <p className="font-semibold text-blue-800 dark:text-blue-200 text-[13px]">
+                Schedule Generation Disabled — Blank Month View
+              </p>
+              <p className="text-zinc-600 dark:text-zinc-300 mt-0.5 leading-relaxed">
+                Shifts are not auto-generated. Click or drag cells to add <span className="font-semibold">H8</span>s (or press <kbd className="px-1 py-0.5 rounded bg-zinc-950/10 dark:bg-white/10 font-mono text-[10px]">H</kbd>), click <span className="font-semibold">Apply to Calendar</span> to save them, then switch <span className="font-semibold">Schedule Gen: ON</span> when ready to generate shifts around them.
+              </p>
+            </div>
+          </div>
         ) : complianceState.status === 'compliant' ? (
           <div className={`p-4 ${GLASS_CARD} border border-emerald-500/30 bg-emerald-500/[0.06] dark:bg-emerald-500/[0.08] flex items-start gap-3`}>
             <div className="rounded-xl p-2 shrink-0 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
@@ -1154,14 +1316,20 @@ export default function ScheduleBuilderTab({
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                disabled={isHistorical || isGenerating}
+                disabled={isHistorical || isGenerating || !scheduleGenEnabled}
                 onClick={handleRegenerateVariant}
                 className={`flex items-center gap-2 rounded-xl font-semibold px-4 py-2 text-[13px] shadow transition-all ${
-                  isHistorical || isGenerating
+                  isHistorical || isGenerating || !scheduleGenEnabled
                     ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 cursor-not-allowed opacity-60'
                     : 'bg-blue-500 hover:bg-blue-600 text-white active:scale-98 cursor-pointer'
                 }`}
-                title={isHistorical ? 'Historical records are set in stone and cannot be regenerated' : 'Generate new balanced variant'}
+                title={
+                  isHistorical
+                    ? 'Historical records are set in stone and cannot be regenerated'
+                    : !scheduleGenEnabled
+                      ? 'Enable Schedule Gen to generate shifts'
+                      : 'Generate new balanced variant'
+                }
               >
                 {isHistorical ? (
                   <Lock className="size-4" />

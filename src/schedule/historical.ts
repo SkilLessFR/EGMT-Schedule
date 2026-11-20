@@ -1,6 +1,9 @@
 import type { RosterData, GeneratedScheduleResult } from './types';
+import { shiftKey } from './constants';
 import { buildMonthDateColumns, countLegalWorkingDaysInMonth } from './dateUtils';
 import { validateScheduleCompliance } from './validator';
+
+const WORKING_SHIFTS = new Set(['M', 'A', 'N', 'MID']);
 
 /**
  * Swaps shifts between two employees across one or multiple dates
@@ -39,7 +42,23 @@ export function isHistoricalMonthInRoster(
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const monthPrefix = `${year}-${String(month + 1).padStart(2, '0')}`;
   const datesInRosterForMonth = roster.dateColumns.filter((d) => d.isoDate.startsWith(monthPrefix));
-  return datesInRosterForMonth.length >= daysInMonth;
+  if (datesInRosterForMonth.length < daysInMonth) return false;
+
+  // A month with only H8/leave/OFF entries (no M/A/N/MID working shifts) is a pre-planned
+  // blank/leave month, not a completed historical schedule.
+  if (roster.rows) {
+    for (const emp of Object.keys(roster.rows)) {
+      const empRow = roster.rows[emp];
+      if (!empRow) continue;
+      for (const col of datesInRosterForMonth) {
+        const s = shiftKey(empRow[col.isoDate] ?? '');
+        if (WORKING_SHIFTS.has(s)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 /**

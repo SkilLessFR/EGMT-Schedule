@@ -38,6 +38,7 @@ import {
 import { evaluateOffsetCost } from './costEvaluator';
 import { equalizeExactWorkingDays } from './equalizer';
 import { validateScheduleCompliance } from './validator';
+import { calculateAbsReadjustments } from './readjustment';
 import {
   getTierConfig,
   isCoverageFeasibleForTier,
@@ -95,6 +96,100 @@ export function generateBalancedSchedule(
   const fixedMidEmployees = FIXED_MID_EMPLOYEES.filter((name) => activeAllEmployees.includes(name));
   const fixedWeekdayMAEmployees = FIXED_WEEKDAY_MA_EMPLOYEES.filter((name) => activeAllEmployees.includes(name));
   const rotatingEmployees = activeAllEmployees.filter((name) => !fixedMidEmployees.includes(name) && !fixedWeekdayMAEmployees.includes(name));
+
+  // If the target month already contains pre-planned leave codes (e.g. H8/ABS/CM added while
+  // schedule generation was disabled), preserve them and solve around them via readjustment.
+  const LEAVE_PRESERVE_CODES = new Set(['H8', 'ABS', 'CM', 'HUP', 'AD']);
+  const prePlannedLeaves: Record<string, Record<string, string>> = {};
+  let hasPrePlannedLeaves = false;
+  if (roster?.rows) {
+    for (const emp of activeAllEmployees) {
+      const empRow = roster.rows[emp];
+      if (!empRow) continue;
+      for (const { isoDate } of dateColumns) {
+        const code = shiftKey(empRow[isoDate] ?? '');
+        if (LEAVE_PRESERVE_CODES.has(code)) {
+          if (!prePlannedLeaves[emp]) prePlannedLeaves[emp] = {};
+          prePlannedLeaves[emp][isoDate] = code;
+          hasPrePlannedLeaves = true;
+        }
+      }
+    }
+  }
+
+  if (hasPrePlannedLeaves) {
+    const activeSeedRows: Record<string, Record<string, string>> = {};
+    for (const emp of activeAllEmployees) {
+      activeSeedRows[emp] = {};
+      for (const { date, isoDate } of dateColumns) {
+        const preserved = prePlannedLeaves[emp]?.[isoDate];
+        if (preserved) {
+          activeSeedRows[emp][isoDate] = preserved;
+        } else if (fixedMidEmployees.includes(emp)) {
+          activeSeedRows[emp][isoDate] = isFixedStaffOffDate(date, isoDate) ? 'OFF' : 'MID';
+        } else if (fixedWeekdayMAEmployees.includes(emp)) {
+          if (isFixedStaffOffDate(date, isoDate)) {
+            activeSeedRows[emp][isoDate] = 'OFF';
+          } else {
+            activeSeedRows[emp][isoDate] = getIsoWeekNumber(date) % 2 === 1 ? 'M' : 'A';
+          }
+        } else {
+          activeSeedRows[emp][isoDate] = 'OFF';
+        }
+      }
+    }
+
+    const proposal = calculateAbsReadjustments(
+      activeSeedRows,
+      dateColumns,
+      roster,
+      targetYear,
+      targetMonth,
+      targetWorkingDays,
+      seed
+    );
+
+    const finalRows: Record<string, Record<string, string>> = {};
+    for (const emp of allEmployees) {
+      if (excludedSet.has(emp)) {
+        finalRows[emp] = {};
+        for (const { isoDate } of dateColumns) {
+          finalRows[emp][isoDate] = 'OFF';
+        }
+      } else {
+        finalRows[emp] = proposal.updatedRows[emp] ?? activeSeedRows[emp];
+      }
+    }
+
+    const finalTier: ComplianceTier = proposal.tier ?? 0;
+    const finalRelax: RelaxationRecord[] = proposal.relaxations ?? [];
+    const finalValidation = validateScheduleCompliance(
+      finalRows,
+      dateColumns,
+      roster,
+      targetYear,
+      targetMonth,
+      targetWorkingDays,
+      options.excludedEmployees ?? [],
+      { tier: finalTier, relaxations: finalRelax }
+    );
+
+    return {
+      month: targetMonth,
+      year: targetYear,
+      daysCount,
+      targetWorkingDays,
+      dateColumns,
+      rows: finalRows,
+      validation: finalValidation,
+      seed,
+      excludedEmployees: options.excludedEmployees ?? [],
+      tier: finalTier,
+      relaxations: finalRelax,
+      needsManualReview: !finalValidation.isFullyCompliant,
+      elapsedMs: Math.round(performance.now() - startTimeMs)
+    };
+  }
 
   // Balanced 1:1:1 templates with 4-day blocks and 2-day rests across 18-day coprime cycles
   // Strict cyclic direction: A -> M -> N -> A (Afternoon -> Morning -> Night -> Afternoon)
