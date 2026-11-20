@@ -503,7 +503,7 @@ export default function ScheduleBuilderTab({
   }, [initialSchedule, roster, hasUserNavigated]);
 
   const [isGenerating, setIsGenerating] = useState(false);
-  const [scheduleGenEnabled, setScheduleGenEnabled] = useState<boolean>(true);
+  const [scheduleGenEnabled, setScheduleGenEnabled] = useState<boolean>(false);
   const skipInitialGenerationRef = useRef(Boolean(initialSchedule));
 
   const buildBlankSchedule = useCallback(
