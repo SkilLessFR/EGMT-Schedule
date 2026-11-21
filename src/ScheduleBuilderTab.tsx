@@ -42,6 +42,7 @@ import {
   type ReadjustmentProposal
 } from './schedule';
 import { shiftKey, shiftColors, shiftSolid, initials, GLASS_CARD } from './scheduleUtils';
+import { getTierConfig } from './relaxation';
 import { mergeRosters } from './parser';
 
 export const RELAXED_CELL_RING_CLASS =
@@ -97,7 +98,7 @@ export function resolveScheduleComplianceState(
         : 'Needs manager review';
 
   const hasNightOver2Relaxation = relaxations.some((r) => r.rule === 'NIGHT_OVER_2');
-  const isNightTargetRelaxed = tier >= 1 || hasNightOver2Relaxation;
+  const isNightTargetRelaxed = getTierConfig(tier).allowNightOver2 || hasNightOver2Relaxation;
   const relaxedNightTargetLabel = isNightTargetRelaxed ? 'N = 2 (3 relaxed)' : 'N = 2';
 
   return {
@@ -1398,7 +1399,7 @@ export default function ScheduleBuilderTab({
           <span className="hidden xl:inline text-[12px] text-zinc-400 dark:text-zinc-500 pl-2">
             {isHistorical
               ? 'Archived Monthly Roster Record'
-              : 'Blocks of 3–5 days (2 in Tier 2) • Rest 2–3 days'}
+              : 'Blocks of 3–5 days (2 in Tier 2) • Rest 2–3 days (1 in Tier 1+)'}
           </span>
         </div>
 

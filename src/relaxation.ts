@@ -41,13 +41,13 @@ const TIER_CONFIGS: Record<ComplianceTier, TierConfig> = {
     allowShortBlock2: false,
     allowNightOver2: false,
     allowCoverageGapMA: false,
-    budgetShare: 0.50,
+    budgetShare: 0.45,
   },
   1: {
     tier: 1,
-    minRest: 2,
+    minRest: 1,
     allowShortBlock2: false,
-    allowNightOver2: true,
+    allowNightOver2: false,
     allowCoverageGapMA: false,
     budgetShare: 0.25,
   },
@@ -57,7 +57,7 @@ const TIER_CONFIGS: Record<ComplianceTier, TierConfig> = {
     allowShortBlock2: true,
     allowNightOver2: true,
     allowCoverageGapMA: false,
-    budgetShare: 0.15,
+    budgetShare: 0.20,
   },
   3: {
     tier: 3,
@@ -97,8 +97,8 @@ export function isCoverageFeasibleForTier(
 
 /**
  * Computes tier-aware daily coverage penalty for Stage 3 / Section 5 DP + SA solvers.
- * - Tier 0: enforces rotM >= 1, totalA >= 2, n === 2.
- * - Tier 1 & Tier 2: allows n === 3 with soft penalty; n < 2 or n > 3 receive heavy hard penalty.
+ * - Tier 0 & Tier 1: enforce rotM >= 1, totalA >= 2, n === 2 (Tier 1 allows 1-day non-Night rest).
+ * - Tier 2: allows n === 3 with soft penalty; n < 2 or n > 3 receive heavy hard penalty.
  * - Tier 3: allows rotM === 0 or totalA === 1 with high penalty; never allows totalA === 0, n < 2, or n > 3.
  */
 export function tierCovPenalty(
@@ -113,7 +113,7 @@ export function tierCovPenalty(
     (rotM > 1 ? 10 * (rotM - 1) + (rotM > 2 ? 25 * (rotM - 2) : 0) : 0) +
     (totalA > 2 ? 10 * (totalA - 2) + (totalA > 3 ? 25 * (totalA - 3) : 0) : 0);
 
-  if (tier === 0) {
+  if (!cfg.allowNightOver2 && !cfg.allowCoverageGapMA) {
     const hard =
       (rotM < 1 ? 1500 * dayWeight * (1 - rotM) : 0) +
       (totalA < 2 ? 1500 * dayWeight * (2 - totalA) : 0) +

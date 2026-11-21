@@ -180,10 +180,10 @@ export function validateScheduleCompliance(
     } else if (c.N === 3) {
       if (tierConfig.allowNightOver2) {
         options?.relaxations?.push({
-          tier: 1,
+          tier: 2,
           rule: 'NIGHT_OVER_2',
           isoDate,
-          note: `Night overstaffed on ${isoDate}: N=3 (Tier 0 requires 2)`,
+          note: `Night overstaffed on ${isoDate}: N=3 (Tier 0–1 requires 2)`,
         });
       } else {
         dayWarnings.push(`Night overstaffed (${c.N}/2 maximum)`);
@@ -541,7 +541,7 @@ export function validateScheduleCompliance(
         }
       }
 
-      // Tier 0 & Tier 2: 1-day pure-OFF rest between non-Night blocks (SHORT_REST_1)
+      // Tier 0 vs Tier 1+: 1-day pure-OFF rest between non-Night blocks (SHORT_REST_1)
       for (let b = 1; b < workBlocks.length; b++) {
         const prev = workBlocks[b - 1];
         const cur = workBlocks[b];
@@ -552,7 +552,7 @@ export function validateScheduleCompliance(
           const note = `${emp} has 1-day OFF rest on ${isoAt(prev.end + 1)} between ${prev.primaryShift} and ${cur.primaryShift}`;
           if (tierConfig.minRest <= 1) {
             options?.relaxations?.push({
-              tier: 2,
+              tier: 1,
               rule: 'SHORT_REST_1',
               isoDate: restIso,
               employee: emp,

@@ -1129,7 +1129,8 @@ export function calculateAbsReadjustments(
       if (!isCoverageFeasibleForTier(m, a, n, tier)) {
         return tierCovPenalty(m, a, n, 100, tier);
       }
-      return (tier >= 1 && n === 3 ? 5000 : 0) + (tier >= 3 && (m === 0 || a === 1) ? 15000 : 0);
+      const cfg = getTierConfig(tier);
+      return (cfg.allowNightOver2 && n === 3 ? 5000 : 0) + (cfg.allowCoverageGapMA && (m === 0 || a === 1) ? 15000 : 0);
     };
 
     // mode: 0 = gentle minimal-edit Phase A1, 1 = deep Stage-3 FastSA Phase A2, 2 = strict minimal-diff Phase B
@@ -1507,10 +1508,10 @@ export function calculateAbsReadjustments(
       const tier = absTiers[ti];
       const cfg = getTierConfig(tier);
       const remBudgetMs = Math.max(0, s5DeadlineMs - nowMs);
-      const s5Share = tier === 0 ? 0.25 : tier === 1 ? 0.15 : tier === 2 ? 0.40 : 0.20;
+      const s5Share = tier === 0 ? 0.25 : tier === 1 ? 0.30 : tier === 2 ? 0.25 : 0.20;
       const remShares = absTiers
         .slice(ti)
-        .reduce((sum, t) => sum + (t === 0 ? 0.25 : t === 1 ? 0.15 : t === 2 ? 0.40 : 0.20), 0);
+        .reduce((sum, t) => sum + (t === 0 ? 0.25 : t === 1 ? 0.30 : t === 2 ? 0.25 : 0.20), 0);
       const tierAllocMs = remShares > 0 ? (remBudgetMs * s5Share) / remShares : remBudgetMs;
       let tierDeadlineMs = Math.min(s5DeadlineMs, nowMs + tierAllocMs);
 

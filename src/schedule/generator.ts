@@ -1422,7 +1422,7 @@ export function generateBalancedSchedule(
       const canSeedStage2 =
         priorBestPaths.length === R &&
         priorBestPaths.every((p, idx) => isStage3PathValid(dags[idx], p));
-      const numRestarts = tier === 0 ? 6 : tier === 1 ? 3 : 10;
+      const numRestarts = tier === 0 ? 6 : tier === 1 ? 6 : 10;
       let compliantRestarts = 0;
       let tierBestWinner: {
         rows: Record<string, Record<string, string>>;
